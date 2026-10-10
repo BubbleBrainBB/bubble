@@ -2685,10 +2685,10 @@ export function ProjectTreePanel({
   // fullscreen so the panel collapses back to its rail width instead of sitting
   // expanded with just the file tree.
   useEffect(() => {
-    if (isFullscreen && !selectedFilePath) {
+    if (isFullscreen && fileTabsHydrated && !selectedFilePath) {
       onToggleFullscreenRef.current?.();
     }
-  }, [isFullscreen, selectedFilePath]);
+  }, [fileTabsHydrated, isFullscreen, selectedFilePath]);
 
   const handlePanelResizeStart = (event: React.MouseEvent) => {
     event.preventDefault();

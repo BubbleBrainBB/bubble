@@ -194,7 +194,29 @@ function testEmptySessionKeepsPanelCollapsed() {
   assert.equal(fields.browserPanelOpen, false);
 }
 
+function testFullViewSurvivesSessionRoundTrip() {
+  for (const [tab, kind] of [['files:doc', 'files'], ['browser', 'browser'], ['review', 'review']] as const) {
+    const sessions = { a: {}, b: {} };
+    const away = switchSessionRightPanel({
+      prevSessionId: 'a',
+      nextSessionId: 'b',
+      live: live({ rightUtilityTabs: [tab], activeRightUtilityTab: tab, rightPanelFullscreen: kind }),
+      rightPanelBySessionId: {},
+      sessions,
+    });
+    const back = switchSessionRightPanel({
+      prevSessionId: 'b',
+      nextSessionId: 'a',
+      live: away,
+      rightPanelBySessionId: away.rightPanelBySessionId,
+      sessions,
+    });
+    assert.equal(back.rightPanelFullscreen, kind, `${kind} full view must survive leaving and re-entering a session`);
+  }
+}
+
 function main() {
+  testFullViewSurvivesSessionRoundTrip();
   const design = persistRightPanelBySessionId({ a: snapshot({ tabs: ['design', 'design:canvas-a'], activeTab: 'design:canvas-a', fullscreen: 'design' }) });
   assert.deepEqual(design.a.tabs, ['design', 'design:canvas-a']);
   assert.equal(design.a.activeTab, 'design:canvas-a');
@@ -229,6 +251,11 @@ async function assertWiring() {
     'switching sessions must dismiss the right-panel launcher so an empty session stays collapsed'
   );
   assert.match(treePanelSource, /syncSessionFileTabs\(/);
+  assert.match(
+    treePanelSource,
+    /if \(isFullscreen && fileTabsHydrated && !selectedFilePath\)/,
+    'a remounted Files panel must restore its document before deciding full view has nothing to show'
+  );
   assert.match(
     treePanelSource,
     /prevTreeResetCwdRef[\s\S]{0,400}setExpandedPaths\(new Set\(\)\)/,
