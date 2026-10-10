@@ -2790,7 +2790,7 @@ button.aegis-mdx-metadata-key:hover {
 .aegis-cm-heading-line.level-5,
 .aegis-cm-heading-line.level-6 {
   padding: 1.25rem 0 0.45rem;
-  font-size: calc(15px * var(--ui-font-scale, 1));
+  font-size: calc(17px * var(--ui-font-scale, 1));
   line-height: 1.45;
   font-weight: 600;
 }

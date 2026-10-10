@@ -45,8 +45,8 @@ html .aegis-project-panel .highlighted-code-block,
 html .markdown-content .highlighted-code-content,
 html .markdown-content .highlighted-code-lines,
 html .markdown-content .md-inline-code,
-html .aegis-md-editor .cm-content,
-html .aegis-md-editor .cm-gutters {
+html .aegis-md-editor.is-source-mode .cm-content,
+html .aegis-md-editor.is-source-mode .cm-gutters {
   font-size: var(--code-font-size, 12px) !important;
 }
 html .aegis-project-panel .highlighted-code-block :is(div, span, pre, code),

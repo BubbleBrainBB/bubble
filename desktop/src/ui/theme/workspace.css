@@ -298,6 +298,7 @@
 
 /* Markdown live preview keeps prose and editable source in one EditorView. */
 .bubble-md-live { --aegis-md-page-width: 100%; --aegis-md-page-padding-x: 16px; --aegis-md-prose-font-size: calc(14px * var(--ui-font-scale, 1)); }
+.aegis-md-editor.bubble-md-live { --aegis-md-prose-font-size: calc(16px * var(--ui-font-scale, 1)); --aegis-md-prose-line-height: 1.8; }
 .bubble-md-live .aegis-md-codemirror-root .cm-activeLine { background: transparent; }
 .bubble-md-live .cm-cursor { border-left-width: 2px; }
 .bubble-md-live .bubble-md-list-line { padding-left: 12px; }
