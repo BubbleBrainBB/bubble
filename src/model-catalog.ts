@@ -129,6 +129,9 @@ const ANTHROPIC_CHAT_LEVELS: ReasoningEffort[] = ["off"];
 // Grok 4.5 exposes low/medium/high effort with no "off" (thinking always on);
 // the composer model declares no effort support at all.
 const GROK_45_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
+// Gemini 4 documents only low/medium (default)/high. Verified live on
+// 2026-10-13: thinkingLevel=minimal returns 400, so there is no off/minimal.
+const GEMINI_4_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_3_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_3_FLASH_LEVELS: ReasoningEffort[] = ["minimal", "low", "medium", "high"];
 // Verified against the native API on 2026-09-02: Gemini 3.7/3.8 Flash reject
@@ -197,6 +200,9 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   // list via fetchGeminiModels (GET /v1beta/models, newest five). Gemini 3
   // thinking support varies by release: 3.7/3.8 Flash support off/low/medium/high
   // while older Flash releases expose minimal/low/medium/high.
+  // Gemini 4 Argon: 1,048,576-token window shared by input, thinking and output.
+  // https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+  { id: "gemini-4-argon", name: "Gemini 4 Argon", providerId: "google", tier: "strong", reasoningLevels: GEMINI_4_LEVELS, defaultReasoningLevel: "medium", contextWindow: 1048576 },
   { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_37_38_FLASH_LEVELS, contextWindow: 1048576 },
   { id: "gemini-3.7-flash", name: "Gemini 3.7 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_37_38_FLASH_LEVELS, contextWindow: 1048576 },
   { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_3_FLASH_LEVELS, contextWindow: 1048576 },

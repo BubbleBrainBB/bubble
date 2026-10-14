@@ -217,7 +217,7 @@ function buildCallOptions(
 }
 
 /**
- * Gemini 3 models take a graded thinking_level; 2.5-era models take a token
+ * Gemini 3+ models take a graded thinking_level; 2.5-era models take a token
  * budget. "off" (budget 0) is only offered in the catalog for models that
  * accept it (2.5 Flash); xhigh/max/ultra clamp to high.
  */
@@ -226,9 +226,14 @@ function buildGoogleThinkingOptions(
   level: ThinkingLevel | undefined,
 ): Record<string, unknown> | undefined {
   if (!level) return undefined;
+  const version = geminiVersion(modelId);
+  // Gemini 4 accepts only low/medium/high: MINIMAL is a 400 and thinkingBudget
+  // is undocumented. Side calls (titles, compaction) request "off" by default,
+  // so floor those at low rather than sending a value the API rejects.
+  if (version >= 4 && (level === "off" || level === "minimal")) level = "low";
   if (level === "off") return { thinkingConfig: { thinkingBudget: 0 } };
   const clamped = level === "xhigh" || level === "max" || level === "ultra" ? "high" : level;
-  if (modelId.includes("gemini-3")) {
+  if (version >= 3) {
     return { thinkingConfig: { thinkingLevel: clamped, includeThoughts: true } };
   }
   const budgets: Record<string, number> = { minimal: 512, low: 2048, medium: 8192, high: 24576 };
@@ -594,7 +599,8 @@ export async function fetchGeminiModels(options: {
 
 /**
  * Ranking: one entry per (version, tier) family — GA ids beat dated previews —
- * then newest version first, pro before flash before flash-lite, top N.
+ * then newest version first, flagship (pro/argon) before flash before
+ * flash-lite, top N.
  */
 export function selectLatestGeminiModels(
   entries: GeminiModelListEntry[],
@@ -604,24 +610,29 @@ export function selectLatestGeminiModels(
     id: string;
     entry: GeminiModelListEntry;
     version: number;
+    tier: string;
     tierRank: number;
     isPreview: boolean;
   }
 
-  const TIER_RANK: Record<string, number> = { pro: 0, flash: 1, "flash-lite": 2 };
+  // Gemini 4 introduced named flagship tiers (gemini-4-argon). Unknown names
+  // stay excluded rather than guessing whether they are text models.
+  const TIER_RANK: Record<string, number> = { argon: 0, pro: 0, flash: 1, "flash-lite": 2 };
   const candidates: Candidate[] = [];
   for (const entry of entries) {
     const id = (entry.name ?? "").replace(/^models\//, "");
     if (!id.startsWith("gemini-")) continue;
     if (GEMINI_MODEL_EXCLUDE.test(id)) continue;
     if (entry.supportedGenerationMethods && !entry.supportedGenerationMethods.includes("generateContent")) continue;
-    const match = /^gemini-(\d+(?:\.\d+)?)-(pro|flash)(-lite)?/.exec(id);
+    const match = /^gemini-(\d+(?:\.\d+)?)-(argon|pro|flash)(-lite)?/.exec(id);
     if (!match) continue;
+    const tier = `${match[2]}${match[3] ?? ""}`;
     candidates.push({
       id,
       entry,
       version: Number.parseFloat(match[1]),
-      tierRank: TIER_RANK[`${match[2]}${match[3] ?? ""}`] ?? 3,
+      tier,
+      tierRank: TIER_RANK[tier] ?? 3,
       isPreview: id.includes("preview") || id.includes("exp"),
     });
   }
@@ -629,7 +640,7 @@ export function selectLatestGeminiModels(
   // One winner per family: GA over preview, then the shortest (least-suffixed) id.
   const families = new Map<string, Candidate>();
   for (const candidate of candidates) {
-    const key = `${candidate.version}-${candidate.tierRank}`;
+    const key = `${candidate.version}-${candidate.tier}`;
     const current = families.get(key);
     if (
       !current
@@ -648,14 +659,20 @@ export function selectLatestGeminiModels(
       name: candidate.entry.displayName || candidate.id,
       contextWindow: Number.isFinite(candidate.entry.inputTokenLimit) ? candidate.entry.inputTokenLimit : undefined,
       reasoningLevels: geminiReasoningLevels(candidate.id),
-      ...(candidate.tierRank === 0 ? { defaultReasoningLevel: "high" as ReasoningEffort } : {}),
+      // Argon defaults to Google's recommended medium via the catalog.
+      ...(candidate.tier === "pro" ? { defaultReasoningLevel: "high" as ReasoningEffort } : {}),
     }));
+}
+
+function geminiVersion(modelId: string): number {
+  return Number.parseFloat(/^gemini-(\d+(?:\.\d+)?)/.exec(modelId)?.[1] ?? "0");
 }
 
 /** Mirrors the static catalog's per-family thinking support. */
 export function geminiReasoningLevels(modelId: string): ReasoningEffort[] {
-  const version = Number.parseFloat(/^gemini-(\d+(?:\.\d+)?)/.exec(modelId)?.[1] ?? "0");
+  const version = geminiVersion(modelId);
   const isPro = modelId.includes("-pro");
+  if (version >= 4) return ["low", "medium", "high"];
   // Live probes show 3.7 and 3.8 Flash share this newer ladder. Keep the
   // exception bounded to verified releases instead of guessing for 3.9+.
   if (!isPro && (version === 3.7 || version === 3.8)) {

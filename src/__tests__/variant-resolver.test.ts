@@ -290,4 +290,13 @@ describe("variant resolver", () => {
     expect(getAvailableThinkingLevels("anthropic", "claude-sonnet-4-6")).toEqual(["off", "low", "medium", "high", "max"]);
     expect(getDefaultThinkingLevel("anthropic", "claude-sonnet-4-6")).toBe("high");
   });
+
+  it("includes Gemini 4 Argon with Google's documented thinking contract", () => {
+    expect(listBuiltinModels("google")[0]?.id).toBe("gemini-4-argon");
+    expect(getBuiltinModel("google", "gemini-4-argon")).toMatchObject({ name: "Gemini 4 Argon", tier: "strong" });
+    expect(getAvailableThinkingLevels("google", "gemini-4-argon")).toEqual(["low", "medium", "high"]);
+    expect(getDefaultThinkingLevel("google", "gemini-4-argon")).toBe("medium");
+    expect(normalizeThinkingLevel("off", getAvailableThinkingLevels("google", "gemini-4-argon"))).toBe("low");
+    expect(getModelContextWindow("google", "gemini-4-argon")).toBe(1048576);
+  });
 });

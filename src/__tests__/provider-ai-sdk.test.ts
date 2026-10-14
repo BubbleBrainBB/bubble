@@ -278,6 +278,20 @@ describe("ai-sdk provider request building", () => {
     const off = await captureBody(USER_MESSAGES, { model: "gemini-2.5-flash", thinkingLevel: "off" });
     expect(off.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });
   });
+
+  it("sends thinking_level to Gemini 4 and never a budget or MINIMAL", async () => {
+    for (const level of ["low", "medium", "high"] as const) {
+      const body = await captureBody(USER_MESSAGES, { model: "gemini-4-argon", thinkingLevel: level });
+      expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: level, includeThoughts: true });
+    }
+    const max = await captureBody(USER_MESSAGES, { model: "gemini-4-argon", thinkingLevel: "max" });
+    expect(max.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "high", includeThoughts: true });
+    // Side calls (titles, compaction) request "off"; Gemini 4 has no off switch.
+    for (const level of ["off", "minimal"] as const) {
+      const body = await captureBody(USER_MESSAGES, { model: "gemini-4-argon", thinkingLevel: level });
+      expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low", includeThoughts: true });
+    }
+  });
 });
 
 describe("ai-sdk provider complete()", () => {
@@ -292,6 +306,20 @@ describe("ai-sdk provider complete()", () => {
 
     await expect(provider.complete([{ role: "user", content: "hi" }], { model: "gemini-2.5-flash" }))
       .resolves.toBe("Hello world");
+  });
+
+  it("does not send thinkingBudget 0 to Gemini 4 for default side calls", async () => {
+    let body: Record<string, any> = {};
+    const provider = makeProvider(async (_url, init) => {
+      body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: "Title" }], role: "model" }, finishReason: "STOP" }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    await expect(provider.complete([{ role: "user", content: "hi" }], { model: "gemini-4-argon" }))
+      .resolves.toBe("Title");
+    expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low", includeThoughts: true });
   });
 });
 
@@ -332,6 +360,31 @@ describe("Gemini model discovery", () => {
     expect(models[1].defaultReasoningLevel).toBe("high");
   });
 
+  it("keeps named-tier Gemini 4 Argon and ranks it first with Google's medium default", () => {
+    const models = selectLatestGeminiModels([
+      entry("gemini-3.8-flash"),
+      entry("gemini-3.6-flash"),
+      entry("gemini-3.5-flash"),
+      entry("gemini-3.5-flash-lite"),
+      entry("gemini-3.1-pro-preview"),
+      entry("gemini-4-argon", { displayName: "Gemini 4 Argon", outputTokenLimit: 32768 }),
+    ]);
+
+    expect(models.map((m) => m.id)).toEqual([
+      "gemini-4-argon",
+      "gemini-3.8-flash",
+      "gemini-3.6-flash",
+      "gemini-3.5-flash",
+      "gemini-3.5-flash-lite",
+    ]);
+    expect(models[0]).toEqual({
+      id: "gemini-4-argon",
+      name: "Gemini 4 Argon",
+      contextWindow: 1048576,
+      reasoningLevels: ["low", "medium", "high"],
+    });
+  });
+
   it("prefers GA ids over dated previews within a family", () => {
     const models = selectLatestGeminiModels([
       entry("gemini-2.5-flash-preview-09-2025"),
@@ -341,6 +394,7 @@ describe("Gemini model discovery", () => {
   });
 
   it("derives reasoning levels by family", () => {
+    expect(geminiReasoningLevels("gemini-4-argon")).toEqual(["low", "medium", "high"]);
     expect(geminiReasoningLevels("gemini-3.8-flash")).toEqual(["off", "low", "medium", "high"]);
     expect(geminiReasoningLevels("gemini-3.7-flash")).toEqual(["off", "low", "medium", "high"]);
     expect(geminiReasoningLevels("gemini-3.5-flash")).toEqual(["minimal", "low", "medium", "high"]);

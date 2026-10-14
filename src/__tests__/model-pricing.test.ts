@@ -151,6 +151,19 @@ describe("model pricing", () => {
     }
   });
 
+  it("prices Gemini 4 Argon across the introductory-price boundary", () => {
+    const usage = {
+      promptTokens: 1_000_000,
+      promptCacheHitTokens: 250_000,
+      promptCacheMissTokens: 750_000,
+      completionTokens: 1_000_000,
+    };
+    expect(calculateUsageCost("google", "gemini-4-argon", usage, new Date("2026-11-30T23:59:59Z")))
+      .toEqual({ currency: "USD", cost: 0.25 * 0.1 + 0.75 * 2 + 10, estimated: false });
+    expect(calculateUsageCost("google", "gemini-4-argon", usage, new Date("2026-12-01T00:00:00Z")))
+      .toEqual({ currency: "USD", cost: 0.25 * 0.2 + 0.75 * 4 + 20, estimated: false });
+  });
+
   it("calculates DeepSeek cache-aware cost", () => {
     const result = calculateUsageCost("deepseek", "deepseek-v4-pro", {
       promptTokens: 1_000_000,

@@ -115,6 +115,23 @@ export const MODEL_PRICING_OVERRIDES: ModelPricing[] = [
       outputPerMillion: 7.5,
     },
   })),
+  // Gemini 4 Argon introductory pricing through 2026-11-30; standard rates from
+  // 2026-12-01. Implicit caching only (95% off input), so no cache-write rate.
+  // https://ai.google.dev/gemini-api/docs/pricing
+  {
+    providerId: "google",
+    modelId: "gemini-4-argon",
+    currency: "USD",
+    inputCacheHitPerMillion: 0.1,
+    inputCacheMissPerMillion: 2,
+    outputPerMillion: 10,
+    effectiveUntil: "2026-12-01T00:00:00Z",
+    original: {
+      inputCacheHitPerMillion: 0.2,
+      inputCacheMissPerMillion: 4,
+      outputPerMillion: 20,
+    },
+  },
   {
     providerId: "deepseek",
     modelId: "deepseek-flash",
