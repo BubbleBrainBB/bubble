@@ -19,6 +19,7 @@ import {
 } from "../provider-registry.js";
 import {
   getAvailableThinkingLevels,
+  isThinkingOnlyLevels,
   isThinkingToggleModel,
   normalizeThinkingLevel,
 } from "../provider-transform.js";
@@ -193,9 +194,14 @@ export function buildModelAutocompleteItems(
   for (const selection of selections) {
     const { provider, model, value, levels } = selection;
     const label = model.name || model.id;
-    const description = label === model.id
-      ? provider.name
-      : `${provider.name} · ${model.id}`;
+    // A model with one fixed grade skips the effort step, so name the grade
+    // here or the user never learns which effort it runs at.
+    const fixedEffort = levels.length === 1 && levels[0] !== "off" && !isThinkingOnlyLevels(levels)
+      ? `${levels[0]} effort`
+      : undefined;
+    const description = [provider.name, label === model.id ? undefined : model.id, fixedEffort]
+      .filter(Boolean)
+      .join(" · ");
     const searchable = `${value} ${label} ${description}`.toLowerCase();
     if (query && !searchable.includes(query)) continue;
 

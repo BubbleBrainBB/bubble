@@ -644,6 +644,13 @@ describe("pi-tui welcome banner", () => {
   it("formats ordinary reasoning effort as part of the model unit", () => {
     expect(formatWelcomeModel(data)).toBe("deepseek-v4-pro with max effort · deepseek");
   });
+
+  it("shows a fixed effort grade but hides the always-thinking placeholder", () => {
+    expect(formatWelcomeModel({ model: "kimi/kimi-k3.1-pro", provider: "alibaba", thinking: "max" }))
+      .toBe("kimi/kimi-k3.1-pro with max effort · alibaba");
+    expect(formatWelcomeModel({ model: "kimi-k2.7-code", provider: "alibaba", thinking: "medium" }))
+      .toBe("kimi-k2.7-code · thinking mode · alibaba");
+  });
 });
 
 describe("transcript markdown pipeline", () => {

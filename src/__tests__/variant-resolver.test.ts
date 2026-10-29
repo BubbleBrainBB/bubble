@@ -145,6 +145,8 @@ describe("variant resolver", () => {
     expect(listBuiltinModels("kimi-for-coding").map((model) => model.id)).toEqual([
       "k3",
       "k3-256k",
+      "k3.1-pro",
+      "k3.1-pro-highspeed",
       "kimi-for-coding",
       "kimi-for-coding-highspeed",
       "kimi-k2.7-code",
@@ -168,14 +170,42 @@ describe("variant resolver", () => {
     expect(getAvailableThinkingLevels("moonshot-cn", "kimi-k3")).toEqual(["off", "low", "high", "max"]);
   });
 
-  it("includes Alibaba DashScope qwen models", () => {
+  it("keeps K3.1 Pro on effort grades with no off switch", () => {
+    // The endpoint reports reasoning.type "only" and 400s on thinking disabled.
+    for (const [providerId, modelId] of [
+      ["kimi-for-coding", "k3.1-pro"],
+      ["kimi-for-coding", "k3.1-pro-highspeed"],
+      ["moonshot-cn", "kimi-k3.1-pro"],
+      ["moonshot-intl", "kimi-k3.1-pro-highspeed"],
+    ] as const) {
+      expect(getAvailableThinkingLevels(providerId, modelId)).toEqual(["low", "high", "max"]);
+    }
+  });
+
+  it("includes Alibaba DashScope qwen and Kimi models", () => {
     expect(getBuiltinProvider("alibaba")).toMatchObject({
       baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     });
     expect(listBuiltinModels("alibaba").map((model) => model.id)).toEqual([
       "qwen3.6-plus",
       "qwen3.7-max",
+      "kimi-k3",
+      "kimi-k2.7-code",
+      "kimi-k2.6",
+      "kimi-k2.5",
+      "kimi/kimi-k3.1-pro",
+      "kimi/kimi-k3.1-pro-highspeed",
+      "kimi/kimi-k3",
+      "kimi/kimi-k2.7-code",
+      "kimi/kimi-k2.7-code-highspeed",
+      "kimi/kimi-k2.6",
     ]);
+    expect(getAvailableThinkingLevels("alibaba", "kimi-k3")).toEqual(["off", "low", "high", "max"]);
+    expect(getAvailableThinkingLevels("alibaba", "kimi/kimi-k3.1-pro")).toEqual(["max"]);
+    expect(getAvailableThinkingLevels("alibaba", "kimi/kimi-k3")).toEqual(["max"]);
+    expect(isThinkingOnlyModel("alibaba", "kimi/kimi-k3.1-pro")).toBe(false);
+    expect(isThinkingToggleModel("alibaba", "kimi-k2.6")).toBe(true);
+    expect(isThinkingOnlyModel("alibaba", "kimi-k2.7-code")).toBe(true);
     expect(getAvailableThinkingLevels("alibaba", "qwen3.7-max")).toEqual(["off"]);
     expect(getModelContextWindow("alibaba", "qwen3.6-plus")).toBe(1048576);
     expect(getModelContextWindow("alibaba", "qwen3.7-max")).toBe(1048576);
