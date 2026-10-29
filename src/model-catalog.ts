@@ -103,8 +103,16 @@ const KIMI_THINKING_ONLY_LEVELS: ReasoningEffort[] = ["medium"];
 // verified against the live endpoint: low spent 92 reasoning tokens on a task
 // where high spent 1310. Thinking is disableable on k3 (thinking.type
 // "disabled"); the 256k variant exposes effort only, so it has no "off".
+// K3.1 Pro (and its highspeed slot) is effort-only too: GET /coding/v1/models
+// reports reasoning.type "only" and the endpoint 400s on thinking disabled.
+// The default of "high" is Bubble's choice and matches the coding endpoint's
+// reported default; Moonshot's open platform defaults to max server-side.
 const KIMI_K3_LEVELS: ReasoningEffort[] = ["off", "low", "high", "max"];
 const KIMI_K3_EFFORT_ONLY_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
+// DashScope's Moonshot passthrough (kimi/ ids) documents K3 as thinking-only
+// with reasoning_effort "max" as its sole value. Not live-verified: the probing
+// account has the passthrough product disabled.
+const KIMI_PASSTHROUGH_K3_LEVELS: ReasoningEffort[] = ["max"];
 // DeepSeek V4 defaults to thinking/high, but the OpenAI-compatible API also
 // supports disabling thinking and selecting low/high/max effort explicitly.
 const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["off", "low", "high", "max"];
@@ -236,6 +244,20 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "qwen3.6-plus", name: "Qwen3.6 Plus", providerId: "alibaba", tier: "balanced", reasoningLevels: ["off"], contextWindow: 1048576 },
   { id: "qwen3.7-max", name: "Qwen3.7 Max", providerId: "alibaba", tier: "strong", reasoningLevels: ["off"], contextWindow: 1048576 },
+  // DashScope Kimi, first-party ids (probed 2026-10-26: kimi-k3 tiers track
+  // upstream, k2.5/k2.6 default to thinking off, K2.7 Code always thinks).
+  { id: "kimi-k3", name: "Kimi K3", providerId: "alibaba", tier: "strong", reasoningLevels: KIMI_K3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "alibaba", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
+  { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "alibaba", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
+  { id: "kimi-k2.5", name: "Kimi K2.5", providerId: "alibaba", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
+  // Moonshot passthrough ids, per DashScope's Kimi doc: K3 is max-only, K2.7
+  // Code always thinks, K2.6 toggles via enable_thinking.
+  { id: "kimi/kimi-k3.1-pro", name: "Kimi K3.1 Pro", providerId: "alibaba", tier: "strong", reasoningLevels: KIMI_PASSTHROUGH_K3_LEVELS, defaultReasoningLevel: "max", contextWindow: 1048576 },
+  { id: "kimi/kimi-k3.1-pro-highspeed", name: "Kimi K3.1 Pro Highspeed", providerId: "alibaba", tier: "fast", reasoningLevels: KIMI_PASSTHROUGH_K3_LEVELS, defaultReasoningLevel: "max", contextWindow: 1048576 },
+  { id: "kimi/kimi-k3", name: "Kimi K3 (Moonshot)", providerId: "alibaba", tier: "strong", reasoningLevels: KIMI_PASSTHROUGH_K3_LEVELS, defaultReasoningLevel: "max", contextWindow: 1048576 },
+  { id: "kimi/kimi-k2.7-code", name: "Kimi K2.7 Code (Moonshot)", providerId: "alibaba", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
+  { id: "kimi/kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "alibaba", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
+  { id: "kimi/kimi-k2.6", name: "Kimi K2.6 (Moonshot)", providerId: "alibaba", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   // Bailian token plan (GET /models on the plan endpoint, probed 2026-08-04).
   // Image/TTS entries from that list are omitted — this is a text agent.
   { id: "qwen3.8-max", name: "Qwen3.8 Max", providerId: "bailian-token-plan", tier: "strong", reasoningLevels: BAILIAN_FULL_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
@@ -268,17 +290,24 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "moonshot-cn", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "moonshot-cn", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k3", name: "Kimi K3", providerId: "moonshot-cn", tier: "strong", reasoningLevels: KIMI_K3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "kimi-k3.1-pro", name: "Kimi K3.1 Pro", providerId: "moonshot-cn", tier: "strong", reasoningLevels: KIMI_K3_EFFORT_ONLY_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "kimi-k3.1-pro-highspeed", name: "Kimi K3.1 Pro Highspeed", providerId: "moonshot-cn", tier: "fast", reasoningLevels: KIMI_K3_EFFORT_ONLY_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.5", name: "Kimi K2.5", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "moonshot-intl", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "moonshot-intl", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k3", name: "Kimi K3", providerId: "moonshot-intl", tier: "strong", reasoningLevels: KIMI_K3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "kimi-k3.1-pro", name: "Kimi K3.1 Pro", providerId: "moonshot-intl", tier: "strong", reasoningLevels: KIMI_K3_EFFORT_ONLY_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "kimi-k3.1-pro-highspeed", name: "Kimi K3.1 Pro Highspeed", providerId: "moonshot-intl", tier: "fast", reasoningLevels: KIMI_K3_EFFORT_ONLY_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "moonshot-intl", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.5", name: "Kimi K2.5", providerId: "moonshot-intl", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   // Kimi for Coding serves plan-slot ids (verified via GET /coding/v1/models):
-  // k3, k3-256k, kimi-for-coding, kimi-for-coding-highspeed.
+  // k3, k3-256k, k3.1-pro, k3.1-pro-highspeed, kimi-for-coding,
+  // kimi-for-coding-highspeed.
   { id: "k3", name: "Kimi K3", providerId: "kimi-for-coding", tier: "strong", reasoningLevels: KIMI_K3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "k3-256k", name: "Kimi K3 256K", providerId: "kimi-for-coding", tier: "strong", reasoningLevels: KIMI_K3_EFFORT_ONLY_LEVELS, defaultReasoningLevel: "high", contextWindow: 262144 },
+  { id: "k3.1-pro", name: "Kimi K3.1 Pro", providerId: "kimi-for-coding", tier: "strong", reasoningLevels: KIMI_K3_EFFORT_ONLY_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "k3.1-pro-highspeed", name: "Kimi K3.1 Pro Highspeed", providerId: "kimi-for-coding", tier: "fast", reasoningLevels: KIMI_K3_EFFORT_ONLY_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "kimi-for-coding", name: "Kimi for Coding", providerId: "kimi-for-coding", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-for-coding-highspeed", name: "Kimi for Coding Highspeed", providerId: "kimi-for-coding", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "kimi-for-coding", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },

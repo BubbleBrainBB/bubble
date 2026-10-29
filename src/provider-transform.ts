@@ -24,7 +24,17 @@ const KIMI_K27_FAMILY = new Set([
 // K3 takes OpenAI-style reasoning_effort (low/high/max, no "medium"); "off"
 // disables thinking via top-level thinking.type. Verified live: effort changes
 // reasoning-token spend, and nested extra_body.thinking is ignored server-side.
-const KIMI_K3_FAMILY = new Set(["k3", "k3-256k", "kimi-k3"]);
+// K3.1 Pro takes the same body but is thinking-only (thinking.type "disabled"
+// 400s); its catalog levels have no "off", so the disabled branch never fires.
+const KIMI_K3_FAMILY = new Set([
+  "k3",
+  "k3-256k",
+  "kimi-k3",
+  "k3.1-pro",
+  "k3.1-pro-highspeed",
+  "kimi-k3.1-pro",
+  "kimi-k3.1-pro-highspeed",
+]);
 const KIMI_TOGGLE_THINKING_FAMILY = new Set(["kimi-k2.5", "kimi-k2.6"]);
 const KIMI_K26_DEFAULT_MAX_TOKENS = 32768;
 const MINIMAX_M3_FAMILY = new Set(["MiniMax-M3"]);
@@ -34,6 +44,23 @@ const DEEPSEEK_V4_FAMILY = new Set([
   "deepseek-v4-flash-vision-exp",
   "deepseek-v4-pro",
 ]);
+
+// DashScope serves Kimi first-party ("kimi-k3") and as a Moonshot passthrough
+// under a vendor prefix ("kimi/kimi-k3.1-pro"). The two take different thinking
+// controls; the passthrough contract comes from DashScope's Kimi doc
+// (help.aliyun.com/zh/model-studio/kimi-api-by-moonshot-ai): its K3 ids accept
+// reasoning_effort "max" only, K2.6 toggles via enable_thinking, and the K2.7
+// Code ids take no thinking parameter at all.
+const ALIBABA_KIMI_PASSTHROUGH_EFFORT = new Set([
+  "kimi/kimi-k3",
+  "kimi/kimi-k3.1-pro",
+  "kimi/kimi-k3.1-pro-highspeed",
+]);
+const ALIBABA_KIMI_PASSTHROUGH_TOGGLE = new Set(["kimi/kimi-k2.6"]);
+
+function isAlibabaKimi(providerId: string, modelId: string): boolean {
+  return providerId === "alibaba" && /^(kimi\/)?kimi-/i.test(modelId);
+}
 
 function isFireworksKimi(providerId: string, modelId: string): boolean {
   const model = modelId.toLowerCase();
@@ -153,6 +180,30 @@ export function resolveProviderRequestConfig(
     };
   }
 
+  // DashScope-hosted Kimi: the server rejects any temperature but the locked
+  // one ("Parameter 'temperature'=0.2 is not supported for kimi-k3 model").
+  // First-party ids take reasoning_effort validated against DashScope's own
+  // list, where "none" disables thinking (verified on kimi-k3/k2.5/k2.6; K2.7
+  // Code stays in thinking mode whatever is sent). Passthrough ids follow the
+  // documented contract above. Models missing from the catalog get no
+  // thinking field, so a thinking-only newcomer is never switched off.
+  if (isAlibabaKimi(providerId, modelId)) {
+    let extraBody: Record<string, unknown> | undefined;
+    if (ALIBABA_KIMI_PASSTHROUGH_EFFORT.has(modelId)) {
+      extraBody = { reasoning_effort: effectiveThinkingLevel };
+    } else if (ALIBABA_KIMI_PASSTHROUGH_TOGGLE.has(modelId)) {
+      extraBody = { enable_thinking: effectiveThinkingLevel !== "off" };
+    } else if (!modelId.toLowerCase().startsWith("kimi/") && getBuiltinModel(providerId, modelId)) {
+      extraBody = { reasoning_effort: effectiveThinkingLevel === "off" ? "none" : effectiveThinkingLevel };
+    }
+    return {
+      effectiveThinkingLevel,
+      omitTemperature: true,
+      reasoningContentEcho: "tool_calls",
+      extraBody,
+    };
+  }
+
   if (providerId === "stepfun-api") {
     return { effectiveThinkingLevel, reasoningContentEcho: "none" };
   }
@@ -263,7 +314,12 @@ export function resolveProviderRequestConfig(
         },
       };
     }
-    return { effectiveThinkingLevel };
+    // Unlisted Moonshot models: every generation since K2.5 locks temperature
+    // and 400s on any other value, so let the server pick its own default.
+    // Pre-K2.5 ids (moonshot-v1, kimi-k2-*-preview) are deliberately not
+    // supported: the endpoints no longer list them, and they would merely lose
+    // the 0.2 default here rather than fail.
+    return { effectiveThinkingLevel, omitTemperature: true };
   }
 
   if (

@@ -251,12 +251,67 @@ describe("provider transform", () => {
   });
 });
 
+describe("DashScope Kimi request shape", () => {
+  it("omits temperature and sends DashScope reasoning_effort on first-party ids", () => {
+    const config = resolveProviderRequestConfig("alibaba", "kimi-k3", "high");
+    expect(config.omitTemperature).toBe(true);
+    expect(config.reasoningContentEcho).toBe("tool_calls");
+    expect(config.extraBody).toEqual({ reasoning_effort: "high" });
+  });
+
+  it("maps off to DashScope's none on first-party ids", () => {
+    expect(resolveProviderRequestConfig("alibaba", "kimi-k3", "off").extraBody)
+      .toEqual({ reasoning_effort: "none" });
+    expect(resolveProviderRequestConfig("alibaba", "kimi-k2.6", "off").extraBody)
+      .toEqual({ reasoning_effort: "none" });
+  });
+
+  it("pins passthrough K3 ids to max, the only documented effort", () => {
+    for (const modelId of ["kimi/kimi-k3", "kimi/kimi-k3.1-pro", "kimi/kimi-k3.1-pro-highspeed"]) {
+      for (const level of ["off", "low", "high", "max"] as const) {
+        const config = resolveProviderRequestConfig("alibaba", modelId, level);
+        expect(config.effectiveThinkingLevel).toBe("max");
+        expect(config.extraBody).toEqual({ reasoning_effort: "max" });
+        expect(config.omitTemperature).toBe(true);
+      }
+    }
+  });
+
+  it("toggles passthrough K2.6 with enable_thinking", () => {
+    expect(resolveProviderRequestConfig("alibaba", "kimi/kimi-k2.6", "medium").extraBody)
+      .toEqual({ enable_thinking: true });
+    expect(resolveProviderRequestConfig("alibaba", "kimi/kimi-k2.6", "off").extraBody)
+      .toEqual({ enable_thinking: false });
+  });
+
+  it("sends no thinking field to passthrough K2.7 Code", () => {
+    for (const modelId of ["kimi/kimi-k2.7-code", "kimi/kimi-k2.7-code-highspeed"]) {
+      const config = resolveProviderRequestConfig("alibaba", modelId, "medium");
+      expect(config.extraBody).toBeUndefined();
+      expect(config.omitTemperature).toBe(true);
+    }
+  });
+
+  it("sends no thinking field for uncatalogued Kimi ids but still drops temperature", () => {
+    const config = resolveProviderRequestConfig("alibaba", "kimi/kimi-k2.8-preview", "high");
+    expect(config.omitTemperature).toBe(true);
+    expect(config.extraBody).toBeUndefined();
+  });
+
+  it("leaves non-Kimi DashScope models alone", () => {
+    expect(resolveProviderRequestConfig("alibaba", "qwen3.7-max", "off").omitTemperature).toBeUndefined();
+  });
+});
+
 describe("Kimi K3 request shape", () => {
   it("sends OpenAI-style reasoning_effort for graded levels", () => {
     for (const [providerId, modelId] of [
       ["kimi-for-coding", "k3"],
       ["kimi-for-coding", "k3-256k"],
       ["moonshot-cn", "kimi-k3"],
+      ["kimi-for-coding", "k3.1-pro"],
+      ["kimi-for-coding", "k3.1-pro-highspeed"],
+      ["moonshot-cn", "kimi-k3.1-pro"],
     ] as const) {
       const config = resolveProviderRequestConfig(providerId, modelId, "max");
       // Must be the literal body field, not the OpenRouter-shaped
@@ -280,6 +335,18 @@ describe("Kimi K3 request shape", () => {
       .not.toEqual({ reasoning_effort: "medium" });
     expect(resolveProviderRequestConfig("kimi-for-coding", "k3-256k", "off").effectiveThinkingLevel)
       .not.toBe("off");
+  });
+
+  it("never disables thinking on K3.1 Pro, which rejects thinking.type disabled", () => {
+    const config = resolveProviderRequestConfig("kimi-for-coding", "k3.1-pro", "off");
+    expect(config.effectiveThinkingLevel).not.toBe("off");
+    expect(config.extraBody).toEqual({ reasoning_effort: config.effectiveThinkingLevel });
+  });
+
+  it("omits temperature for Moonshot models it does not know yet", () => {
+    // Regression: unlisted Kimi ids used to fall through with temperature 0.2
+    // and 400 ("only 1 is allowed for this model").
+    expect(resolveProviderRequestConfig("kimi-for-coding", "k9-future", "high").omitTemperature).toBe(true);
   });
 
   it("keeps coding-plan slot ids on the thinking-only K2.7 shape", () => {

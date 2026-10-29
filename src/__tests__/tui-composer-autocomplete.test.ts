@@ -316,6 +316,21 @@ describe("pi-tui composer autocomplete", () => {
     });
   });
 
+  it("names a fixed effort grade in the description and submits it directly", () => {
+    const provider = { ...openaiProvider, id: "alibaba", name: "Alibaba DashScope", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1" };
+    const groups = [{ provider, models: localModelsForProvider(modelRegistry(), provider) }];
+    const [fixed] = buildModelAutocompleteItems(groups, "kimi/kimi-k3.1-pro-highspeed", "high");
+    expect(fixed).toEqual({
+      value: "alibaba:kimi/kimi-k3.1-pro-highspeed --reasoning-effort max",
+      label: "Kimi K3.1 Pro Highspeed",
+      description: "Alibaba DashScope · kimi/kimi-k3.1-pro-highspeed · max effort",
+      submitOnSelect: true,
+    });
+    // The lone "medium" of always-thinking models is a placeholder, not a grade.
+    const [placeholder] = buildModelAutocompleteItems(groups, "kimi/kimi-k2.7-code-highspeed", "high");
+    expect(placeholder.description).toBe("Alibaba DashScope · kimi/kimi-k2.7-code-highspeed");
+  });
+
   it("opens the effort menu after choosing the builtin DeepSeek Flash model", () => {
     const provider = { ...openaiProvider, id: "deepseek", name: "DeepSeek", baseURL: "https://api.deepseek.com" };
     const groups = [{ provider, models: localModelsForProvider(modelRegistry(), provider) }];
