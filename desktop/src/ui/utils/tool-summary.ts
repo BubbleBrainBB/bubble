@@ -4,6 +4,7 @@ import {
   formatComputerUseLabel,
   parseMcpToolName,
 } from '../../shared/computer-use';
+import { isShowWidgetToolName, isWidgetGuideToolName, widgetFromToolInput } from '../../shared/widget';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -44,6 +45,9 @@ export function getToolSummary(name: string, input: unknown): string {
   if (providerTitle) {
     return providerTitle;
   }
+  // The widget's HTML is no summary; its title is.
+  if (isShowWidgetToolName(name)) return widgetFromToolInput(input)?.title || getStringField(input, 'title') || 'Widget';
+  if (isWidgetGuideToolName(name)) return 'Widget design guide';
 
   switch (name.trim().toLowerCase()) {
     case 'Bash':
@@ -402,6 +406,12 @@ export function deriveReadableToolDisplay(
     return { verb: '', target: providerTitle };
   }
 
+  if (isShowWidgetToolName(name)) {
+    return { verb: status === 'pending' ? 'Drawing' : 'Drew', target: getStringField(input, 'title') || 'a widget' };
+  }
+  if (isWidgetGuideToolName(name)) {
+    return { verb: status === 'pending' ? 'Reading' : 'Read', target: 'the widget design guide' };
+  }
   if (name === 'wait_agent') return { verb: status === 'pending' ? 'Waiting for' : 'Waited for', target: 'subagent result' };
   if (name === 'send_input') return { verb: status === 'error' ? 'Could not send' : status === 'pending' ? 'Sending' : 'Sent', target: 'supplementary message' };
   if (name === 'close_agent') return { verb: status === 'pending' ? 'Stopping' : 'Stopped', target: 'subagent' };

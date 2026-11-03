@@ -3,8 +3,7 @@ import { ImageStudioSessionContext, openImageStudio } from '../lib/image-studio'
 import { isValidElement, memo, useContext, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import { parseSessionLink } from '../../shared/session-links';
-import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
+import { MARKDOWN_REMARK_PLUGINS } from './markdown-plugins';
 import rehypeRaw from 'rehype-raw';
 import rehypeKatex from 'rehype-katex';
 import rehypeSanitize from 'rehype-sanitize';
@@ -856,7 +855,7 @@ function MDContentImpl({ content, className = '', allowHtml = false }: MDContent
       <ErrorBoundary fallback={fallback} resetKey={renderedContent}>
         <ReactMarkdown
           urlTransform={url => parseSessionLink(url) ? url : defaultUrlTransform(url)}
-          remarkPlugins={[remarkGfm, remarkMath]}
+          remarkPlugins={MARKDOWN_REMARK_PLUGINS}
           rehypePlugins={rehypePlugins}
           disallowedElements={disallowedElements}
           unwrapDisallowed={true}

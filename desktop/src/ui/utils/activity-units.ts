@@ -1,6 +1,7 @@
 import type { WorkstreamEntry } from './workstream';
 import { summarizeWorkstreamEntries, type SummarizeWorkstreamEntriesOptions, type WorkstreamStage } from './workstream-stages';
 import { deriveReadableToolDisplay, formatReadableToolSummary } from './tool-summary';
+import { isWidgetEntry } from './turn-pins';
 
 export type ToolActivity = Extract<WorkstreamEntry, { type: 'tool' | 'memory' }>;
 export type ActivityUnit =
@@ -63,7 +64,9 @@ export function buildActivityUnits(entries: WorkstreamEntry[]): ActivityUnit[] {
       else units.push({ kind: 'tasks', id: `agents:${entry.id}`, entries: [entry] });
     } else if (entry.type === 'note' || entry.type === 'error' || entry.type === 'approval'
       || (entry.type === 'tool' && (entry.subagentWait || entry.subagentControl || entry.kind === 'computer_use'
-        || entry.result?.images?.length || entry.result?.mediaRefs?.length))) {
+        || entry.result?.images?.length || entry.result?.mediaRefs?.length))
+      // A widget is part of the answer, drawn where the agent placed it.
+      || isWidgetEntry(entry)) {
       flush();
       units.push({ kind: 'standalone', id: entry.id, entry });
     } else buffer.push(entry);

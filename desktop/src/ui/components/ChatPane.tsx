@@ -2177,7 +2177,6 @@ export function ChatPane({
                   );
                 })}
               </TurnDiffContext.Provider>
-              </ImageStudioSessionContext.Provider>
 
               {(streamingWorkstreamModel || shouldRenderStandalonePartial) && (
                 <div className="my-2 min-w-0 overflow-x-auto streaming-content">
@@ -2206,6 +2205,8 @@ export function ChatPane({
                   ) : null}
                 </div>
               )}
+              {/* The live turn too: its widgets need the session they belong to. */}
+              </ImageStudioSessionContext.Provider>
 
               {session.status === 'error' &&
                 !session.messages.slice(lastUserPromptIndex + 1).some(message => message.type === 'turn_failure') &&

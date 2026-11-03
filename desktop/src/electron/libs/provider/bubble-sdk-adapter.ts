@@ -1,4 +1,6 @@
 import { createDesignTools } from '../../design/tools';
+import { createWidgetHostTools } from '../widget-tool';
+import { isShowWidgetToolName, WIDGET_STREAMING_FLAG } from '../../../shared/widget';
 import { settleDesignTurn } from '../../design/service';
 import { assertBubbleSessionReader } from '../bubble-session-reader';
 import { getBubbleModelConfig } from '../bubble-settings';
@@ -22,7 +24,7 @@ import type {
   Usage,
 } from '../../../shared/types';
 import { buildPromptText } from './bubble-prompt-text';
-import { toolInputPreview } from './tool-input-preview';
+import { partialJsonStringFields, toolInputPreview } from './tool-input-preview';
 import { StreamDeltaCoalescer } from '../../../shared/stream-delta-coalescer';
 import type {
   ProviderAdapter,
@@ -104,6 +106,16 @@ async function duringSetup<T>(work: Promise<T>, signal: AbortSignal): Promise<T>
   finally { signal.removeEventListener('abort', cancel); }
 }
 
+type BubbleWidgetStream = {
+  args: string;
+  lastEmitAt: number;
+  sent?: string;
+  timer?: ReturnType<typeof setTimeout>;
+};
+
+/** A streaming widget redraws at most this often (each preview carries the whole partial HTML). */
+const WIDGET_PREVIEW_INTERVAL_MS = 100;
+
 type ActiveBubbleSession = {
   threadId: string;
   providerSessionId: string;
@@ -128,6 +140,8 @@ type ActiveBubbleSession = {
   pendingRetryId?: string;
   emittedToolCallIds: Set<string>;
   streamingToolCalls?: Map<string, { createdAt: number; input: Record<string, string>; name: string; parentToolUseId?: string }>;
+  /** show_widget calls being written: their latest arguments and preview pacing. */
+  widgetStreams?: Map<string, BubbleWidgetStream>;
   emittedToolResultIds: Set<string>;
   usage: Usage;
   totalCostUsd: number;
@@ -929,7 +943,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       sdk.runTurn(session.providerSessionId, {
         prompt,
         preserveInterruptedInput: true,
-        hostTools: createDesignTools(session.threadId, abortController.signal),
+        hostTools: [...createDesignTools(session.threadId, abortController.signal), ...createWidgetHostTools()],
         skillPaths: bundledSkillPaths(),
         ...(model ? { model } : {}),
         ...(session.permissionMode ? { mode: session.permissionMode } : {}),
@@ -1034,7 +1048,8 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       case 'tool_call_delta': {
         this.resolveRetry(session);
         const toolEvent = event as { id: string; name: string; arguments?: string };
-        this.handleStreamingToolUse(session, toolEvent.id, toolEvent.name, toolEvent.arguments);
+        if (isShowWidgetToolName(toolEvent.name)) this.handleStreamingWidget(session, toolEvent.id, toolEvent.name, toolEvent.arguments);
+        else this.handleStreamingToolUse(session, toolEvent.id, toolEvent.name, toolEvent.arguments);
         return;
       }
       case 'tool_call_end': {
@@ -1331,15 +1346,71 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     });
   }
 
+  /**
+   * A show_widget call draws in the chat while it is written: its partial
+   * `html` goes out as a tool_use preview, paced to one redraw per interval
+   * (with a trailing one, so a pause still shows the latest markup). Previews
+   * are broadcast but not persisted; the finished call replaces them under
+   * the same id, and only the title survives an interruption.
+   */
+  private handleStreamingWidget(session: ActiveBubbleSession, id: string, name: string, argumentsText?: string): void {
+    if (!id || session.emittedToolCallIds.has(id) || session.emittedToolResultIds.has(id)) return;
+    const calls = session.streamingToolCalls ??= new Map();
+    if (!calls.has(id)) {
+      this.flushAssistant(session, 'commentary');
+      calls.set(id, { createdAt: Date.now(), input: {}, name });
+    }
+    const streams = session.widgetStreams ??= new Map();
+    let stream = streams.get(id);
+    if (!stream) streams.set(id, stream = { args: '', lastEmitAt: 0 });
+    if (argumentsText !== undefined) stream.args = argumentsText;
+    const wait = WIDGET_PREVIEW_INTERVAL_MS - (Date.now() - stream.lastEmitAt);
+    if (wait <= 0) this.emitWidgetPreview(session, id);
+    else stream.timer ??= setTimeout(() => this.emitWidgetPreview(session, id), wait);
+  }
+
+  private emitWidgetPreview(session: ActiveBubbleSession, id: string): void {
+    const stream = session.widgetStreams?.get(id);
+    const call = session.streamingToolCalls?.get(id);
+    if (!stream || !call) return;
+    if (stream.timer) clearTimeout(stream.timer);
+    stream.timer = undefined;
+    stream.lastEmitAt = Date.now();
+    const { title, html } = partialJsonStringFields(stream.args, ['title', 'html']);
+    const key = `${title ?? ''}\u0000${html ?? ''}`;
+    if (stream.sent === key) return;
+    stream.sent = key;
+    call.input = title ? { title } : {};
+    this.emitMessage(session, {
+      type: 'assistant', uuid: `bubble-tool-use:${session.threadId}:${id}`, createdAt: call.createdAt,
+      message: { content: [{ type: 'tool_use', id, name: normalizeToolName(call.name),
+        input: { ...call.input, ...(html ? { html } : {}), __aegisToolCallStreaming: true, [WIDGET_STREAMING_FLAG]: true } }] },
+    });
+  }
+
+  private dropWidgetStream(session: ActiveBubbleSession, id?: string): void {
+    for (const [streamId, stream] of session.widgetStreams ?? []) {
+      if (id !== undefined && streamId !== id) continue;
+      if (stream.timer) clearTimeout(stream.timer);
+      session.widgetStreams?.delete(streamId);
+    }
+  }
+
   private interruptStreamingTools(session: ActiveBubbleSession, parentToolUseId?: string): void {
     for (const [id, call] of session.streamingToolCalls ?? []) {
       if (call.parentToolUseId !== parentToolUseId) continue;
       session.streamingToolCalls?.delete(id);
+      // A widget keeps its title (from the latest arguments, which may be
+      // ahead of the paced preview) and none of its half-written HTML.
+      const widgetArgs = session.widgetStreams?.get(id)?.args;
+      const { title } = widgetArgs === undefined ? {} : partialJsonStringFields(widgetArgs, ['title']);
+      const input = widgetArgs === undefined ? call.input : title ? { title } : {};
+      this.dropWidgetStream(session, id);
       this.emitMessage(session, {
         type: 'assistant', uuid: `bubble-${parentToolUseId ? 'sub-' : ''}tool-use:${session.threadId}:${id}`,
         createdAt: call.createdAt, ...(parentToolUseId ? { parentToolUseId } : {}),
         message: { content: [{ type: 'tool_use', id, name: normalizeToolName(call.name),
-          input: { ...call.input, __aegisToolCallInterrupted: true } }] },
+          input: { ...input, __aegisToolCallInterrupted: true } }] },
       });
     }
   }
@@ -1358,6 +1429,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     this.flushAssistant(session);
     const preview = session.streamingToolCalls?.get(toolCallId);
     session.streamingToolCalls?.delete(toolCallId);
+    this.dropWidgetStream(session, toolCallId);
     session.emittedToolCallIds.add(toolCallId);
     session.toolNames.set(toolCallId, toolName);
     if (toolName === 'wait_agent' && isRecord(args) && !getString(args.agent_id)
@@ -1461,9 +1533,21 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     });
   }
 
+  /** Every call still being written, top-level and in subagents. */
+  private interruptAllStreamingTools(session: ActiveBubbleSession): void {
+    const parents = new Set([...session.streamingToolCalls?.values() ?? []].map((call) => call.parentToolUseId));
+    for (const parentToolUseId of parents) this.interruptStreamingTools(session, parentToolUseId);
+  }
+
   private finishTurn(session: ActiveBubbleSession, error: Error | null): void {
     this.resolveRetry(session);
+    // A turn that ends (stop, error, cut-off output) mid tool call closes the
+    // call as interrupted under its id, replacing the preview the chat drew:
+    // what the chat shows then is what history replays (a widget keeps only
+    // its title, never half-written HTML that isn't saved).
+    this.interruptAllStreamingTools(session);
     session.streamingToolCalls?.clear();
+    this.dropWidgetStream(session);
     this.flushAssistant(session);
     // Safety net: commit any subagent lane that never saw its terminal frame
     // (interrupt, transport error) so its buffered narration isn't lost — and

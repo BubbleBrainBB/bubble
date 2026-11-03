@@ -2561,6 +2561,7 @@ export const useAppStore = create<Store>()(
           text: request.text,
           attachments: request.attachments,
           mode,
+          ...(request.submit ? { submit: true } : {}),
           source: request.source,
           nonce: Date.now(),
         },

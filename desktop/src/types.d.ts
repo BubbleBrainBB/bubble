@@ -396,6 +396,8 @@ declare global {
     createInlineImageAttachment: (mimeType: string, data: Uint8Array) => Promise<Attachment | null>;
     writeProjectTextFile: (cwd: string, filePath: string, content: string) => Promise<{ ok: boolean; message?: string; size?: number; mtimeMs?: number }>;
     previewArtifactPath: (cwd: string, filePath: string, options?: { openInBrowser?: boolean }) => Promise<{ ok: boolean; url?: string; message?: string; code?: string }>;
+    /** Copy text for a chat widget (main-process clipboard: no focus needed). */
+    copyWidgetText: (text: string) => Promise<boolean>;
     openPath: (filePath: string) => Promise<{ ok: boolean; message?: string }>;
     revealPath: (filePath: string) => Promise<{ ok: boolean; message?: string }>;
     listOpenWithApps: (

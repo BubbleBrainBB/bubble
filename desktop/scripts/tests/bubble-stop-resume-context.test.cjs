@@ -24,6 +24,15 @@ app.whenReady().then(async()=>{
   async *streamChat(messages,options){
    const prompt=[...messages].reverse().find(m=>m.role==='user')?.content;
    requests.push({prompt,messages:JSON.parse(JSON.stringify(messages))});
+   if(prompt.startsWith('cut:')){
+    // Tool calls still being written when the user stops.
+    yield {type:'tool_call',isStart:true,isEnd:false,id:'cut-widget',name:'show_widget',arguments:'{"title":"Cut","html":"<div>half'};
+    yield {type:'tool_call',isStart:false,isEnd:false,id:'cut-widget',name:'show_widget',arguments:' more'};
+    yield {type:'tool_call',isStart:true,isEnd:false,id:'cut-bash',name:'bash',arguments:'{"command":"ls -'};
+    await new Promise((_,reject)=>{
+     if(options.abortSignal.aborted)reject(options.abortSignal.reason);else options.abortSignal.addEventListener('abort',()=>reject(options.abortSignal.reason),{once:true});
+    });
+   }
    if(prompt.startsWith('work:')){
     if(!messages.some(m=>m.role==='tool'&&m.content.includes('TOOL_FACT_84721'))){
      yield {type:'tool_call',isStart:true,isEnd:true,id:'read-fact',name:'read',arguments:JSON.stringify({path:path.join(home,'fact.txt')})};
@@ -56,6 +65,19 @@ app.whenReady().then(async()=>{
   const request=requests.find(r=>r.prompt==='continue:'+id);
   const text=JSON.stringify(request?.messages||[]);
   reports.push({scenario:id,stopReturnedPhase,sameSessionId:resumed.providerSessionId===session.providerSessionId,result:status(id,'completed',eventStart)?'completed':'error',modelReceivedContinue:!!request,userFact:text.includes('USER_FACT_92384'),toolFact:text.includes('TOOL_FACT_84721'),partialProgress:text.includes('PARTIAL_PROGRESS_63579'),errors:events.slice(eventStart).filter(e=>e.type==='error').map(e=>e.error.message),durableRoles:sdk.getHistory(session.providerSessionId).map(m=>m.role)});
+ }
+ // Stopped while the model is still writing tool calls: through the real stop,
+ // each closes as interrupted under its id (a widget keeps only its title, no
+ // half-written HTML), so what the chat shows is what history replays.
+ {
+  const id='cut';
+  const toolInput=(toolId)=>events.filter(e=>e.threadId===id&&e.type==='message'&&e.message.message?.content?.[0]?.id===toolId).at(-1)?.message.message.content[0].input;
+  await adapter.startSession({threadId:id,provider:'bubble',cwd:home,prompt:'cut:'+id,model:'local-test:test',bubblePermissionMode:'bypassPermissions'});
+  await until(()=>toolInput('cut-bash')?.__aegisToolCallStreaming===true&&toolInput('cut-widget')?.html,'partial tool calls drawn');
+  await adapter.stopSession(id);
+  assert.deepEqual(toolInput('cut-widget'),{title:'Cut',__aegisToolCallInterrupted:true},'the cut widget closes with its title only');
+  assert.equal(toolInput('cut-bash')?.__aegisToolCallInterrupted,true,'the cut command closes as interrupted');
+  assert.equal(toolInput('cut-bash')?.__aegisToolCallStreaming,undefined);
  }
  const {runAgentLoop,ensureProviderService}=require(path.join(root,'dist-electron/electron/libs/agent-loop.js'));
  const {getProviderService}=require(path.join(root,'dist-electron/electron/libs/provider/service.js'));
@@ -114,5 +136,5 @@ app.whenReady().then(async()=>{
  assert.equal(earlyReport.sameSessionId,true);
  assert.equal(earlyReport.modelReceivedOriginalTask,true);
  await assert.rejects(adapter.startSession({threadId:'missing',provider:'bubble',cwd:home,resumeSessionId:'missing-history',prompt:'continue',model:'local-test:test'}),/saved history is missing/);
- console.log('PASS: settled and immediate stop/resume preserve original input, tool results and partial output; runner stop gate; setup interruption; missing history fails explicitly.');
+ console.log('PASS: settled and immediate stop/resume preserve original input, tool results and partial output; tool calls cut by a stop close as interrupted; runner stop gate; setup interruption; missing history fails explicitly.');
 }).then(async()=>{await adapter?.stopAll();clearTimeout(timeout);fs.rmSync(home,{recursive:true,force:true});app.exit(0)},async error=>{console.error(error);await adapter?.stopAll();clearTimeout(timeout);fs.rmSync(home,{recursive:true,force:true});app.exit(1)});

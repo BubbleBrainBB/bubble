@@ -4,7 +4,7 @@ import { useWorkstreamDisclosure } from './WorkstreamDisclosureState';
 import { ToolResultContent, ToolOutputPanel } from './ToolResultContent';
 import { ActivityAnimationScope, ActivityDisclosureHeader, ActivitySummary, WorkstreamActivityLabel, WorkstreamCollapse, WorkstreamScrollArea } from './WorkstreamPrimitives';
 import { AttachmentPreviewGrid } from './AttachmentPreviewGrid';
-import { useEffect, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import {
   ChevronRight,
   CircleDashed,
@@ -65,6 +65,9 @@ import { SubagentAvatar } from './SubagentAvatar';
 import { getSubagentPersona } from '../utils/subagent-persona';
 import { GeneratedMediaGallery } from './GeneratedMediaGallery';
 import { isMediaGenerationTool, type GeneratedMediaItem } from '../utils/generated-media';
+import { widgetFromToolInput } from '../../shared/widget';
+import { InlineWidget } from './widget/InlineWidget';
+import { isDraftWidget, isRejectedWidget, isWidgetEntry, pinnedTurnEntries, type WidgetEntry } from '../utils/turn-pins';
 
 interface AssistantWorkstreamProps {
   model: WorkstreamModel;
@@ -127,6 +130,7 @@ export function AssistantWorkstream({
           group.entry.type === 'note' ? <TextSegment key={groupKey} entry={group.entry} />
             : group.entry.type === 'tool' && (group.entry.subagentWait || group.entry.subagentControl)
               ? <SubagentWaitRow key={groupKey} entry={group.entry} />
+              : isWidgetEntry(group.entry) ? <TraceWidget key={groupKey} entry={group.entry} />
               : <EntryRow key={groupKey} entry={group.entry} />
         ) : (
           <CompactGroup key={groupKey} entries={group.entries} live={live} turnReasoningHeading={turnReasoningHeading} cwd={mediaCwd} />
@@ -144,7 +148,9 @@ export function AssistantWorkstream({
       {showIdleActivity && isTurnInProgress && groups.at(-1)?.kind !== 'group'
         && !model.entries.some(entry => entry.type === 'approval' && entry.state === 'waiting'
           || entry.type === 'tool' && entry.subagentWait
-          || entry.type === 'note' && entry.state === 'streaming')
+          || entry.type === 'note' && entry.state === 'streaming'
+          // The widget drawing itself is the activity.
+          || isWidgetEntry(entry) && entry.status === 'pending')
         ? <WorkingFooter label={turnReasoningHeading || 'Thinking'} reasoning={Boolean(turnReasoningHeading)} /> : null}
       {model.todoProgress ? (
         <div className="my-2">
@@ -162,14 +168,69 @@ function TextSegment({
 }: {
   entry: Extract<WorkstreamEntry, { type: 'note' }>;
 }) {
+  const pinned = useContext(PinnedNoteIds);
   const text = entry.detail || entry.summary;
-  if (!text.trim()) return null;
+  // Shown with the turn's widgets instead (see TurnPinnedEntries).
+  if (pinned.has(entry.id) || !text.trim()) return null;
   const displayText = truncateWithNotice(text, MAX_TRACE_TEXT_CHARS);
   return (
     <div className="workstream-text my-2 min-w-0 overflow-x-auto">
       <StructuredResponse content={displayText} streaming={entry.state === 'streaming'} />
     </div>
   );
+}
+
+// ── Chat widgets (show_widget) ──────────────────────────────────────────────
+
+/**
+ * Widgets and the reply text around them belong to the answer, not to the
+ * work trace: when a finished turn's trace collapses, the turn renders them
+ * outside the collapsible body (in order, see pinnedTurnEntries) and the
+ * trace leaves them out.
+ */
+const PinnedOutside = createContext(false);
+export const PinnedOutsideProvider = PinnedOutside.Provider;
+const PinnedNoteIds = createContext<ReadonlySet<string>>(new Set());
+export const PinnedNoteIdsProvider = PinnedNoteIds.Provider;
+
+export function TurnPinnedEntries({ entries }: { entries: WorkstreamEntry[] }) {
+  const pinned = useMemo(() => pinnedTurnEntries(entries), [entries]);
+  if (pinned.length === 0) return null;
+  return (
+    <>
+      {pinned.map((entry) =>
+        isWidgetEntry(entry) ? (
+          <WidgetFromEntry key={entry.id} entry={entry} />
+        ) : entry.type === 'note' ? (
+          <div key={entry.id} className="workstream-text my-2 min-w-0 overflow-x-auto">
+            <StructuredResponse content={truncateWithNotice(entry.detail || entry.summary, MAX_TRACE_TEXT_CHARS)} />
+          </div>
+        ) : null
+      )}
+    </>
+  );
+}
+
+/**
+ * A call still being written, or not yet answered by the tool, draws its
+ * markup without running its scripts (a refused one then disappears); once
+ * accepted it comes alive in the same frame.
+ */
+function widgetProps(entry: WidgetEntry) {
+  const widget = widgetFromToolInput(entry.block.input);
+  if (!widget || isRejectedWidget(entry)) return null;
+  return { toolUseId: entry.block.id, html: widget.html, title: widget.title, draft: isDraftWidget(entry) };
+}
+
+function WidgetFromEntry({ entry }: { entry: WidgetEntry }) {
+  const props = widgetProps(entry);
+  return props ? <InlineWidget {...props} /> : null;
+}
+
+/** A widget inside the trace. Collapsed turns draw their widgets outside instead. */
+function TraceWidget({ entry }: { entry: WidgetEntry }) {
+  const outside = useContext(PinnedOutside);
+  return outside ? null : <WidgetFromEntry entry={entry} />;
 }
 
 // ── Compact group with overflow ─────────────────────────────────────────────

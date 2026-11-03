@@ -1023,6 +1023,7 @@ contextBridge.exposeInMainWorld('electron', {
     return ipcRenderer.invoke('write-project-text-file', cwd, filePath, content);
   },
 
+  copyWidgetText: (text: string): Promise<boolean> => ipcRenderer.invoke('widget:copy-text', text),
   // 预览 artifact 文件
   previewArtifactPath: (cwd: string, filePath: string, options?: { openInBrowser?: boolean }) => {
     return ipcRenderer.invoke('preview-artifact-path', cwd, filePath, options);

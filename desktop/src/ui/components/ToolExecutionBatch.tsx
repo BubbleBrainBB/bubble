@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ChevronRight } from './icons';
 import type { ContentBlock, PermissionRequestPayload, ToolStatus, StreamMessage } from '../types';
-import { AssistantWorkstream } from './AssistantWorkstream';
+import { AssistantWorkstream, PinnedNoteIdsProvider, PinnedOutsideProvider, TurnPinnedEntries } from './AssistantWorkstream';
+import { pinnedTurnEntries } from '../utils/turn-pins';
 import {
   createBatchWorkstreamModel,
   type ToolResultBlock,
@@ -142,6 +143,11 @@ export function WorkstreamDisclosure({
     if (!isControlled) setChoice({ key: resetKey, expanded: nextExpanded });
     onExpandedChange?.(nextExpanded);
   };
+  // Reply text between a finished turn's widgets shows with them, outside the trace.
+  const pinnedNoteIds = useMemo(
+    () => new Set(canCollapse ? pinnedTurnEntries(model.entries).filter(entry => entry.type === 'note').map(entry => entry.id) : []),
+    [canCollapse, model.entries]
+  );
 
   if (model.entries.length === 0 && model.todoProgress) {
     return <TodoProgressCard state={model.todoProgress} className="my-2" />;
@@ -164,14 +170,19 @@ export function WorkstreamDisclosure({
       {/* Live media belongs beside its tool result, before subsequent narration.
           Collapsible traces keep any remaining media outside the hidden body. */}
       <WorkstreamCollapse open={resolvedExpanded} variant="turn">
-        <AssistantWorkstream
-          model={model}
-          isTurnInProgress={isRunning}
-          generatedMedia={canCollapse ? undefined : generatedMedia}
-          mediaCwd={mediaCwd}
-          showIdleActivity={showIdleActivity}
-        />
+        <PinnedOutsideProvider value={canCollapse}>
+          <PinnedNoteIdsProvider value={pinnedNoteIds}>
+            <AssistantWorkstream
+              model={model}
+              isTurnInProgress={isRunning}
+              generatedMedia={canCollapse ? undefined : generatedMedia}
+              mediaCwd={mediaCwd}
+              showIdleActivity={showIdleActivity}
+            />
+          </PinnedNoteIdsProvider>
+        </PinnedOutsideProvider>
       </WorkstreamCollapse>
+      {canCollapse ? <TurnPinnedEntries entries={model.entries} /> : null}
       {canCollapse && generatedMedia?.length ? <GeneratedMediaGallery items={generatedMedia} cwd={mediaCwd ?? null} /> : null}
     </WorkstreamDisclosureState>
   );

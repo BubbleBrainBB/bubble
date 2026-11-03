@@ -6,6 +6,7 @@ import { getAppPreferences, setAppPreferences, getTerminalShellOptions, trackTas
 import { setupSessionGoalIPC, getCachedSessionGoal, publishSessionGoal, rejectSessionGoalStart } from './ipc/session-goal';
 import type { GoalAction } from '../shared/session-goal';
 import { parseGoalInput } from '../shared/session-goal';
+import { isStreamingWidgetInput } from '../shared/widget';
 import { getClaudeGoalController, readClaudeGoalState, awaitClaudeGoalSet, removeClaudeGoalState } from './libs/claude-goal-manager';
 import { validateClaudeGoalObjective } from './libs/claude-goal';
 import { canonicalProjectPath } from './libs/project-paths';
@@ -1739,69 +1740,6 @@ async function buildRunnerPromptWithMemory(
   return prompt.trim();
 }
 
-const LIVE_WIDGET_VISUAL_PATTERN =
-  /(?:\bwidget\b|\bdashboard\b|\bchart\b|\bdiagram\b|\bprototype\b|\banimation\b|\binteractive\b|\blanding page\b|\bweb page\b|\bhero section\b|网页|页面|前端|组件|动画|交互|可视化|图表|仪表盘|原型|落地页)/i;
-const LIVE_WIDGET_PREVIEW_INTENT_PATTERN =
-  /(?:live preview|inline preview|render (?:it|this|that)? ?(?:in|inside)? ?chat|show (?:it|this|that)? ?(?:in|inside)? ?chat|preview (?:it|this|that)? ?(?:in|inside)? ?chat|display (?:it|this|that)? ?(?:in|inside)? ?chat|direct preview|render it here|show it here|preview it here|直接预览|实时预览|聊天里预览|在聊天里预览|直接展示|聊天里展示|在聊天里展示|直接渲染|实时渲染|聊天内渲染|在聊天中渲染|直接在回复里展示|直接在回复里预览|直接在对话里预览|直接在对话里展示)/i;
-const LIVE_WIDGET_FOLLOWUP_PATTERN =
-  /(?:continue|iterate|refine|tweak|adjust|improve|polish|update|modify|继续|接着|再改|优化|调整|微调|完善).*(?:widget|preview|component|demo|card|这个预览|这个组件|这个卡片)|(?:widget|preview|component|demo|card|这个预览|这个组件|这个卡片).*(?:continue|iterate|refine|tweak|adjust|improve|polish|update|modify|继续|接着|再改|优化|调整|微调|完善)/i;
-
-function streamMessageContainsLiveWidget(message: StreamMessage): boolean {
-  if (message.type === 'user_prompt') {
-    return message.prompt.includes('<aegis-widget');
-  }
-
-  if (message.type === 'assistant' || message.type === 'user') {
-    return message.message.content.some((block) => {
-      if (block.type === 'text') {
-        return block.text.includes('<aegis-widget');
-      }
-      if (block.type === 'tool_result') {
-        return block.content.includes('<aegis-widget');
-      }
-      return false;
-    });
-  }
-
-  return false;
-}
-
-function augmentPromptForLiveWidgetProtocol(
-  prompt: string,
-  history?: StreamMessage[]
-): string {
-  if (!prompt.trim()) {
-    return prompt;
-  }
-
-  if (prompt.includes('<aegis-widget')) {
-    return prompt;
-  }
-
-  const hasWidgetHistory = history ? history.some((message) => streamMessageContainsLiveWidget(message)) : false;
-  const hasExplicitPreviewIntent = LIVE_WIDGET_PREVIEW_INTENT_PATTERN.test(prompt);
-  const isVisualRequest = LIVE_WIDGET_VISUAL_PATTERN.test(prompt);
-  const isWidgetFollowup = hasWidgetHistory && LIVE_WIDGET_FOLLOWUP_PATTERN.test(prompt);
-  const shouldInject =
-    (hasExplicitPreviewIntent && isVisualRequest) ||
-    (hasExplicitPreviewIntent && hasWidgetHistory) ||
-    isWidgetFollowup;
-
-  if (!shouldInject) {
-    return prompt;
-  }
-
-  return [
-    prompt.trim(),
-    '',
-    'If a live visual preview would help, you may embed exactly one self-contained widget block using this format:',
-    '<aegis-widget title="short title">',
-    '<!doctype html><html><body>...</body></html>',
-    '</aegis-widget>',
-    'Rules: keep it self-contained, responsive, inline CSS/JS only, no external network fetches, and keep all explanation outside the widget block.',
-  ].join('\n');
-}
-
 function formatInteger(value: number): string {
   return new Intl.NumberFormat('en-US').format(value);
 }
@@ -1838,6 +1776,11 @@ function shouldPersistProviderMessage(message: StreamMessage): boolean {
     return false;
   }
   if (message.type === 'assistant' && message.streaming === true) {
+    return false;
+  }
+  // A widget being written is redrawn many times; only the finished call is history.
+  if (message.type === 'assistant'
+    && message.message.content.some((block) => block.type === 'tool_use' && isStreamingWidgetInput(block.input))) {
     return false;
   }
   return true;
@@ -9192,9 +9135,8 @@ async function handleSessionStart(
   const outgoingPrompt = sourcePrompt;
   const outgoingAttachments = (attachments ?? []).filter((attachment) => !!attachment?.path);
   const effectiveRunnerPrompt = (effectivePrompt ?? sourcePrompt).trim();
-  const runnerPrompt = chosenProvider === 'claude' && parseGoalInput(sourcePrompt, false).isGoal ? sourcePrompt : augmentPromptForLiveWidgetProtocol(
-    await buildRunnerPromptWithMemory(chosenProvider, effectiveRunnerPrompt + referenceContext + sessions.buildProjectSourcesContext(normalizedProjectCwd, isolated?.worktreePath || normalizedWorktreePath || sessionCwd, Boolean(isolated) || normalizedEnvMode === 'worktree'), sessionCwd),
-  );
+  const runnerPrompt = chosenProvider === 'claude' && parseGoalInput(sourcePrompt, false).isGoal ? sourcePrompt
+    : await buildRunnerPromptWithMemory(chosenProvider, effectiveRunnerPrompt + referenceContext + sessions.buildProjectSourcesContext(normalizedProjectCwd, isolated?.worktreePath || normalizedWorktreePath || sessionCwd, Boolean(isolated) || normalizedEnvMode === 'worktree'), sessionCwd);
   const selectedModel = normalizeProviderModel(chosenProvider, model);
   const selectedBetas = chosenProvider === 'claude' ? normalizeBetas(betas) : undefined;
   const selectedClaudeAccessMode =
@@ -9706,10 +9648,8 @@ async function handleSessionContinue(
   if (session.handoff_pending === 1) {
     sessions.clearSessionHandoffPending(sessionId);
   }
-  const runnerPrompt = nextProvider === 'claude' && parseGoalInput(prompt, false).isGoal ? prompt.trim() : augmentPromptForLiveWidgetProtocol(
-    await buildRunnerPromptWithMemory(nextProvider, effectiveRunnerPrompt + referenceContext + (nextProvider === 'bubble' ? designContextText(sessionId) : '') + sessions.buildProjectSourcesContext(session.project_cwd || session.cwd, session.cwd, session.env_mode === 'worktree' && Boolean(session.worktree_path)), session.cwd || undefined),
-    historyBeforeContinue
-  );
+  const runnerPrompt = nextProvider === 'claude' && parseGoalInput(prompt, false).isGoal ? prompt.trim()
+    : await buildRunnerPromptWithMemory(nextProvider, effectiveRunnerPrompt + referenceContext + (nextProvider === 'bubble' ? designContextText(sessionId) : '') + sessions.buildProjectSourcesContext(session.project_cwd || session.cwd, session.cwd, session.env_mode === 'worktree' && Boolean(session.worktree_path)), session.cwd || undefined);
   const previousOpenCodePermissionMode = normalizeOpenCodePermissionMode(session.opencode_permission_mode);
   const nextOpenCodePermissionMode = nextProvider === 'opencode'
     ? normalizeOpenCodePermissionMode(opencodePermissionMode || previousOpenCodePermissionMode)

@@ -13,7 +13,7 @@
     "transpile:electron": "tsc -p src/electron/tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "node scripts/sync-bubble-sdk.mjs && npm run typecheck && npm run transpile:electron && vite build",
-    "test": "npm run verify:theme-variables && npm run verify:path-containment && tsx scripts/tests/activity-units.test.ts && npm run verify:workstream-stages && npm run verify:workstream-preamble-order && npm run verify:workstream-duration && npm run verify:board-task-semantics && npm run verify:composer-agent-selection && npm run verify:session-history && npm run verify:bubble-subagent && npm run verify:bubble-sdk-adapter && npm run verify:bubble-model-catalog && npm run verify:bubble-runtime && npm run verify:renderer-state-memory && npm run verify:project-file-tabs && npm run verify:project-tree-refresh && npm run verify:project-tree-explorer-state && npm run verify:project-scan-privacy && npm run verify:data-isolation && npm run verify:bubble-oauth && npm run verify:bubble-context",
+    "test": "npm run verify:theme-variables && npm run verify:path-containment && tsx scripts/tests/activity-units.test.ts && tsx scripts/tests/turn-pins.test.ts && tsx scripts/tests/widget-tool.test.ts && tsx scripts/tests/widget-heights.test.ts && tsx scripts/tests/widget-requests.test.ts && tsx scripts/tests/markdown-cjk.test.ts && npm run verify:workstream-stages && npm run verify:workstream-preamble-order && npm run verify:workstream-duration && npm run verify:board-task-semantics && npm run verify:composer-agent-selection && npm run verify:session-history && npm run verify:bubble-subagent && npm run verify:bubble-sdk-adapter && npm run verify:bubble-model-catalog && npm run verify:bubble-runtime && npm run verify:renderer-state-memory && npm run verify:project-file-tabs && npm run verify:project-tree-refresh && npm run verify:project-tree-explorer-state && npm run verify:project-scan-privacy && npm run verify:data-isolation && npm run verify:bubble-oauth && npm run verify:bubble-context",
     "verify:subagent-panel": "node scripts/verify-subagent-panel.mjs",
     "verify:design-mode": "node scripts/verify-design-mode.mjs",
     "verify:image-studio": "npx tsx scripts/tests/image-studio.test.ts && node scripts/tests/image-studio-electron.test.mjs",
@@ -149,7 +149,8 @@
     "verify:tool-input-streaming-ui": "QA_TOOL_STREAM_ONLY=1 node scripts/tests/workstream-disclosure-electron.test.mjs",
     "verify:renderer-recovery": "tsx scripts/tests/renderer-recovery.test.ts && node scripts/tests/renderer-recovery-electron.test.mjs",
     "verify:react-performance-memory": "node scripts/tests/react-performance-memory-electron.test.mjs",
-    "verify:design-canvas": "tsx scripts/tests/design-palette.test.ts && tsx scripts/tests/design-canvas-geometry.test.ts && tsx scripts/tests/design-layers.test.ts && tsx scripts/tests/design-history.test.ts && tsx scripts/tests/design-comment-prompt.test.ts && tsx scripts/tests/design-css.test.ts && tsx scripts/tests/design-insert.test.ts && tsx scripts/tests/design-skill.test.ts && tsx scripts/tests/design-diff.test.ts && tsx scripts/tests/design-chat-link.test.ts && tsx scripts/tests/design-spacing.test.ts && tsx scripts/tests/design-undo.test.ts && npm run transpile:electron && node scripts/launch-electron.mjs scripts/tests/design-repository.test.cjs && node scripts/tests/design-canvas-electron.test.mjs"
+    "verify:design-canvas": "tsx scripts/tests/design-palette.test.ts && tsx scripts/tests/design-canvas-geometry.test.ts && tsx scripts/tests/design-layers.test.ts && tsx scripts/tests/design-history.test.ts && tsx scripts/tests/design-comment-prompt.test.ts && tsx scripts/tests/design-css.test.ts && tsx scripts/tests/design-insert.test.ts && tsx scripts/tests/design-skill.test.ts && tsx scripts/tests/design-diff.test.ts && tsx scripts/tests/design-chat-link.test.ts && tsx scripts/tests/design-spacing.test.ts && tsx scripts/tests/design-undo.test.ts && npm run transpile:electron && node scripts/launch-electron.mjs scripts/tests/design-repository.test.cjs && node scripts/tests/design-canvas-electron.test.mjs",
+    "verify:widgets": "npx tsx scripts/tests/turn-pins.test.ts && npx tsx scripts/tests/widget-tool.test.ts && npx tsx scripts/tests/widget-heights.test.ts && npx tsx scripts/tests/widget-requests.test.ts && npm run transpile:electron && node scripts/launch-electron.mjs scripts/tests/widget-streaming.test.cjs && node scripts/tests/widget-electron.test.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.2.1",
@@ -161,7 +162,10 @@
     "@vue/language-server": "^3.2.7",
     "better-sqlite3": "^13.0.1",
     "chalk": "^5.3.0",
+    "chart.js": "^4.5.1",
+    "d3": "^7.9.0",
     "diff": "^9.0.0",
+    "echarts": "^6.1.0",
     "electron-updater": "^6.8.9",
     "fflate": "^0.8.3",
     "get-east-asian-width": "1.6.0",
@@ -173,6 +177,7 @@
     "picomatch": "^4.0.4",
     "qrcode-terminal": "^0.12.0",
     "quickjs-emscripten": "^0.32.0",
+    "remark-cjk-friendly": "2.3.2",
     "shiki": "^4.0.2",
     "string-width": "^8.2.1",
     "typescript": "^5.7.3",
