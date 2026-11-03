@@ -233,7 +233,16 @@ const BOOTSTRAP = String.raw`
   };
   // New content sizes the card afresh.
   const contentChanged = () => { motionPeak = 0; reportSize(); };
-  new ResizeObserver(contentChanged).observe(root);
+  // A width change alone is not new content: a classic scrollbar coming and
+  // going as motion overflows the frame flips the width, and must not drop the
+  // peak. Content the new width reflows changes the height.
+  let rootHeight = -1;
+  new ResizeObserver(() => {
+    const height = root.getBoundingClientRect().height;
+    if (height === rootHeight) { reportSize(); return; }
+    rootHeight = height;
+    contentChanged();
+  }).observe(root);
   // Absolutely positioned content (a tooltip appearing, a label moving) changes
   // the page height without resizing the root.
   let sizeFrame = 0;
