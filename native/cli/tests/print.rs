@@ -157,6 +157,19 @@ fn bypass_runs_everything_and_json_reports_one_object() {
     assert_eq!(result["usage"]["output_tokens"], 25);
     assert_eq!(result["usage_reported"], true);
     assert!(result["sessionId"].as_str().unwrap().starts_with("task_"));
+    assert!(result.get("changes").is_none(), "no git repository, no changes field");
+    assert_eq!(result["usage"]["cache_read_input_tokens"], 0);
+}
+
+#[test]
+fn json_reports_what_git_saw_change() {
+    let setup = setup("changes");
+    assert!(Command::new("git").args(["init", "-q"]).current_dir(&setup.project).status().unwrap().success());
+    let (code, stdout, stderr) =
+        bubble(&setup, &["-p", "make notes", "--dangerously-skip-permissions", "--output-format", "json"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let result: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(result["changes"], json!({ "changed_files": 2, "modified_existing_tests": [] }), "notes.txt and ran.txt");
 }
 
 #[test]

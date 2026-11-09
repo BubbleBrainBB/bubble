@@ -114,6 +114,14 @@ impl Line {
     }
 }
 
+/// A subscription sign-in as Settings shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Account {
+    pub subscription: bubble_core::auth::Subscription,
+    pub signed_in: bool,
+    pub status: String,
+}
+
 /// Everything the screens share; `Copy`, handed out through context.
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -132,7 +140,8 @@ pub struct AppState {
     /// Who GitHub knows the person as, or why it cannot be reached.
     pub github_status: Signal<Option<String>>,
     /// The subscriptions signed in to, and what their services offer.
-    pub accounts: Signal<Vec<(String, String)>>,
+    /// ChatGPT and Grok: how each sign-in stands.
+    pub accounts: Signal<Vec<Account>>,
     /// MCP connections, shared by every task.
     hub: Stored<Arc<Hub>>,
     pub mcp_servers: Signal<Vec<ServerRow>>,
@@ -458,11 +467,21 @@ impl AppState {
         use bubble_core::auth::{AuthFile, Subscription};
         let app = *self;
         let auth = AuthFile::default();
-        let signed_in: Vec<Subscription> =
-            [Subscription::ChatGpt, Subscription::Grok].into_iter().filter(|s| auth.signed_in(*s)).collect();
+        let all = [Subscription::ChatGpt, Subscription::Grok];
         app.accounts.set(
-            signed_in.iter().map(|s| (s.label().to_owned(), "Signed in; looking up its models…".to_owned())).collect(),
+            all.iter()
+                .map(|s| {
+                    let signed_in = auth.signed_in(*s);
+                    Account {
+                        subscription: *s,
+                        signed_in,
+                        status: if signed_in { "Signed in; looking up its models…" } else { "Not signed in" }.to_owned(),
+                    }
+                })
+                .collect(),
         );
+        app.models.set(app.config.with(|c| c.selectable_models()));
+        let signed_in: Vec<Subscription> = all.into_iter().filter(|s| auth.signed_in(*s)).collect();
         for subscription in signed_in {
             spawn(async move {
                 let found = background(async move {
@@ -475,13 +494,50 @@ impl AppState {
                     Ok(Err(error)) => format!("{error:#}"),
                     Err(error) => format!("{error}"),
                 };
-                app.accounts.update(|accounts| {
-                    if let Some(entry) = accounts.iter_mut().find(|(name, _)| name == subscription.label()) {
-                        entry.1 = status;
-                    }
-                });
+                app.set_account_status(subscription, status);
                 app.models.set(app.config.with(|c| c.selectable_models()));
             });
+        }
+    }
+
+    fn set_account_status(&self, subscription: bubble_core::auth::Subscription, status: String) {
+        self.accounts.update(|accounts| {
+            if let Some(account) = accounts.iter_mut().find(|a| a.subscription == subscription) {
+                account.status = status;
+            }
+        });
+    }
+
+    /// Signs in to `subscription` in the browser (the Grok CLI's sign-in is
+    /// taken when there is one).
+    pub fn sign_in(&self, subscription: bubble_core::auth::Subscription) {
+        use bubble_core::auth::{AuthFile, Subscription};
+        let app = *self;
+        app.set_account_status(subscription, "Finish signing in in your browser…".into());
+        spawn(async move {
+            let done = background(async move {
+                let auth = AuthFile::default();
+                let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+                if subscription == Subscription::Grok && bubble_core::login::import_grok_cli(&auth, &bubble_home(), &home)? {
+                    return Ok(());
+                }
+                let pending = bubble_core::login::begin(subscription).await?;
+                bubble_core::login::open_browser(&pending.url);
+                pending.finish(&http_client()?, &auth).await.map(|_| ())
+            })
+            .await;
+            match done {
+                Ok(Ok(())) => app.discover_models(),
+                Ok(Err(error)) => app.set_account_status(subscription, format!("{error:#}")),
+                Err(error) => app.set_account_status(subscription, format!("{error}")),
+            }
+        });
+    }
+
+    pub fn sign_out(&self, subscription: bubble_core::auth::Subscription) {
+        match bubble_core::auth::AuthFile::default().remove(subscription) {
+            Ok(_) => self.discover_models(),
+            Err(error) => self.set_account_status(subscription, format!("{error:#}")),
         }
     }
 

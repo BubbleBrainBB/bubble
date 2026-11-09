@@ -460,18 +460,16 @@ fn account_settings(app: AppState) -> impl IntoElement {
                 .gap(px(2.0))
                 .child(text("Subscriptions").text_size(px(BODY)).text_color(ink()))
                 .child(
-                    text("Sign-ins made with the Bubble CLI (/login); their models show in the lists above")
+                    text("Sign in with a ChatGPT or Grok plan; their models show in the lists above")
                         .text_size(px(SMALL))
                         .text_color(muted()),
                 ),
         )
-        .child(when(move || app.accounts.get().is_empty(), || {
-            text("Not signed in to ChatGPT or Grok.").text_size(px(SMALL)).text_color(muted())
-        }))
         .child(each(
             move || app.accounts.get(),
-            |account: &(String, String)| account.0.clone(),
-            |account, _| {
+            |account: &crate::state::Account| account.subscription.label().to_owned(),
+            move |account, _| {
+                let subscription = account.with_untracked(|a| a.subscription);
                 view()
                     .flex_row()
                     .items_center()
@@ -482,8 +480,15 @@ fn account_settings(app: AppState) -> impl IntoElement {
                     .border(px(LINE))
                     .border_color(border())
                     .bg(pane())
-                    .child(text(move || account.get().0).text_size(px(BODY)).text_color(ink()).min_w(px(80.0)))
-                    .child(text(move || account.get().1).flex_1().text_size(px(SMALL)).text_color(muted()))
+                    .child(text(subscription.label()).text_size(px(BODY)).text_color(ink()).min_w(px(80.0)))
+                    .child(text(move || account.get().status).flex_1().text_size(px(SMALL)).text_color(muted()))
+                    .child(dynamic(move || {
+                        if account.get().signed_in {
+                            crate::ui::button("Sign out", move || app.sign_out(subscription)).into_element()
+                        } else {
+                            crate::ui::button("Sign in", move || app.sign_in(subscription)).into_element()
+                        }
+                    }))
             },
         ))
 }

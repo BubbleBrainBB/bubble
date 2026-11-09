@@ -1,6 +1,7 @@
 //! The full-screen interactive session: an NSH app drawn in the terminal
 //! by `bubble-term`, its agent a [`runner`] task on the runtime.
 
+pub mod files;
 pub mod runner;
 pub mod state;
 pub mod view;
@@ -124,6 +125,12 @@ mod tests {
         format!("http://{address}")
     }
 
+    /// What the composer holds.
+    fn draft(term: &Virtual) -> String {
+        let id = term.tree.focused.expect("the composer has the focus");
+        term.tree.node(id).and_then(|n| n.input.as_ref()).map(|i| i.text.clone()).unwrap_or_default()
+    }
+
     #[test]
     fn the_screen_runs_a_conversation() {
         let root = std::env::temp_dir().join(format!("bubble-tui-{}", std::process::id()));
@@ -175,6 +182,41 @@ mod tests {
         wait(&mut term, "Model: mock:other-model");
         wait(&mut term, "mock:other-model · ");
         println!("{}", term.text());
+
+        // @ completes a file, whose contents go with the prompt.
+        term.type_text("@no");
+        wait(&mut term, "@notes.txt");
+        term.key("tab");
+        assert_eq!(draft(&term), "@notes.txt ");
+        term.type_text("what is this");
+        term.key("enter");
+        wait(&mut term, "Referenced files:");
+        assert!(term.text().lines().any(|l| l.trim_end_matches(['┃', ' ']).trim() == "hello"), "the file's contents went along:\n{}", term.text());
+
+        // Up and Down walk the prompts typed before.
+        term.key("up");
+        assert_eq!(draft(&term), "@notes.txt what is this");
+        term.key("up");
+        assert_eq!(draft(&term), "make notes");
+        term.key("down");
+        term.key("down");
+        assert_eq!(draft(&term), "");
+        let history = std::fs::read_to_string(home.join("input-history.jsonl")).unwrap();
+        assert!(history.contains("\"make notes\"") && !history.contains("/model"), "{history}");
+
+        term.type_text("/context");
+        term.key("enter");
+        wait(&mut term, "Context for mock:other-model");
+        term.type_text("/mcp");
+        term.key("enter");
+        wait(&mut term, "No MCP servers are configured");
+        term.type_text("/compact");
+        term.key("enter");
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while !["too short", "Summarized", "Compacting failed"].iter().any(|t| term.text().contains(t)) {
+            assert!(std::time::Instant::now() < end, "/compact never answered:\n{}", term.text());
+            term.settle();
+        }
 
         term.key("ctrl+c");
         assert!(term.exited, "Ctrl+C on an empty composer quits");

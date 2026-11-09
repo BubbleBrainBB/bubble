@@ -11,6 +11,7 @@ pub mod delegate;
 pub mod discover;
 pub mod hooks;
 pub mod instructions;
+pub mod login;
 pub mod mcp;
 pub mod memory;
 pub mod model;

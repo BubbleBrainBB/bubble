@@ -4,6 +4,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
+use bubble_core::auth::{AuthFile, Subscription};
 use bubble_core::prompt::Mode;
 use bubble_core::{AgentEvent, ChatMessage, Decision, Level};
 use bubble_store::Task;
@@ -58,6 +59,9 @@ pub enum Pick {
     Model(String),
     Thinking(Level),
     Session(Task),
+    Login(Subscription),
+    Logout(Subscription),
+    Skill(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,15 +84,21 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/effort", "Reasoning effort: /effort <level>, or pick one"),
     ("/plan", "Toggle plan mode (Tab also switches Build/Plan)"),
     ("/session", "Browse this folder's sessions and resume one"),
+    ("/compact", "Summarize the older conversation now; text after it says what to keep"),
+    ("/context", "Show what fills the model's context"),
+    ("/mcp", "Show MCP servers; /mcp reconnect <name> tries one again"),
+    ("/skills", "Pick a skill to use"),
+    ("/login", "Sign in to a subscription: /login openai or /login grok"),
+    ("/logout", "Sign out of a subscription on this device"),
     ("/new", "Start a new session"),
     ("/clear", "Start a new session (alias of /new)"),
     ("/help", "Show commands and keys"),
     ("/quit", "Exit Bubble"),
 ];
 
-pub const HELP: &str = "Keys: Enter sends · Shift+Enter, Alt+Enter or Ctrl+J adds a line · Esc stops the agent · \
-Ctrl+C stops, clears, then exits · Tab switches Build/Plan · Ctrl+O shows full tool output · PgUp/PgDn scroll · \
-y/a/n answer a question";
+pub const HELP: &str = "Keys: Enter sends · Shift+Enter, Alt+Enter or Ctrl+J adds a line · Up/Down recall earlier prompts · \
+@ completes a file (its contents go with the prompt) · Esc stops the agent · Ctrl+C stops, clears, then exits · \
+Tab completes or switches Build/Plan · Ctrl+O shows full tool output · PgUp/PgDn scroll · y/a/n answer a question";
 
 #[derive(Clone, Copy)]
 pub struct Tui {
@@ -106,6 +116,16 @@ pub struct Tui {
     /// When the running turn started (ms).
     pub started: Signal<i64>,
     pub fatal: Signal<Option<String>>,
+    /// What the work under way is called in the status line.
+    pub activity: Signal<String>,
+    /// The project's files, for `@` mentions.
+    pub files: Signal<Vec<String>>,
+    /// The prompts typed in this folder, oldest first.
+    pub history: Signal<Vec<String>>,
+    /// The entry of `history` the composer shows, while it shows one.
+    pub recall: Signal<Option<usize>>,
+    /// The skills a person can name (`/<skill> task`), with descriptions.
+    pub skills: Signal<Vec<(String, String)>>,
     next_id: Stored<u64>,
     /// The reply streaming in, and its reasoning.
     reply: Stored<Option<u64>>,
@@ -130,6 +150,11 @@ impl Tui {
             context: signal(0),
             started: signal(0),
             fatal: signal(None),
+            activity: signal("Working".into()),
+            files: signal(Vec::new()),
+            history: signal(Vec::new()),
+            recall: signal(None),
+            skills: signal(Vec::new()),
             next_id: stored(0),
             reply: stored(None),
             thought: stored(None),
@@ -200,12 +225,37 @@ impl Tui {
             self.command(&text);
             return;
         }
+        self.prompt(text.clone(), text);
+    }
+
+    /// Sends `sent` to the agent, showing `shown`.
+    fn prompt(&self, shown: String, sent: String) {
+        let text = shown;
+        self.history.update(|h| {
+            if h.last() != Some(&text) {
+                h.push(text.clone());
+            }
+        });
+        self.recall.set(None);
         self.push(Kind::User, text.clone());
+        self.activity.set("Working".into());
         if self.turns.get_untracked() == 0 {
             self.started.set(bubble_store::now_ms());
         }
         self.turns.update(|t| *t += 1);
-        self.send(Command::Prompt(text));
+        self.send(Command::Prompt(sent));
+    }
+
+    /// Runs `command` as the agent's work: Esc stops it.
+    fn work(&self, activity: &str, command: Command) {
+        if self.busy() {
+            self.push(Kind::Error, "Stop the agent first (Esc).");
+            return;
+        }
+        self.activity.set(activity.into());
+        self.started.set(bubble_store::now_ms());
+        self.turns.update(|t| *t += 1);
+        self.send(command);
     }
 
     fn command(&self, text: &str) {
@@ -260,6 +310,35 @@ impl Tui {
                     .collect();
                 self.open(Picker { title: "Reasoning effort".into(), items, selected });
             }
+            "/login" | "/logout" => {
+                let login = name == "/login";
+                let subscription = match rest.to_ascii_lowercase().as_str() {
+                    "" => None,
+                    "openai" | "chatgpt" | "codex" => Some(Subscription::ChatGpt),
+                    "grok" | "xai" => Some(Subscription::Grok),
+                    other => {
+                        self.push(Kind::Error, format!("Unknown subscription {other}: openai or grok"));
+                        return;
+                    }
+                };
+                match (subscription, login) {
+                    (Some(s), true) => self.login(s),
+                    (Some(s), false) => self.send(Command::Logout(s)),
+                    (None, _) => {
+                        let auth = AuthFile::default();
+                        let items = [Subscription::ChatGpt, Subscription::Grok]
+                            .into_iter()
+                            .map(|s| Item {
+                                label: format!("{} ({})", s.label(), if s == Subscription::ChatGpt { "openai" } else { "grok" }),
+                                detail: if auth.signed_in(s) { "signed in".into() } else { String::new() },
+                                pick: if login { Pick::Login(s) } else { Pick::Logout(s) },
+                            })
+                            .collect();
+                        let title = if login { "Sign in to" } else { "Sign out of" };
+                        self.open(Picker { title: title.into(), items, selected: 0 });
+                    }
+                }
+            }
             "/session" | "/sessions" | "/resume" => {
                 if self.busy() {
                     self.push(Kind::Error, "Stop the agent first (Esc).");
@@ -267,10 +346,47 @@ impl Tui {
                 }
                 self.send(Command::Sessions);
             }
+            "/compact" => self.work("Summarizing", Command::Compact((!rest.is_empty()).then(|| rest.to_owned()))),
+            "/context" => self.send(Command::Context),
+            "/mcp" => match rest.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((rest, "")) {
+                ("", _) | ("list", _) => self.send(Command::Mcp(None)),
+                ("reconnect", server) if !server.is_empty() => self.send(Command::Mcp(Some(server.to_owned()))),
+                _ => {
+                    self.push(Kind::Error, "Usage: /mcp [list | reconnect <name>]");
+                }
+            },
+            "/skills" => {
+                let items: Vec<Item> = self
+                    .skills
+                    .get_untracked()
+                    .into_iter()
+                    .map(|(name, description)| Item { label: name.clone(), detail: description, pick: Pick::Skill(name) })
+                    .collect();
+                if items.is_empty() {
+                    self.push(Kind::Notice, "No skills found (~/.bubble/skills, ~/.agents/skills, ~/.claude/skills, .bubble/skills).");
+                } else {
+                    self.open(Picker { title: "Use a skill: pick one, then say the task".into(), items, selected: 0 });
+                }
+            }
             _ => {
+                // `/<skill> task`: the agent loads that skill for the task.
+                let skill = name.trim_start_matches('/');
+                if !rest.is_empty() && self.skills.with_untracked(|s| s.iter().any(|(n, _)| n == skill)) {
+                    let sent = format!(
+                        "Use the skill tool to load the \"{skill}\" skill before responding.\nThe task clearly matches that skill.\n\
+                         Do not simply restate the skill contents; use the loaded instructions to complete the task.\n\nUser request:\n{rest}"
+                    );
+                    self.prompt(text.to_owned(), sent);
+                    return;
+                }
                 self.push(Kind::Error, format!("Unknown command {name}. /help lists them."));
             }
         }
+    }
+
+    /// Signs in; the wait counts as work Esc can stop.
+    fn login(&self, subscription: Subscription) {
+        self.work("Waiting for the sign-in", Command::Login(subscription));
     }
 
     pub fn toggle_plan(&self) {
@@ -303,6 +419,9 @@ impl Tui {
             Pick::Model(model) => self.send(Command::Model(model.clone())),
             Pick::Thinking(level) => self.send(Command::Thinking(*level)),
             Pick::Session(task) => self.send(Command::Resume(task.clone())),
+            Pick::Login(subscription) => self.login(*subscription),
+            Pick::Logout(subscription) => self.send(Command::Logout(*subscription)),
+            Pick::Skill(name) => self.draft.set(format!("/{name} ")),
         }
     }
 
@@ -405,6 +524,13 @@ impl Tui {
                 }
                 let selected = items.iter().position(|i| i.label == current).unwrap_or(0);
                 self.open(Picker { title: "Resume a session".into(), items, selected });
+            }
+            Update::Helpers { files, history, skills } => {
+                self.files.set(files);
+                self.skills.set(skills);
+                if !history.is_empty() {
+                    self.history.set(history);
+                }
             }
             Update::Ended { stopped, error } => {
                 self.finish_reply();

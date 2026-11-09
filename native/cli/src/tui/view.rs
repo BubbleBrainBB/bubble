@@ -365,7 +365,8 @@ fn status(tui: Tui) -> impl IntoElement {
         text(move || {
             let t = tick.get();
             let seconds = (bubble_store::now_ms() - tui.started.get()).max(0) / 1000;
-            let waiting = if tui.ask.with(Option::is_some) { "Waiting for you" } else { "Working" };
+            let activity = tui.activity.get();
+            let waiting = if tui.ask.with(Option::is_some) { "Waiting for you" } else { activity.as_str() };
             let queued = tui.turns.get().saturating_sub(1);
             let queued = if queued > 0 { format!(" · {queued} queued") } else { String::new() };
             format!("{} {waiting}… {seconds}s{queued} · esc to stop", SPINNER[t % SPINNER.len()])
@@ -432,7 +433,9 @@ fn picker_view(tui: Tui) -> impl IntoElement {
 
 fn picker_row(tui: Tui, index: usize, selected: bool, item: Item) -> AnyElement {
     let mark = if selected { "› " } else { "  " };
-    let label = text(format!("{mark}{}", item.label)).number_of_lines(1).flex_1().min_w(px(0.0));
+    // The name keeps its room; a long description gets what is left, on
+    // one line.
+    let label = text(format!("{mark}{}", item.label)).number_of_lines(1).flex_shrink_0().max_w(col(40.0));
     let label = if selected { label.text_color(color(ACCENT)).font_weight(FontWeight::BOLD) } else { label };
     view()
         .flex_row()
@@ -446,20 +449,47 @@ fn picker_row(tui: Tui, index: usize, selected: bool, item: Item) -> AnyElement 
             tui.choose();
         })
         .child(label)
-        .child(muted(item.detail))
+        .child(muted(item.detail).number_of_lines(1).flex_1().min_w(px(0.0)))
         .into_element()
 }
 
-/// The commands the draft starts, while it is one word starting with `/`.
-fn suggestions(draft: &str) -> Vec<(&'static str, &'static str)> {
-    if !draft.starts_with('/') || draft.contains(char::is_whitespace) {
-        return Vec::new();
+/// A completion the composer offers.
+#[derive(Clone, Debug, PartialEq)]
+struct Suggestion {
+    label: String,
+    detail: String,
+    /// The draft once it is taken.
+    complete: String,
+    /// A command, which Enter runs (a file is only put in the draft).
+    command: bool,
+}
+
+/// The commands the draft starts (one word starting with `/`), or the
+/// project files the `@` word it ends in names.
+fn suggestions(tui: Tui, draft: &str) -> Vec<Suggestion> {
+    if draft.starts_with('/') && !draft.contains(char::is_whitespace) {
+        return COMMANDS
+            .iter()
+            .filter(|(c, _)| c.starts_with(draft) && *c != draft)
+            .map(|(c, about)| Suggestion { label: c.to_string(), detail: about.to_string(), complete: format!("{c} "), command: true })
+            .collect();
     }
-    COMMANDS.iter().copied().filter(|(c, _)| c.starts_with(draft) && *c != draft).collect()
+    let Some((at, query)) = super::files::mention_at_end(draft) else { return Vec::new() };
+    tui.files.with(|files| {
+        super::files::matching(files, query, 8)
+            .into_iter()
+            .map(|path| Suggestion {
+                label: format!("@{path}"),
+                detail: String::new(),
+                complete: format!("{}@{path} ", &draft[..at]),
+                command: false,
+            })
+            .collect()
+    })
 }
 
 fn suggestions_view(tui: Tui, at: Signal<usize>) -> impl IntoElement {
-    let list = move || tui.draft.with(|d| suggestions(d));
+    let list = move || tui.draft.with(|d| suggestions(tui, d));
     on_key_with("up", KeyOptions { when: When::Always, repeat: true }, move |_| {
         let count = list().len().max(1);
         at.update(|a| *a = (*a + count - 1) % count);
@@ -475,20 +505,61 @@ fn suggestions_view(tui: Tui, at: Signal<usize>) -> impl IntoElement {
                 list()
                     .into_iter()
                     .enumerate()
-                    .map(|(i, (command, about))| {
-                        let name = text(format!("{command:<10}"));
+                    .map(|(i, suggestion)| {
+                        let name = text(format!("{:<10}", suggestion.label)).number_of_lines(1);
                         let name = if i == selected { name.text_color(color(ACCENT)).font_weight(FontWeight::BOLD) } else { name };
+                        let complete = suggestion.complete.clone();
                         view()
                             .flex_row()
-                            .on_press(move || tui.draft.set(format!("{command} ")))
+                            .gap(col(1.0))
+                            .on_press(move || tui.draft.set(complete.clone()))
                             .child(name)
-                            .child(muted(about).number_of_lines(1).flex_1().min_w(px(0.0)))
+                            .child(muted(suggestion.detail).number_of_lines(1).flex_1().min_w(px(0.0)))
                             .into_element()
                     })
                     .collect::<Vec<_>>(),
             )
             .into_element()
     }))
+}
+
+/// Up and Down walk the prompts typed before, while the composer is empty
+/// or shows one of them unchanged.
+fn history_keys(tui: Tui) -> impl IntoElement {
+    let show = move |index: Option<usize>| {
+        tui.recall.set(index);
+        let text = index.and_then(|i| tui.history.with_untracked(|h| h.get(i).cloned())).unwrap_or_default();
+        tui.draft.set(text);
+    };
+    on_key_with("up", KeyOptions { when: When::Always, repeat: true }, move |_| {
+        let count = tui.history.with_untracked(Vec::len);
+        if count > 0 {
+            show(Some(tui.recall.get_untracked().map_or(count - 1, |i| i.saturating_sub(1))));
+        }
+    });
+    on_key_with("down", KeyOptions { when: When::Always, repeat: true }, move |_| {
+        let count = tui.history.with_untracked(Vec::len);
+        match tui.recall.get_untracked() {
+            Some(i) if i + 1 < count => show(Some(i + 1)),
+            Some(_) => show(None),
+            None => {}
+        }
+    });
+    view()
+}
+
+/// Whether Up and Down belong to the history now.
+fn browsing_history(tui: Tui) -> bool {
+    if tui.picker.with(Option::is_some) || tui.ask.with(Option::is_some) {
+        return false;
+    }
+    tui.draft.with(|draft| {
+        if !suggestions(tui, draft).is_empty() {
+            return false;
+        }
+        draft.is_empty()
+            || tui.recall.get().is_some_and(|i| tui.history.with(|h| h.get(i).is_some_and(|entry| entry == draft)))
+    })
 }
 
 fn composer(tui: Tui, at: Signal<usize>) -> impl IntoElement {
@@ -501,9 +572,15 @@ fn composer(tui: Tui, at: Signal<usize>) -> impl IntoElement {
     };
     let submit = move || {
         let draft = tui.draft.get_untracked();
-        let list = suggestions(&draft);
+        let list = suggestions(tui, &draft);
         let text = match list.get(at.get_untracked()) {
-            Some((command, _)) => command.to_string(),
+            Some(s) if s.command => s.complete.trim().to_owned(),
+            // A file is put in the draft; Enter again sends.
+            Some(s) => {
+                tui.draft.set(s.complete.clone());
+                at.set(0);
+                return;
+            }
             None => draft,
         };
         tui.draft.set(String::new());
@@ -538,6 +615,11 @@ fn composer(tui: Tui, at: Signal<usize>) -> impl IntoElement {
                 .on_change(move |value: &str| {
                     tui.draft.set(value.to_owned());
                     at.set(0);
+                    // An edited entry is the person's own draft now.
+                    let recalled = tui.recall.get_untracked().and_then(|i| tui.history.with_untracked(|h| h.get(i).cloned()));
+                    if recalled.is_some_and(|entry| entry != value) {
+                        tui.recall.set(None);
+                    }
                 })
                 .on_submit(move |_: &str| submit()),
         )
@@ -601,9 +683,9 @@ pub fn screen(tui: Tui) -> impl IntoElement {
         }
     });
     on_key_with("tab", KeyOptions { when: When::Always, repeat: false }, move |_| {
-        let list = tui.draft.with_untracked(|d| suggestions(d));
+        let list = tui.draft.with_untracked(|d| suggestions(tui, d));
         match list.get(at.get_untracked()) {
-            Some((command, _)) => tui.draft.set(format!("{command} ")),
+            Some(s) => tui.draft.set(s.complete.clone()),
             None => tui.toggle_plan(),
         }
     });
@@ -616,9 +698,10 @@ pub fn screen(tui: Tui) -> impl IntoElement {
         .child(when(move || tui.ask.with(Option::is_some), move || approval(tui)))
         .child(when(move || tui.picker.with(Option::is_some), move || picker_view(tui)))
         .child(when(
-            move || tui.picker.with(Option::is_none) && tui.draft.with(|d| !suggestions(d).is_empty()),
+            move || tui.picker.with(Option::is_none) && tui.draft.with(|d| !suggestions(tui, d).is_empty()),
             move || suggestions_view(tui, at),
         ))
+        .child(when(move || browsing_history(tui), move || history_keys(tui)))
         .child(composer(tui, at))
         .child(footer(tui))
 }

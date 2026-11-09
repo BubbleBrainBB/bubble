@@ -22,6 +22,7 @@ bubble-term = { path = "../crates/bubble-term" }
 nsh-core = "0.4.0"
 nsh-base = "0.4.0"
 nsh-engine = "0.4.0"
+ignore = "0.4"
 
 [dev-dependencies]
 serde_json.workspace = true

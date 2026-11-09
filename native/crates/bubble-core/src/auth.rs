@@ -42,14 +42,14 @@ impl Subscription {
         }
     }
 
-    fn token_url(self) -> &'static str {
+    pub(crate) fn token_url(self) -> &'static str {
         match self {
             Subscription::ChatGpt => "https://auth.openai.com/oauth/token",
             Subscription::Grok => "https://auth.x.ai/oauth2/token",
         }
     }
 
-    fn client_id(self) -> &'static str {
+    pub(crate) fn client_id(self) -> &'static str {
         match self {
             Subscription::ChatGpt => "app_EMoamEEZ73f0CkXaXp7hrann",
             Subscription::Grok => "b1a00492-073a-47ea-816f-4c329264a828",
@@ -72,7 +72,7 @@ pub struct Token {
     pub account_id: Option<String>,
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
@@ -112,6 +112,40 @@ impl AuthFile {
             Subscription::Grok => &["grok"],
         };
         keys.iter().find_map(|k| map.get(*k).filter(|v| v["accessToken"].is_string()).cloned())
+    }
+
+    /// Stores a new sign-in for `subscription` (its `oauth` entry), under
+    /// the refresh lock; other entries stay as they were.
+    pub fn save(&self, subscription: Subscription, entry: Value) -> Result<()> {
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let _lock = Lock::acquire(&self.path)?;
+        let mut map = self.read()?;
+        if subscription == Subscription::ChatGpt {
+            map.remove("openai-codex");
+        }
+        map.insert(subscription.key().to_owned(), entry);
+        self.write(&map)
+    }
+
+    /// Forgets the sign-in of `subscription` on this device; whether there
+    /// was one.
+    pub fn remove(&self, subscription: Subscription) -> Result<bool> {
+        let _lock = Lock::acquire(&self.path)?;
+        let mut map = self.read()?;
+        let keys: &[&str] = match subscription {
+            Subscription::ChatGpt => &["openai", "openai-codex"],
+            Subscription::Grok => &["grok"],
+        };
+        let mut removed = false;
+        for key in keys {
+            removed |= map.remove(*key).is_some();
+        }
+        if removed {
+            self.write(&map)?;
+        }
+        Ok(removed)
     }
 
     /// Whether the person signed in to `subscription`.
@@ -190,7 +224,7 @@ pub fn account_id_in(jwt: &str) -> Option<String> {
     auth["chatgpt_account_id"].as_str().or_else(|| auth["account_id"].as_str()).map(str::to_owned)
 }
 
-fn base64_url_decode(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn base64_url_decode(text: &str) -> Option<Vec<u8>> {
     let mut bits = 0u32;
     let mut count = 0;
     let mut out = Vec::new();

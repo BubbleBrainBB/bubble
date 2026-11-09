@@ -253,9 +253,23 @@ pub fn rebuild(plan: Plan, summary: &str) -> Vec<ChatMessage> {
 
 /// Has the model summarize the old part of `history`; the new history.
 pub async fn compact(client: &reqwest::Client, model: &ResolvedModel, history: &[ChatMessage]) -> Result<Option<Vec<ChatMessage>>> {
+    compact_with(client, model, history, None).await
+}
+
+/// [`compact`], keeping what the person asked to keep (`/compact <focus>`).
+pub async fn compact_with(
+    client: &reqwest::Client,
+    model: &ResolvedModel,
+    history: &[ChatMessage],
+    focus: Option<&str>,
+) -> Result<Option<Vec<ChatMessage>>> {
     let Some(plan) = plan(history) else { return Ok(None) };
+    let system = match focus.map(str::trim).filter(|f| !f.is_empty()) {
+        Some(focus) => format!("{PROMPT}\n\nThe person asked that the summary especially preserve: {focus}"),
+        None => PROMPT.to_owned(),
+    };
     let request = ChatRequest {
-        system: Some(PROMPT.to_owned()),
+        system: Some(system),
         messages: vec![ChatMessage::user(serialize(&plan))],
         tools: Vec::new(),
         max_tokens: 8192,

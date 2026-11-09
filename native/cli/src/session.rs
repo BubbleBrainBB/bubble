@@ -199,6 +199,59 @@ impl Session {
         self.system = compose(&self.model, &self.cwd, mode);
     }
 
+    pub fn toolbox(&self) -> &Toolbox {
+        &self.toolbox
+    }
+
+    /// Summarizes the older part of the conversation now (`/compact`); how
+    /// many messages it replaced, `None` when there is too little to.
+    pub async fn compact(&mut self, focus: Option<&str>) -> Result<Option<usize>> {
+        let Some(next) = bubble_core::compact::compact_with(&self.client, &self.model, &self.history, focus).await? else {
+            return Ok(None);
+        };
+        let replaced = self.history.len().saturating_sub(next.len());
+        self.keep(&AgentEvent::Compacted(next))?;
+        Ok(Some(replaced))
+    }
+
+    /// What fills the model's context: an estimate by part (`/context`).
+    pub fn context(&self) -> String {
+        use bubble_core::compact::{estimate_messages, estimate_text, estimate_tools};
+        let unlocked = self.unlocked.lock().map(|u| u.clone()).unwrap_or_default();
+        let mut tools = bubble_core::tools::specs();
+        tools.extend(self.toolbox.specs(&unlocked));
+        let system = estimate_text(&self.system);
+        let tools = estimate_tools(&tools);
+        let messages = estimate_messages(&self.history);
+        let total = system + tools + messages;
+        let window = bubble_core::model::info(&self.model.provider.id, &self.model.model).context_window;
+        let share = |n: u64| match window {
+            Some(w) if w > 0 => format!(" ({:.1}%)", n as f64 * 100.0 / w as f64),
+            _ => String::new(),
+        };
+        let mut lines = vec![
+            format!(
+                "Context for {}: about {} tokens{}",
+                self.model_label(),
+                thousands(total),
+                window.map(|w| format!(" of {}", thousands(w))).unwrap_or_default()
+            ),
+            format!("  System prompt   {:>9}{}", thousands(system), share(system)),
+            format!("  Tools           {:>9}{}", thousands(tools), share(tools)),
+            format!("  Messages ({:>3}) {:>9}{}", self.history.len(), thousands(messages), share(messages)),
+        ];
+        if let Some(w) = window
+            && bubble_core::compact::should_compact(Some(w), total)
+        {
+            lines.push("Earlier messages will be summarized before the next model call.".into());
+        }
+        lines.join("\n")
+    }
+
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
     pub fn model_label(&self) -> String {
         format!("{}:{}", self.model.provider.id, self.model.model)
     }
@@ -307,6 +360,18 @@ impl Session {
         }
         Ok(())
     }
+}
+
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The system prompt for `model` working in `cwd` in `mode`.

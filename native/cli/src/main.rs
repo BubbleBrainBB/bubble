@@ -3,6 +3,7 @@
 //! an interactive session reads prompts line by line.
 
 mod args;
+mod changes;
 mod session;
 mod tui;
 
@@ -60,8 +61,13 @@ struct Tally {
     text: String,
     turns: u64,
     tool_calls: u64,
+    /// The prompt tokens no cache served.
     input: u64,
+    cache_read: u64,
+    cache_creation: u64,
     output: u64,
+    reasoning: u64,
+    total: u64,
     reported: bool,
 }
 
@@ -76,9 +82,15 @@ impl Tally {
             }
             AgentEvent::ToolStarted { .. } => self.tool_calls += 1,
             AgentEvent::Usage(usage) => {
+                // As the TypeScript CLI reports it: input is the uncached
+                // remainder; the three add up to the whole prompt.
                 self.reported = true;
-                self.input += usage.input_tokens;
+                self.input += usage.input_tokens.saturating_sub(usage.cache_read_tokens + usage.cache_creation_tokens);
+                self.cache_read += usage.cache_read_tokens;
+                self.cache_creation += usage.cache_creation_tokens;
                 self.output += usage.output_tokens;
+                self.reasoning += usage.reasoning_tokens;
+                self.total += usage.input_tokens + usage.output_tokens;
             }
             _ => {}
         }
@@ -90,11 +102,11 @@ impl Tally {
             "num_tool_calls": self.tool_calls,
             "usage": {
                 "input_tokens": self.input,
-                "cache_read_input_tokens": 0,
-                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": self.cache_read,
+                "cache_creation_input_tokens": self.cache_creation,
                 "output_tokens": self.output,
-                "reasoning_tokens": 0,
-                "total_tokens": self.input + self.output,
+                "reasoning_tokens": self.reasoning,
+                "total_tokens": self.total,
             },
             "usage_reported": self.reported,
         })
@@ -458,13 +470,19 @@ async fn run(args: Args) -> Result<i32> {
         }
         if args.output == Output::Json {
             let mut host = QuietHost { mode: args.mode, tally: Tally::default() };
+            // What git saw change, as the TypeScript CLI reports it.
+            let baseline = changes::baseline(&session.cwd);
             let outcome = session.turn(&prompt, &mut host, std::future::pending()).await;
             let mut result = host.tally.summary();
+            let changed = baseline.and_then(|b| changes::detect(&session.cwd, &b));
             match outcome {
                 Ok(_) => {
                     result["text"] = json!(host.tally.text);
                     result["stopReason"] = json!("end_turn");
                     result["sessionId"] = json!(session.task.id);
+                    if let Some(changed) = changed {
+                        result["changes"] = changed;
+                    }
                     println!("{result}");
                     return Ok(0);
                 }
@@ -472,6 +490,9 @@ async fn run(args: Args) -> Result<i32> {
                     let mut failure = json!({ "type": "error", "message": format!("{error:#}"), "stopReason": "error", "sessionId": session.task.id, "text": host.tally.text });
                     for key in ["num_turns", "num_tool_calls", "usage"] {
                         failure[key] = result[key].clone();
+                    }
+                    if let Some(changed) = changed {
+                        failure["changes"] = changed;
                     }
                     println!("{failure}");
                     return Ok(1);

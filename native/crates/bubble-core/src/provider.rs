@@ -130,8 +130,58 @@ pub enum StreamEvent {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Usage {
+    /// The whole prompt, cached parts included.
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Of `input_tokens`: read from the provider's prompt cache.
+    pub cache_read_tokens: u64,
+    /// Of `input_tokens`: written to the cache (Anthropic).
+    pub cache_creation_tokens: u64,
+    /// Of `output_tokens`: reasoning, where the provider says.
+    pub reasoning_tokens: u64,
+}
+
+impl Usage {
+    /// An OpenAI Chat Completions `usage` (DeepSeek's cache fields too).
+    pub fn from_chat(usage: &Value) -> Usage {
+        let input = usage["prompt_tokens"].as_u64().unwrap_or(0);
+        let cached = usage["prompt_cache_hit_tokens"].as_u64().or_else(|| usage["prompt_tokens_details"]["cached_tokens"].as_u64());
+        Usage {
+            input_tokens: input,
+            output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
+            cache_read_tokens: cached.unwrap_or(0).min(input),
+            cache_creation_tokens: 0,
+            reasoning_tokens: usage["completion_tokens_details"]["reasoning_tokens"].as_u64().unwrap_or(0),
+        }
+    }
+
+    /// A Responses API `usage`.
+    pub fn from_responses(usage: &Value) -> Usage {
+        let input = usage["input_tokens"].as_u64().unwrap_or(0);
+        Usage {
+            input_tokens: input,
+            output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
+            cache_read_tokens: usage["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0).min(input),
+            cache_creation_tokens: 0,
+            reasoning_tokens: usage["output_tokens_details"]["reasoning_tokens"].as_u64().unwrap_or(0),
+        }
+    }
+
+    /// An Anthropic `usage`, merged into what came before (a
+    /// `message_delta` may repeat some fields and not others). Anthropic's
+    /// `input_tokens` leave the cached parts out.
+    pub fn merge_anthropic(&mut self, usage: &Value) {
+        let uncached_before = self.input_tokens.saturating_sub(self.cache_read_tokens + self.cache_creation_tokens);
+        let uncached = usage["input_tokens"].as_u64().unwrap_or(uncached_before);
+        let read = usage["cache_read_input_tokens"].as_u64().unwrap_or(self.cache_read_tokens);
+        let created = usage["cache_creation_input_tokens"].as_u64().unwrap_or(self.cache_creation_tokens);
+        self.input_tokens = uncached + read + created;
+        self.cache_read_tokens = read;
+        self.cache_creation_tokens = created;
+        if let Some(output) = usage["output_tokens"].as_u64() {
+            self.output_tokens = output;
+        }
+    }
 }
 
 /// The whole reply, once the stream ends.
@@ -317,10 +367,7 @@ impl StreamState {
             "response.completed" | "response.done" | "response.incomplete" => {
                 let usage = &value["response"]["usage"];
                 if usage.is_object() {
-                    self.outcome.usage = Some(Usage {
-                        input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
-                        output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
-                    });
+                    self.outcome.usage = Some(Usage::from_responses(usage));
                 }
                 self.outcome.stop_reason = Some(if kind == "response.incomplete" { "incomplete".into() } else { "stop".into() });
                 return Ok(true);
@@ -411,10 +458,7 @@ impl StreamState {
             }
         }
         if let Some(usage) = value.get("usage").filter(|u| u.is_object()) {
-            self.outcome.usage = Some(Usage {
-                input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
-                output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
-            });
+            self.outcome.usage = Some(Usage::from_chat(usage));
         }
         Ok(false)
     }
@@ -426,10 +470,7 @@ impl StreamState {
         match kind {
             "message_start" => {
                 let usage = &value["message"]["usage"];
-                self.outcome.usage = Some(Usage {
-                    input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
-                    output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
-                });
+                self.outcome.usage.get_or_insert_with(Usage::default).merge_anthropic(usage);
             }
             "content_block_start" => {
                 let block = &value["content_block"];
@@ -463,8 +504,8 @@ impl StreamState {
                 if let Some(reason) = value["delta"]["stop_reason"].as_str() {
                     self.outcome.stop_reason = Some(reason.to_owned());
                 }
-                if let Some(output) = value["usage"]["output_tokens"].as_u64() {
-                    self.outcome.usage.get_or_insert_with(Usage::default).output_tokens = output;
+                if value["usage"].is_object() {
+                    self.outcome.usage.get_or_insert_with(Usage::default).merge_anthropic(&value["usage"]);
                 }
             }
             "message_stop" => return Ok(true),
@@ -814,7 +855,7 @@ pub(crate) mod tests {
                 "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n\
                  data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n\
                  data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\n\
-                 data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3}}\n\n\
+                 data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":8}}}\n\n\
                  data: [DONE]\n\n"
                     .to_owned(),
             ],
@@ -826,7 +867,7 @@ pub(crate) mod tests {
         assert_eq!(outcome.text, "Hello");
         assert_eq!(outcome.reasoning, "think");
         assert_eq!(outcome.stop_reason.as_deref(), Some("stop"));
-        assert_eq!(outcome.usage, Some(Usage { input_tokens: 12, output_tokens: 3 }));
+        assert_eq!(outcome.usage, Some(Usage { input_tokens: 12, output_tokens: 3, cache_read_tokens: 8, ..Usage::default() }));
         assert_eq!(seen.first(), Some(&StreamEvent::Reasoning("think".into())));
         let sent = &server.await.unwrap()[0];
         assert!(sent.starts_with("POST /chat/completions"));
@@ -991,7 +1032,7 @@ pub(crate) mod tests {
         assert_eq!(outcome.text, "Looking.");
         assert_eq!(outcome.reasoning, "plan");
         assert_eq!(outcome.tool_calls, [ToolCall { id: "call_9".into(), name: "ls".into(), arguments: "{\"path\":\"src\"}".into() }]);
-        assert_eq!(outcome.usage, Some(Usage { input_tokens: 30, output_tokens: 9 }));
+        assert_eq!(outcome.usage, Some(Usage { input_tokens: 30, output_tokens: 9, ..Usage::default() }));
         let sent = &server.await.unwrap()[0];
         assert!(sent.starts_with("POST /responses"), "{sent}");
         assert_eq!(body_of(sent)["instructions"], "Be brief.");

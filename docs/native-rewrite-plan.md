@@ -150,6 +150,16 @@ native/
   - 测试 136 个全过（新增：终端后端单元测试和一个 NSH 小应用的打字/快捷键/点击测试；TUI 在虚拟终端上对假模型跑完整一轮：写文件、命令审批按 y、markdown 回复、斜杠提示、模型选择器切换、Ctrl-C 退出）。真实验证：在 pty + 终端模拟器里用 Kimi K3 跑，读文件、审批后跑 `wc -c`、回答渲染正确；改窗口大小、PgUp、会话选择器正常。
   - 未做：输入历史（上下键翻以前的 prompt）、`@文件` 补全、图片粘贴、/compact /context /mcp /skills /login 等其余命令、主题切换（目前按深色终端配色）、TS 的 diff 预览。
 
+- 2026-11-08（续）：第 6 批完成（未提交）：让 Rust CLI 能替代 TS CLI 日常使用。
+  - 原生登录：`bubble-core/src/login.rs`，PKCE + 本地回调，参数照搬 TS（ChatGPT 固定 1455 端口 `/auth/callback`，Grok 动态端口 `/callback` + nonce + `referrer=grok-build`）；授权码换 token 后在刷新锁下写 `auth.json`（格式同 TS，其他条目不动）；Grok 先尝试导入官方 Grok CLI 已有的登录（`~/.bubble/runtimes/grok/grok-home/auth.json` 或 `~/.grok/auth.json`）。TUI 加 `/login`、`/logout`（无参数弹选择器，等待浏览器时 Esc 取消）；桌面应用 Settings 的订阅一栏加了 Sign in / Sign out 按钮，不再需要 TS CLI 登录。验证：两家授权页都正常显示登录页（参数被接受），没有实际登录；换 token 与保存用假 token 服务器测试。
+  - TUI 输入历史：与 TS 共用 `~/.bubble/input-history.jsonl`（同格式，按目录过滤）；输入框为空、或正显示一条未改动的历史时，上下键翻历史，否则上下键照常移动光标。
+  - `@文件`：输入 `@` 后按名称/路径打分补全（同 TS 规则），Tab 或回车填入；发送时把提到的文件内容附在 prompt 后（≤200KB 内联，超出只写说明，项目外的路径忽略），格式同 TS。文件列表按 .gitignore 过滤，每轮结束后刷新。
+  - 新命令：`/compact [要保留什么]`（立即压缩，焦点文字加进摘要提示）、`/context`（系统提示、工具、消息各占多少，占窗口百分比）、`/mcp`（服务器状态，`/mcp reconnect 名字` 重连）、`/skills`（选择器，选中后填入 `/技能名 `）；`/技能名 任务` 快捷方式按 TS 的措辞让模型先载入该技能。
+  - 缓存 token：三种协议都解析缓存命中（OpenAI `prompt_tokens_details.cached_tokens` / DeepSeek `prompt_cache_hit_tokens`、Responses `input_tokens_details.cached_tokens`、Anthropic `cache_read/creation_input_tokens`）和推理 token。顺带修了 Anthropic 的输入计数只算未缓存部分的问题（导致上下文占用偏低、压缩触发偏晚）。JSON 输出的 usage 按 TS 口径：`input_tokens` 是未缓存部分，三项相加为完整 prompt。
+  - JSON 的 `changes` 字段：移植 TS 的 change-tracker，运行前记下 git 里已脏的文件，结束后报告本次新改的文件数和被改动的已有测试文件（删了几行）；不在 git 仓库时不输出该字段。
+  - 测试 144 个全过（新增：登录流程/错误 state/Grok 导入、ISO 时间解析、缓存 token、change-tracker、提及补全与展开；TUI 端到端加了 `@` 补全、历史、/context、/mcp、/compact）。真实验证：pty 里用真实配置看 /context、/mcp（arxiv 19 个工具、paper 连接失败如实显示）、/skills 选择器、`@` 补全。
+  - 仍未做：图片粘贴、主题切换、diff 预览、MCP prompts 与 OAuth 服务器、子代理加强（可写 worktree、429 自适应、档位路由、预算、重启续跑）、Google 原生协议与 Responses 加密推理回放、Session/Notification hooks、发布打包与 TS 退役。
+
 ## 修订记录
 
 - v1（2026-11-08）：初稿。
