@@ -160,6 +160,15 @@ native/
   - 测试 144 个全过（新增：登录流程/错误 state/Grok 导入、ISO 时间解析、缓存 token、change-tracker、提及补全与展开；TUI 端到端加了 `@` 补全、历史、/context、/mcp、/compact）。真实验证：pty 里用真实配置看 /context、/mcp（arxiv 19 个工具、paper 连接失败如实显示）、/skills 选择器、`@` 补全。
   - 仍未做：图片粘贴、主题切换、diff 预览、MCP prompts 与 OAuth 服务器、子代理加强（可写 worktree、429 自适应、档位路由、预算、重启续跑）、Google 原生协议与 Responses 加密推理回放、Session/Notification hooks、发布打包与 TS 退役。
 
+- 2026-11-08（续）：第 7 批完成（未提交）：子代理加强，对齐 TS 现行行为。
+  - 可写子代理：内置 `implementer` 档案（`mode: write_worktree`，用户/项目档案也可声明）。子代理在运行时分配的分离 worktree 里工作（`git worktree add --detach <临时目录> HEAD`，进入与父代理相同的子目录），父代理的工作区从不被碰。权限由代码判定（`bubble-core/src/worktree.rs`，照搬 TS 的 WorktreeApprovalController）：写/改文件必须在 worktree 内；命令里禁止 `git push` / `git remote` / `git worktree` / `sudo`，引用 worktree 外的绝对路径（/dev /tmp /usr /bin /opt /etc 除外）一律拒绝；其他需审批的工具都拒绝。结束时没有改动的 worktree 自动删除，有改动的保留，`wait_agent` 给出路径和 diff stat，由父代理审阅后自己应用。只有 worktree 检查完才标记为结束，等待的父代理能同时拿到 diff。工作流成员仍只读。委派策略提示词恢复了 TS 的"互不相干的改动组才委派写任务"条款。
+  - 调度：用 Scheduler 取代固定信号量。全局最多 8 个，按类别再限（quick/explore 3、deep/review 2、frontend 1、writing 2，可用 config `agentCategories` 覆盖）。子代理在 provider 自身重试用完后仍遇 429 时：容量降为当前运行数（之后每 2 秒最多再降 1，最低 1），该子代理带着上下文排队，3/6/12 秒后重试（最多 3 次）；安静 3 分钟后容量加 1，直到恢复 8。
+  - 档位路由：从 TS 模型目录生成 85 个模型的 fast/balanced/strong 档位表（ChatGPT 订阅即 `openai`）。`spawn_agent` 和工作流 `agent()` 的 `category` 现在真正生效：quick/explore 选父代理同一 provider 下更快一档的模型并用 low 档位，deep/review 沿用父模型并用 high 档位；只往下路由、父模型档位未知时不动（同 TS 的 rank guard）。优先级：调用指定 > 档案 > 类别 > 继承。
+  - 预算：按 TS 2026-07-06 的决定只做记账、不设上限（子代理只因任务完成而停止）。每个子代理统计 token（`wait_agent` 显示），工作流的 `budget.spent()` 返回成员已用 token，`total` 为 null。
+  - 重启续跑：任务的子代理记录（快照、历史、模型、档位等）存到 `~/.bubble/native/subagents/<任务id>/agent_N.json`，每轮结束和状态变化时写入。应用或 CLI 重新打开该任务时恢复：已结束的照旧，运行中被切断的标为失败（"Interrupted when Bubble closed"），`send_input` 带着完整上下文继续；新 id 接着编号。桌面应用打开任务即显示这些子代理，可写子代理的展开项显示保留的 worktree 和 diff。
+  - 测试 150 个全过（新增：worktree 创建/清理/策略、档位路由、调度器类别上限与 429 降容、磁盘恢复、端到端 implementer：写进 worktree、push 被代码拒绝、项目不变、记录落盘）。真实验证（Kimi K3）：让 implementer 给 calc.py 加 multiply 和测试，它在 worktree 里改了两个文件并跑通测试，父代理报告了 worktree 路径和 diff stat，项目目录未变；我另行在 worktree 里复核 diff 和测试后删除了它。
+  - 未做：子代理运行中被关闭/取消时不检查 worktree（保留并显示路径，不给 diff stat）；TS 的启动速率间隔（burst 4 + 500ms）没移植；路由菜单未按 TS 的完整格式放进工具描述（只给类别说明，`/context` 不显示）。
+
 ## 修订记录
 
 - v1（2026-11-08）：初稿。

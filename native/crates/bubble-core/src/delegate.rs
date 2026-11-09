@@ -2,19 +2,30 @@
 //! self-contained brief, then collects (src/agent/subagent/, profiles.ts and
 //! tools/agent-lifecycle.ts in the TypeScript core).
 //!
-//! Children are read-only: they read, search and look things up, and hand
-//! back a summary. They cannot ask the person anything (a tool that needs a
-//! yes is blocked) and cannot start children of their own. Profiles come
-//! built in (`default`, `explorer`, `worker`, and the subtask ones) or from
-//! `~/.bubble/agents/*.md` and the project's `.bubble/agents/*.md`.
+//! Most children are read-only: they read, search and look things up, and
+//! hand back a summary. A `write_worktree` child (the built-in
+//! `implementer`) edits and runs commands in a git worktree of its own,
+//! which the parent reviews and applies ([`crate::worktree`]). No child can
+//! ask the person anything or start children of its own. Profiles come
+//! built in (`default`, `explorer`, `worker`, `implementer`, and the
+//! subtask ones) or from `~/.bubble/agents/*.md` and the project's
+//! `.bubble/agents/*.md`.
+//!
+//! A [`Scheduler`] admits children: at most [`MAX_ACTIVE`] at once, fewer
+//! per category, and fewer after the provider says 429 (one fewer per
+//! rate limit, growing back after a quiet spell); a rate-limited child
+//! waits and tries again with its context intact. Children of a task are
+//! kept on disk, so they outlive the process: those cut off by a restart
+//! come back interrupted, and `send_input` continues them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::agent::{AgentEvent, Turn, run_turn};
 use crate::config::{Config, ResolvedModel};
@@ -24,12 +35,24 @@ use crate::model::Level;
 use crate::provider::{ChatMessage, ToolCall, ToolSpec};
 use crate::toolbox::Toolbox;
 use crate::tools::{self, ToolOutput};
+use crate::worktree::{self, Worktree};
 
 /// How many children run at once in one conversation.
 pub const MAX_ACTIVE: usize = 8;
 const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 const MAX_WAIT: Duration = Duration::from_secs(1800);
 const HANDOFF_TOKEN_FLOOR: f64 = 60.0;
+
+/// How often a rate-limited child tries again, and how long it waits first.
+const RATE_LIMIT_ATTEMPTS: u32 = 3;
+const RATE_LIMIT_BACKOFF: [u64; 3] = [3, 6, 12];
+/// One rate limit lowers the capacity at most this often.
+const DECREASE_EVERY: Duration = Duration::from_secs(2);
+/// A quiet spell this long raises it by one.
+const INCREASE_AFTER: Duration = Duration::from_secs(180);
+
+/// The tools a write child may have.
+const WORKTREE_TOOLS: &[&str] = &["read", "ls", "grep", "edit", "write", "bash"];
 
 const READONLY_PRESET: &[&str] = &["read", "ls", "grep", "lsp", "web_search", "web_fetch", "memory", "skill"];
 
@@ -53,7 +76,7 @@ pub struct Profile {
     pub description: String,
     /// `builtin`, `user` or `project`.
     pub source: &'static str,
-    /// `readonly`, or a write mode this runtime does not offer yet.
+    /// `readonly`, `write_worktree`, or `write_patch` (not offered).
     pub mode: String,
     /// `None` inherits the parent's model.
     pub model: Option<String>,
@@ -116,12 +139,28 @@ pub fn builtin_profiles() -> Vec<Profile> {
             "worker",
             "Implementation-planning worker subagent",
             &[
-                "You are a worker subagent. In this Phase 1 runtime you are read-only, so you must not modify files.",
+                "You are a worker subagent. You are read-only, so you must not modify files.",
                 "Analyze the assigned implementation slice, identify exact files to change, and return a concrete patch plan or findings.",
-                "If write-capable worker mode is needed, say so explicitly.",
+                "If write-capable work is needed, say so explicitly (the implementer profile edits in an isolated worktree).",
             ],
             &["read", "ls", "grep", "lsp", "memory", "skill"],
         ),
+        Profile {
+            name: "implementer".into(),
+            description: "Write-capable implementation subagent (isolated git worktree)".into(),
+            source: "builtin",
+            mode: "write_worktree".into(),
+            model: None,
+            tools: WORKTREE_TOOLS.iter().map(|t| t.to_string()).collect(),
+            prompt: [
+                "You are an implementer subagent working in your own isolated git worktree — the parent tree is never touched.",
+                "Your worktree forks from the last commit; changes the parent made after that commit are NOT present unless included in your briefing.",
+                "Make the smallest coherent edits that complete your assigned group. Stay strictly inside the file set you were given; if a needed change falls outside it, report that instead of editing.",
+                "Verify your changes when possible — run the affected module's existing tests, not only the cases you added — and end with a concise summary of files changed and verification results; the parent reviews and applies your worktree.",
+            ]
+            .join("\n"),
+            nicknames: Vec::new(),
+        },
         subtask(
             "search",
             &search_tools,
@@ -310,7 +349,8 @@ fn parse_profile(raw: &str, source: &'static str, file: &Path) -> Option<Profile
 
 // --- Children ------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Status {
     Queued,
     Running,
@@ -340,7 +380,7 @@ impl Status {
 }
 
 /// A child as the parent and the app see it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub id: String,
     pub nickname: String,
@@ -356,6 +396,15 @@ pub struct Snapshot {
     /// Started by a workflow rather than spawn_agent.
     pub workflow: bool,
     pub pending_inputs: usize,
+    /// The category it was routed by.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Tokens its model calls used (input and output), for accounting.
+    #[serde(default)]
+    pub tokens: u64,
+    /// A write child's worktree.
+    #[serde(default)]
+    pub worktree: Option<Worktree>,
 }
 
 /// What a child's turns run with, set by the parent's turn.
@@ -372,9 +421,17 @@ pub struct Env {
 
 struct Record {
     snapshot: Snapshot,
-    env: Env,
-    model: ResolvedModel,
+    /// The parent's, when it started; a child restored from disk takes the
+    /// parent's current one.
+    env: Option<Env>,
+    /// Resolved when it runs, from `model_ref`.
+    model: Option<ResolvedModel>,
+    model_ref: String,
     thinking: Level,
+    /// It edits in a worktree.
+    write: bool,
+    /// Its category's cap on how many run at once.
+    max_concurrent: Option<usize>,
     system: String,
     tools: HashSet<String>,
     history: Vec<ChatMessage>,
@@ -388,9 +445,11 @@ struct Record {
 pub struct Children {
     records: Mutex<Vec<Record>>,
     env: Mutex<Option<Env>>,
-    slots: Arc<Semaphore>,
+    scheduler: Arc<Scheduler>,
     version: watch::Sender<u64>,
     next: Mutex<u64>,
+    /// Where they are kept, one JSON file each.
+    dir: Option<PathBuf>,
 }
 
 impl Default for Children {
@@ -398,11 +457,134 @@ impl Default for Children {
         Children {
             records: Mutex::new(Vec::new()),
             env: Mutex::new(None),
-            slots: Arc::new(Semaphore::new(MAX_ACTIVE)),
+            scheduler: Arc::new(Scheduler::default()),
             version: watch::channel(0).0,
             next: Mutex::new(0),
+            dir: None,
         }
     }
+}
+
+// --- Scheduling ------------------------------------------------------------------
+
+#[derive(Default)]
+struct Admission {
+    active: usize,
+    by_category: HashMap<String, usize>,
+    /// Lowered by rate limits; `None` is [`MAX_ACTIVE`].
+    capacity: Option<usize>,
+    limited_at: Option<Instant>,
+    decreased_at: Option<Instant>,
+}
+
+/// Admits children as capacity and their category allow.
+#[derive(Default)]
+pub struct Scheduler {
+    state: Mutex<Admission>,
+    freed: Notify,
+}
+
+/// A running child's place; dropping it frees the place.
+struct Slot {
+    scheduler: Arc<Scheduler>,
+    category: Option<String>,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.scheduler.state.lock() {
+            state.active = state.active.saturating_sub(1);
+            if let Some(category) = &self.category
+                && let Some(count) = state.by_category.get_mut(category)
+            {
+                *count = count.saturating_sub(1);
+            }
+        }
+        self.scheduler.freed.notify_waiters();
+    }
+}
+
+impl Scheduler {
+    async fn admit(self: &Arc<Self>, category: Option<String>, limit: Option<usize>) -> Slot {
+        loop {
+            let freed = self.freed.notified();
+            if let Ok(mut state) = self.state.lock() {
+                // A quiet spell gives back one place.
+                if let (Some(capacity), Some(at)) = (state.capacity, state.limited_at)
+                    && at.elapsed() >= INCREASE_AFTER
+                {
+                    state.capacity = (capacity + 1 < MAX_ACTIVE).then_some(capacity + 1);
+                    state.limited_at = Some(Instant::now());
+                }
+                let room = state.active < state.capacity.unwrap_or(MAX_ACTIVE);
+                let category_room = match (&category, limit) {
+                    (Some(name), Some(limit)) => state.by_category.get(name).copied().unwrap_or(0) < limit,
+                    _ => true,
+                };
+                if room && category_room {
+                    state.active += 1;
+                    if let Some(name) = &category {
+                        *state.by_category.entry(name.clone()).or_default() += 1;
+                    }
+                    return Slot { scheduler: self.clone(), category };
+                }
+            }
+            tokio::select! {
+                () = freed => {}
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
+    }
+
+    /// The provider said 429: one place fewer (at most every two seconds,
+    /// never below one).
+    fn rate_limited(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            let now = Instant::now();
+            match state.capacity {
+                None => {
+                    state.capacity = Some(state.active.max(1));
+                    state.decreased_at = Some(now);
+                }
+                Some(capacity) if state.decreased_at.is_none_or(|at| now - at >= DECREASE_EVERY) => {
+                    state.capacity = Some(capacity.saturating_sub(1).max(1));
+                    state.decreased_at = Some(now);
+                }
+                Some(_) => {}
+            }
+            state.limited_at = Some(now);
+        }
+    }
+
+    /// How many may run now (for tests and status).
+    pub fn capacity(&self) -> usize {
+        self.state.lock().ok().and_then(|s| s.capacity).unwrap_or(MAX_ACTIVE)
+    }
+}
+
+/// Whether a failed turn was the provider's rate limit.
+fn rate_limited(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains(" 429") || lower.contains("too many requests") || lower.contains("rate limit")
+}
+
+// --- Persistence ------------------------------------------------------------------
+
+/// A child as kept on disk.
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    snapshot: Snapshot,
+    model: String,
+    thinking: String,
+    #[serde(default)]
+    write: bool,
+    #[serde(default)]
+    max_concurrent: Option<usize>,
+    system: String,
+    tools: Vec<String>,
+    history: Vec<ChatMessage>,
+    #[serde(default)]
+    schema: Option<Value>,
 }
 
 /// Options for one new child.
@@ -416,11 +598,87 @@ pub struct SpawnOptions {
     pub fork_context: Option<Vec<ChatMessage>>,
     pub schema: Option<Value>,
     pub workflow: bool,
+    /// A routing category (`quick`, `deep`, ...).
+    pub category: Option<String>,
 }
 
 impl Children {
     pub fn new() -> Arc<Children> {
         Arc::new(Children::default())
+    }
+
+    /// Children kept in `dir`: the ones there come back, those cut off
+    /// while running as interrupted (`send_input` continues them).
+    pub fn persistent(dir: PathBuf) -> Arc<Children> {
+        let mut records = Vec::new();
+        let mut next = 0u64;
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
+            files.sort();
+            for file in files {
+                let Some(saved) = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<Saved>(&t).ok()) else {
+                    continue;
+                };
+                let mut snapshot = saved.snapshot;
+                if let Some(n) = snapshot.id.strip_prefix("agent_").and_then(|n| n.parse::<u64>().ok()) {
+                    next = next.max(n);
+                }
+                if !snapshot.status.is_final() {
+                    snapshot.status = Status::Failed;
+                    snapshot.error = Some("Interrupted when Bubble closed.".into());
+                }
+                snapshot.pending_inputs = 0;
+                records.push(Record {
+                    snapshot,
+                    env: None,
+                    model: None,
+                    model_ref: saved.model,
+                    thinking: Level::parse(&saved.thinking).unwrap_or(Level::Medium),
+                    write: saved.write,
+                    max_concurrent: saved.max_concurrent,
+                    system: saved.system,
+                    tools: saved.tools.into_iter().collect(),
+                    history: saved.history,
+                    inputs: Vec::new(),
+                    abort: None,
+                    schema: saved.schema,
+                });
+            }
+        }
+        Arc::new(Children { records: Mutex::new(records), next: Mutex::new(next), dir: Some(dir), ..Children::default() })
+    }
+
+    /// Writes child `id` to disk, when children are kept.
+    fn save(&self, id: &str) {
+        let Some(dir) = &self.dir else { return };
+        let saved = self.records.lock().ok().and_then(|records| {
+            let r = records.iter().find(|r| r.snapshot.id == id)?;
+            Some(Saved {
+                snapshot: r.snapshot.clone(),
+                model: r.model_ref.clone(),
+                thinking: r.thinking.as_str().to_owned(),
+                write: r.write,
+                max_concurrent: r.max_concurrent,
+                system: r.system.clone(),
+                tools: r.tools.iter().cloned().collect(),
+                history: r.history.clone(),
+                schema: r.schema.clone(),
+            })
+        });
+        let Some(saved) = saved else { return };
+        if std::fs::create_dir_all(dir).is_ok()
+            && let Ok(text) = serde_json::to_string(&saved)
+        {
+            let tmp = dir.join(format!("{id}.json.tmp"));
+            if std::fs::write(&tmp, text).is_ok() {
+                let _ = std::fs::rename(tmp, dir.join(format!("{id}.json")));
+            }
+        }
+    }
+
+    /// How many children may run now.
+    pub fn capacity(&self) -> usize {
+        self.scheduler.capacity()
     }
 
     /// What new children run with; the parent's turn sets it.
@@ -458,6 +716,7 @@ impl Children {
 
     /// Stops every running child (the parent was stopped).
     pub fn cancel_all(&self) {
+        let mut stopped = Vec::new();
         if let Ok(mut records) = self.records.lock() {
             for record in records.iter_mut().filter(|r| !r.snapshot.status.is_final()) {
                 if let Some(abort) = record.abort.take() {
@@ -465,7 +724,11 @@ impl Children {
                 }
                 record.snapshot.status = Status::Cancelled;
                 record.snapshot.error = Some("Stopped with the parent.".into());
+                stopped.push(record.snapshot.id.clone());
             }
+        }
+        for id in stopped {
+            self.save(&id);
         }
         self.changed();
     }
@@ -479,14 +742,25 @@ impl Children {
             names.sort();
             return Err(format!("Error: unknown subagent profile \"{}\". Available profiles: {}", options.profile, names.join(", ")));
         };
-        if profile.mode != "readonly" {
+        let write = profile.mode == "write_worktree";
+        if !write && profile.mode != "readonly" {
             return Err(format!(
-                "Error: subagent profile \"{}\" uses mode \"{}\", which this runtime does not offer yet. Use a read-only profile.",
+                "Error: subagent profile \"{}\" uses mode \"{}\", which is not supported. Use \"readonly\" for investigation or \"write_worktree\" for isolated write work.",
                 profile.name, profile.mode
             ));
         }
-        // Model: the call's, else the profile's, else the parent's.
-        let model = match options.model.as_deref().or(profile.model.as_deref()) {
+        if write && options.workflow {
+            return Err(format!("Error: workflow members are read-only; \"{}\" writes. Use spawn_agent for write work.", profile.name));
+        }
+        // Model: the call's, else the profile's, else the category's, else
+        // the parent's; effort: the call's, else the category's, else the
+        // parent's.
+        let route = match options.category.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            Some(category) => Some(crate::routing::route(&env.config, category, &env.model).map_err(|e| format!("Error: {e}"))?),
+            None => None,
+        };
+        let chosen = options.model.clone().or(profile.model.clone()).or(route.as_ref().and_then(|r| r.model.clone()));
+        let model = match chosen.as_deref() {
             None => env.model.clone(),
             Some(reference) => {
                 let reference =
@@ -494,7 +768,7 @@ impl Children {
                 env.config.resolve(&reference).map_err(|e| format!("Error: cannot use model {reference}: {e:#}"))?
             }
         };
-        let thinking = options.effort.unwrap_or(env.thinking);
+        let thinking = options.effort.or(route.as_ref().and_then(|r| r.thinking)).unwrap_or(env.thinking);
         let id = {
             let mut next = self.next.lock().map_err(|_| "poisoned")?;
             *next += 1;
@@ -509,7 +783,13 @@ impl Children {
             let seed = crate::time::now_utc().millis as usize + id.len();
             pick[seed % pick.len()].to_owned()
         });
-        let tools: HashSet<String> = profile.tools.iter().filter(|t| !DENIED.contains(&t.as_str())).cloned().collect();
+        let tools: HashSet<String> = profile
+            .tools
+            .iter()
+            .filter(|t| !DENIED.contains(&t.as_str()))
+            .filter(|t| !write || WORKTREE_TOOLS.contains(&t.as_str()))
+            .cloned()
+            .collect();
         let system = child_system(&nickname, &profile, &env, &tools);
         let mut history = options.fork_context.clone().unwrap_or_default();
         let mut task = message.to_owned();
@@ -532,12 +812,19 @@ impl Children {
             error: None,
             workflow: options.workflow,
             pending_inputs: 0,
+            category: options.category.clone().filter(|c| !c.trim().is_empty()),
+            tokens: 0,
+            worktree: None,
         };
+        let model_ref = format!("{}:{}", model.provider.id, model.model);
         let record = Record {
             snapshot: snapshot.clone(),
-            env,
-            model,
+            env: Some(env),
+            model: Some(model),
+            model_ref,
             thinking,
+            write,
+            max_concurrent: route.and_then(|r| r.max_concurrent),
             system,
             tools,
             history,
@@ -548,6 +835,7 @@ impl Children {
         if let Ok(mut records) = self.records.lock() {
             records.push(record);
         }
+        self.save(&id);
         self.start(&id);
         Ok(self.snapshot(&id).unwrap_or(snapshot))
     }
@@ -564,14 +852,76 @@ impl Children {
     }
 
     async fn run(self: Arc<Self>, id: &str) {
-        let Ok(_permit) = self.slots.clone().acquire_owned().await else { return };
-        let Some((env, model, thinking, system, tools, schema)) = self.records.lock().ok().and_then(|records| {
-            records.iter().find(|r| r.snapshot.id == id).map(|r| {
-                (r.env.clone(), r.model.clone(), r.thinking, r.system.clone(), r.tools.clone(), r.schema.clone())
+        let parent_env = self.env.lock().ok().and_then(|e| e.clone());
+        let Some((env, model, model_ref, thinking, system, tools, schema, write, category, limit)) =
+            self.records.lock().ok().and_then(|records| {
+                records.iter().find(|r| r.snapshot.id == id).map(|r| {
+                    (
+                        r.env.clone().or(parent_env.clone()),
+                        r.model.clone(),
+                        r.model_ref.clone(),
+                        r.thinking,
+                        r.system.clone(),
+                        r.tools.clone(),
+                        r.schema.clone(),
+                        r.write,
+                        r.snapshot.category.clone(),
+                        r.max_concurrent,
+                    )
+                })
             })
-        }) else {
+        else {
             return;
         };
+        let fail = |children: &Arc<Self>, error: String| {
+            children.update(id, |r| {
+                r.snapshot.status = Status::Failed;
+                r.snapshot.error = Some(error);
+            });
+            children.save(id);
+        };
+        let Some(env) = env else {
+            fail(&self, "no agent runtime for subagents".into());
+            return;
+        };
+        // A child back from disk runs on the model it had.
+        let model = match model {
+            Some(model) => model,
+            None => match env.config.resolve(&model_ref) {
+                Ok(model) => model,
+                Err(error) => {
+                    fail(&self, format!("cannot use model {model_ref}: {error:#}"));
+                    return;
+                }
+            },
+        };
+        self.update(id, |r| {
+            r.env = Some(env.clone());
+            r.model = Some(model.clone());
+        });
+        let mut slot = Some(self.scheduler.admit(category.clone(), limit).await);
+        // A write child works in its worktree (made now, or again when it
+        // was removed unchanged).
+        let mut child_env = env.clone();
+        if write {
+            let existing = self.snapshot(id).and_then(|s| s.worktree).filter(|w| !w.removed && w.path.exists());
+            let worktree = match existing {
+                Some(mut worktree) => {
+                    worktree.changed = None;
+                    worktree.diff_stat.clear();
+                    worktree
+                }
+                None => match worktree::create(&env.cwd, id).await {
+                    Ok(worktree) => worktree,
+                    Err(error) => {
+                        fail(&self, error);
+                        return;
+                    }
+                },
+            };
+            child_env.cwd = worktree.cwd.clone();
+            self.update(id, |r| r.snapshot.worktree = Some(worktree));
+        }
         self.update(id, |r| r.snapshot.status = Status::Running);
         if let Some(hooks) = &env.hooks {
             let snapshot = self.snapshot(id);
@@ -585,16 +935,34 @@ impl Children {
                 })
                 .await;
         }
+        let mut limited = 0u32;
+        // Set once the worktree is looked at, so a waiting parent sees both.
+        let mut ending = (Status::Completed, None::<String>);
         loop {
             let history = self.records.lock().ok().and_then(|r| r.iter().find(|r| r.snapshot.id == id).map(|r| r.history.clone()));
             let Some(history) = history else { return };
-            let outcome = self.turn(id, &env, &model, thinking, &system, &tools, history).await;
+            let root = self.snapshot(id).and_then(|s| s.worktree).map(|w| w.path);
+            let outcome = self.turn(id, &child_env, &model, thinking, &system, &tools, history, root.as_deref()).await;
+            self.save(id);
             match outcome {
-                Err(error) => {
+                // The provider's rate limit: fewer at once, and this one
+                // tries again after a while with its context intact.
+                Err(error) if rate_limited(&error) && limited < RATE_LIMIT_ATTEMPTS => {
+                    self.scheduler.rate_limited();
+                    let wait = RATE_LIMIT_BACKOFF[limited.min(2) as usize];
+                    limited += 1;
+                    drop(slot.take());
                     self.update(id, |r| {
-                        r.snapshot.status = Status::Failed;
-                        r.snapshot.error = Some(error);
+                        r.snapshot.status = Status::Queued;
+                        r.snapshot.notes.push(format!("rate limited by the provider; trying again in {wait}s"));
                     });
+                    tokio::time::sleep(Duration::from_secs(wait)).await;
+                    slot = Some(self.scheduler.admit(category.clone(), limit).await);
+                    self.update(id, |r| r.snapshot.status = Status::Running);
+                    continue;
+                }
+                Err(error) => {
+                    ending = (Status::Failed, Some(error));
                     break;
                 }
                 Ok(used_tools) => {
@@ -620,16 +988,22 @@ impl Children {
                     if needs_final_summary(&summary, used_tools, schema.is_some()) {
                         self.final_summary(id, &env, &model, &system).await;
                     }
-                    self.update(id, |r| {
-                        if r.snapshot.status == Status::Running {
-                            r.snapshot.status = Status::Completed;
-                        }
-                    });
                     break;
                 }
             }
         }
-        self.update(id, |r| r.abort = None);
+        drop(slot);
+        self.finish_worktree(id).await;
+        self.update(id, |r| {
+            r.abort = None;
+            if r.snapshot.status == Status::Running {
+                r.snapshot.status = ending.0;
+                if let Some(error) = ending.1 {
+                    r.snapshot.error = Some(error);
+                }
+            }
+        });
+        self.save(id);
         if let Some(hooks) = &env.hooks {
             let snapshot = self.snapshot(id);
             hooks
@@ -644,6 +1018,24 @@ impl Children {
         }
     }
 
+    /// Looks at a finished write child's worktree: removed when unchanged,
+    /// kept (and noted) when it changed something.
+    async fn finish_worktree(&self, id: &str) {
+        let Some(mut worktree) = self.snapshot(id).and_then(|s| s.worktree) else { return };
+        if worktree.removed {
+            return;
+        }
+        worktree::finish(&mut worktree).await;
+        let note = (worktree.changed == Some(true))
+            .then(|| format!("worktree: changes left in {} — review the diff before applying", worktree.path.display()));
+        self.update(id, |r| {
+            r.snapshot.worktree = Some(worktree);
+            if let Some(note) = note {
+                r.snapshot.notes.push(note);
+            }
+        });
+    }
+
     /// One turn of a child; whether it used any tool.
     #[allow(clippy::too_many_arguments)]
     async fn turn(
@@ -655,6 +1047,7 @@ impl Children {
         system: &str,
         tools: &HashSet<String>,
         history: Vec<ChatMessage>,
+        worktree_root: Option<&Path>,
     ) -> Result<bool, String> {
         let unlocked: HashSet<String> = tools.iter().filter(|t| t.starts_with("mcp__")).cloned().collect();
         let turn = Turn {
@@ -663,7 +1056,8 @@ impl Children {
             hooks: env.hooks.clone(),
             role: hooks::Role::Subagent,
             allowed: Some(tools.clone()),
-            ask: false,
+            // A write child's calls are decided by the worktree policy.
+            ask: worktree_root.is_some(),
             thinking,
             unlocked: Arc::new(Mutex::new(unlocked)),
             ..Turn::new(model.clone(), Some(system.to_owned()), history)
@@ -698,9 +1092,15 @@ impl Children {
                         }
                     });
                 }
-                AgentEvent::ApprovalNeeded { respond, .. } => {
-                    let _ = respond.send(crate::agent::Decision::Deny);
+                AgentEvent::ApprovalNeeded { call, respond, .. } => {
+                    let decision = match worktree_root.map(|root| worktree::refusal(&call, root, &env.cwd)) {
+                        Some(None) => crate::agent::Decision::AllowOnce,
+                        Some(Some(reason)) => crate::agent::Decision::Refuse(reason),
+                        None => crate::agent::Decision::Deny,
+                    };
+                    let _ = respond.send(decision);
                 }
+                AgentEvent::Usage(usage) => self.update(id, |r| r.snapshot.tokens += usage.input_tokens + usage.output_tokens),
                 AgentEvent::HostCall { respond, .. } => {
                     let _ = respond.send(ToolOutput { content: "Not available to subagents.".into(), is_error: true });
                 }
@@ -789,6 +1189,7 @@ impl Children {
             r.history.push(ChatMessage::user(message.to_owned()));
             r.snapshot.error = None;
         });
+        self.save(id);
         self.start(id);
         Ok(self.snapshot(id).unwrap_or(snapshot))
     }
@@ -801,6 +1202,7 @@ impl Children {
             }
             r.snapshot.status = Status::Closed;
         });
+        self.save(id);
         self.snapshot(id).ok_or_else(|| "gone".into())
     }
 
@@ -818,7 +1220,7 @@ impl Children {
             ToolSpec {
                 name: "spawn_agent".into(),
                 description: format!(
-                    "Start a child subagent in the background and return its agent_id plus random nickname. The child has an independent thread; call wait_agent later to collect its result. Proactively delegate multi-file investigations whose intermediate steps would be noise in the main conversation. Best for helpers whose results you want to read and react to individually. For a uniform sweep over many items, or when member results should be aggregated before returning, weigh run_workflow instead. If the user asked for a workflow, an orchestration, or an agent team, that is run_workflow, not this tool. Do the work yourself when it takes only a couple of tool calls or needs conversation context — unless the user explicitly asks for a subagent, in which case spawn one. The child starts with zero context: write the task as a self-contained work order — state the goal, include known file paths or commands, and never make it rediscover knowledge you already hold. After spawning, do not duplicate the same delegated work locally; either wait for the child or do clearly non-overlapping work. A child may start as queued when concurrency slots are busy; it starts automatically, no action needed. Children are read-only.{profiles_note}"
+                    "Start a child subagent in the background and return its agent_id plus random nickname. The child has an independent thread; call wait_agent later to collect its result. Proactively delegate multi-file investigations whose intermediate steps would be noise in the main conversation. Best for helpers whose results you want to read and react to individually. For a uniform sweep over many items, or when member results should be aggregated before returning, weigh run_workflow instead. If the user asked for a workflow, an orchestration, or an agent team, that is run_workflow, not this tool. Do the work yourself when it takes only a couple of tool calls or needs conversation context — unless the user explicitly asks for a subagent, in which case spawn one. The child starts with zero context: write the task as a self-contained work order — state the goal, include known file paths or commands, and never make it rediscover knowledge you already hold. After spawning, do not duplicate the same delegated work locally; either wait for the child or do clearly non-overlapping work. A child may start as queued when concurrency slots are busy; it starts automatically, no action needed. Children are read-only, except agent_type \"implementer\": it edits and runs commands in its own git worktree forked from the last commit, and you review and apply its changes afterwards — use it only for independent edit groups with disjoint files. Set category to route a child by task: quick or explore for mechanical work (a faster model of your provider when one is known, low effort), deep or review for judgment work (your model, high effort).{profiles_note}"
                 ),
                 parameters: json!({
                     "type": "object",
@@ -826,7 +1228,7 @@ impl Children {
                         "description": { "type": "string", "description": "Short task title for the activity card (under 60 characters). Put the full instructions in message." },
                         "agent_type": { "type": "string", "description": "Subagent profile or role name. Defaults to default. Built-in types include default, explorer, and worker; see the tool description for custom profiles." },
                         "agent": { "type": "string", "description": "Alias for agent_type." },
-                        "category": { "type": "string", "description": "Optional semantic category label, such as quick, deep, explore, review, frontend, or writing." },
+                        "category": { "type": "string", "description": "Optional routing category: quick or explore (faster model of your provider, low effort), deep or review (your model, high effort), frontend, writing, or one from config agentCategories." },
                         "model": { "type": "string", "description": "Optional per-call model for this child. Bare name uses the parent provider; provider:model selects cross-provider." },
                         "effort": { "type": "string", "enum": levels, "description": "Optional per-call thinking level for this child." },
                         "message": { "type": "string", "description": "Initial task for the subagent." },
@@ -926,6 +1328,7 @@ impl Children {
                     fork_context: fork,
                     schema: None,
                     workflow: false,
+                    category: text("category"),
                 };
                 match self.spawn(&message, options) {
                     Ok(snapshot) => ToolOutput {
@@ -1067,9 +1470,12 @@ fn format_snapshot(snapshot: &Snapshot) -> Vec<String> {
         format!("## {} ({})", snapshot.nickname, snapshot.profile),
         format!("agent_id: {}", snapshot.id),
         format!("status: {}", snapshot.status.label()),
-        format!("route: {}", snapshot.model),
+        format!("route: {}{}", snapshot.model, snapshot.category.as_ref().map(|c| format!(" (category {c})")).unwrap_or_default()),
         format!("task: {}", snapshot.task),
     ];
+    if snapshot.tokens > 0 {
+        lines.push(format!("tokens: {}", snapshot.tokens));
+    }
     if snapshot.status == Status::Queued {
         lines.push("queued: waiting for a concurrency slot; it starts automatically — no action needed".into());
     }
@@ -1086,6 +1492,21 @@ fn format_snapshot(snapshot: &Snapshot) -> Vec<String> {
         lines.push("Recent tool notes:".into());
         let start = snapshot.notes.len().saturating_sub(8);
         lines.extend(snapshot.notes[start..].iter().map(|n| format!("- {n}")));
+    }
+    if let Some(worktree) = snapshot.worktree.as_ref().filter(|_| snapshot.status.is_final()) {
+        lines.push(String::new());
+        match worktree.changed {
+            Some(true) => {
+                lines.push(format!("Worktree with changes: {}", worktree.path.display()));
+                lines.push("Review the diff there and apply / cherry-pick / discard; the parent working tree was never touched.".into());
+                if !worktree.diff_stat.is_empty() {
+                    lines.push("Diff stat:".into());
+                    lines.push(worktree.diff_stat.clone());
+                }
+            }
+            Some(false) => lines.push("Worktree: no changes were left behind (removed automatically).".into()),
+            None => lines.push(format!("Worktree: {}", worktree.path.display())),
+        }
     }
     if let Some(error) = &snapshot.error {
         lines.push(String::new());
@@ -1108,10 +1529,14 @@ fn child_system(nickname: &str, profile: &Profile, env: &Env, tools: &HashSet<St
             profile.name
         ),
         profile.prompt.clone(),
-        format!(
-            "You work in the folder {}; relative paths start there. You are read-only: you cannot change files or run commands, and you cannot ask the person anything. Your final message is returned to the parent as your answer.",
-            env.cwd.display()
-        ),
+        if profile.mode == "write_worktree" {
+            "You work inside an isolated git worktree; the parent reviews your diff after you finish. Make your changes, verify them (run tests where possible), and end with a handoff that lists the files you changed and how you verified them. Do not commit, push, or touch anything outside this worktree. You cannot ask the person anything. Your final message is returned to the parent as your answer.".to_owned()
+        } else {
+            format!(
+                "You work in the folder {}; relative paths start there. You are read-only: you cannot change files or run commands, and you cannot ask the person anything. Your final message is returned to the parent as your answer.",
+                env.cwd.display()
+            )
+        },
     ];
     if tools.contains("memory") {
         if let Some(memory) = crate::memory::prompt(&crate::memory::root()) {
@@ -1199,6 +1624,63 @@ mod tests {
         assert_eq!((explorer.source, explorer.tools.clone()), ("project", vec!["read".to_owned(), "grep".to_owned()]));
         assert_eq!(find(&all, "search").unwrap().name, "builtin:search");
         assert!(find(&all, "broken").is_none());
+    }
+
+    #[tokio::test]
+    async fn categories_cap_and_rate_limits_lower_capacity() {
+        let scheduler = Arc::new(Scheduler::default());
+        let quick = scheduler.admit(Some("quick".into()), Some(1)).await;
+        let blocked = tokio::time::timeout(Duration::from_millis(150), scheduler.admit(Some("quick".into()), Some(1))).await;
+        assert!(blocked.is_err(), "a second quick child waits for the first");
+        let other = scheduler.admit(Some("deep".into()), Some(2)).await;
+        // A 429 with two running: at most two from now on; another right
+        // after does not lower it again.
+        scheduler.rate_limited();
+        assert_eq!(scheduler.capacity(), 2);
+        scheduler.rate_limited();
+        assert_eq!(scheduler.capacity(), 2);
+        let full = tokio::time::timeout(Duration::from_millis(150), scheduler.admit(None, None)).await;
+        assert!(full.is_err(), "capacity is two");
+        drop(quick);
+        let next = tokio::time::timeout(Duration::from_millis(500), scheduler.admit(Some("quick".into()), Some(1))).await;
+        assert!(next.is_ok(), "a freed place admits the next");
+        drop(other);
+        assert!(rate_limited("Kimi answered 429 Too Many Requests: slow down"));
+        assert!(rate_limited("provider error: Rate limit reached for requests"));
+        assert!(!rate_limited("Kimi answered 500 Internal Server Error"));
+    }
+
+    #[test]
+    fn children_come_back_from_disk() {
+        let dir = temp().join("kept");
+        std::fs::create_dir_all(&dir).unwrap();
+        let snapshot = |id: &str, status: &str| {
+            json!({
+                "id": id, "nickname": "Ada", "profile": "explorer", "task": "look", "description": null,
+                "status": status, "model": "mock:m", "summary": "", "notes": [], "error": null,
+                "workflow": false, "pending_inputs": 0, "tokens": 120
+            })
+        };
+        for (id, status) in [("agent_2", "running"), ("agent_7", "completed")] {
+            let saved = json!({
+                "snapshot": snapshot(id, status), "model": "mock:m", "thinking": "high", "system": "s",
+                "tools": ["read"], "history": [{ "role": "user", "text": "look" }]
+            });
+            std::fs::write(dir.join(format!("{id}.json")), saved.to_string()).unwrap();
+        }
+        let children = Children::persistent(dir.clone());
+        let all = children.snapshots();
+        assert_eq!(all.len(), 2);
+        let interrupted = all.iter().find(|s| s.id == "agent_2").unwrap();
+        assert_eq!(interrupted.status, Status::Failed);
+        assert!(interrupted.error.as_deref().unwrap().contains("Interrupted"));
+        assert_eq!(all.iter().find(|s| s.id == "agent_7").unwrap().tokens, 120);
+        assert_eq!(*children.next.lock().unwrap(), 7, "new ids continue after the kept ones");
+        // Closing one is written back.
+        children.close("agent_7").unwrap();
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("agent_7.json")).unwrap()).unwrap();
+        assert_eq!(back["snapshot"]["status"], "closed");
+        assert_eq!(back["history"][0]["text"], "look");
     }
 
     #[test]

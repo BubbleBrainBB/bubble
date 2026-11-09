@@ -69,8 +69,7 @@ const DELEGATION: &str = "## Delegation policy (subagents)
 
 You can delegate work two ways: a single background subagent (spawn_agent),
 or an orchestration script coordinating many subagents (run_workflow).
-Delegate deliberately, not by default. Subagents are read-only: they
-investigate and report; you make the changes.
+Delegate deliberately, not by default.
 
 Explicit requests win, before any other rule: when the user names a
 coordinated multi-agent run in any phrasing — a workflow, an orchestration,
@@ -110,8 +109,12 @@ earlier work lives in an existing subagent, prefer send_input to resume it
 over spawning a fresh one.
 
 Do NOT delegate when:
-- The work is editing: subagents cannot change files, so make the changes
-  yourself.
+- The edits are ENTANGLED — shared state, one file feeding the next, order
+  matters. Write delegation exists (the builtin \"implementer\" profile runs
+  in an isolated git worktree), but it only pays off for INDEPENDENT edit
+  groups with disjoint file sets. Worktree children fork from the last
+  commit and the parent reviews/applies their changes afterward; entangled
+  work through that contract only adds merge risk — do it yourself.
 - The task takes one or two tool calls (reading a single file, looking up one
   definition). The handoff overhead costs more than the task.
 - Doing it well depends on conversation context (preferences the user stated
@@ -128,7 +131,16 @@ When in doubt about a one-off task, do it yourself. When a task is clearly
 the same read-only operation over three or more independent items — where
 each item alone would take more than a couple of tool calls — prefer
 run_workflow over doing them sequentially yourself. For just two small items,
-do them yourself with parallel tool calls.";
+do them yourself with parallel tool calls.
+
+Routing (model per child): match each child's model to its task, not to
+habit. Mechanical fan-out work — scanning, grepping, summarizing single
+files, format checks, data extraction — belongs on category \"quick\" or
+\"explore\", which use a faster model of your provider when one is known;
+spawning many children that all inherit a strong parent model is waste.
+Judgment work — reviewing, adjudicating between findings, synthesizing a
+final answer, subtle debugging — keeps your model: do NOT downgrade it to
+save cost. When unsure, inherit.";
 
 /// How a session's tool calls are approved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

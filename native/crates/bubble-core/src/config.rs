@@ -109,6 +109,9 @@ pub struct Config {
     pub skill_paths: Vec<String>,
     #[serde(default)]
     pub skills: SkillSettings,
+    /// Subagent categories on top of the built-in ones.
+    #[serde(default)]
+    pub agent_categories: std::collections::BTreeMap<String, crate::routing::Category>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

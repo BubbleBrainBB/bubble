@@ -18,6 +18,7 @@ pub mod model;
 pub mod prompt;
 pub mod provider;
 pub mod responses;
+pub mod routing;
 pub mod skills;
 pub mod sse;
 pub mod time;
@@ -25,6 +26,7 @@ pub mod toolbox;
 pub mod tools;
 pub mod web;
 pub mod workflow;
+pub mod worktree;
 
 pub use agent::{AgentEvent, Decision, Turn, run_turn};
 pub use config::{Config, Protocol, ProviderConfig, ResolvedModel, bubble_home};

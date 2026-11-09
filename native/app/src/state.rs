@@ -698,6 +698,11 @@ impl AppState {
                 lines_of(s, &runs)
             })
             .unwrap_or_default();
+        // A task's children outlive the app.
+        let children = match &task_id {
+            Some(id) => Children::persistent(bubble_home().join("native").join("subagents").join(id)),
+            None => Children::new(),
+        };
         let conversation = self.root.run(|| Conversation {
             lines: signal(lines),
             busy: signal(false),
@@ -705,7 +710,7 @@ impl AppState {
             task_id: stored(task_id),
             grants: stored(Arc::new(Mutex::new(HashSet::new()))),
             unlocked: stored(Arc::new(Mutex::new(HashSet::new()))),
-            children: stored(Children::new()),
+            children: stored(children),
             subagents: signal(Vec::new()),
             approvals: stored(HashMap::new()),
             pending: stored(String::new()),
@@ -715,6 +720,8 @@ impl AppState {
         self.conversations.with(|map| map.insert(key.to_owned(), conversation));
         // The children's progress, shown under the conversation.
         let children = conversation.children.get();
+        // Children kept from before show at once.
+        conversation.subagents.set(children.snapshots());
         let mut changes = children.subscribe();
         self.root.run(|| {
             spawn(async move {

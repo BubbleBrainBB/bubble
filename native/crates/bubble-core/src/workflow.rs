@@ -67,7 +67,7 @@ globalThis.phase = (t) => __phase(String(t ?? ""));
 globalThis.log = (m) => __log(String(m ?? ""));
 globalThis.budget = {
   get total() { return null; },
-  spent() { return 0; },
+  spent() { return __spent(); },
   remaining() { return Number.MAX_SAFE_INTEGER; },
 };
 "#;
@@ -91,7 +91,7 @@ pub fn spec() -> ToolSpec {
             "Run an LLM-authored JavaScript orchestration script (dynamic workflow) that coordinates many subagents with deterministic control flow.",
             "This is THE tool whenever the user asks for a workflow, an orchestration, or an agent team — even a small one; do not substitute parallel spawn_agent calls for an explicit request.",
             "Also use it for tasks that need loops, conditional fan-out, or staged pipelines over dozens of subagents whose intermediate steps should stay out of this conversation — e.g. a codebase-wide audit, a migration, or cross-checked research.",
-            "The script's only capability is agent(prompt, opts?) — each call spawns a sandboxed readonly subagent; opts may set {model, effort, agentType, category, schema, label}. Give each agent a short unique label. Also available: parallel(thunks), pipeline(items, ...stages), phase(title), log(msg), the global args, and budget {total, spent(), remaining()}.",
+            "The script's only capability is agent(prompt, opts?) — each call spawns a sandboxed readonly subagent; opts may set {model, effort, agentType, category, schema, label}. Give each agent a short unique label. Also available: parallel(thunks), pipeline(items, ...stages), phase(title), log(msg), the global args, and budget {total (null: no limit), spent() (member tokens so far), remaining()}.",
             "End the script with `return <value>`; that value (only) comes back to you. Return distilled conclusions, not raw agent transcripts — reduce inside the script (plain JS filtering or a final synthesis agent); a return value past ~8000 chars reaches you truncated. The script has no filesystem/shell/network/clock/random access. run_workflow must be the ONLY tool call in your response; it blocks until the workflow finishes.",
             "A failed or blocked agent() resolves to null inside parallel/pipeline (a bare await agent() throws instead): check for null slots and return which items failed alongside the results — never silently drop them. Keep a final synthesis/aggregation step inside try/catch (or parallel) so its failure cannot discard every completed member's work.",
             "Write plain JavaScript only — no TypeScript syntax, no import/require, and no Date or Math.random (they throw; pass timestamps in via args).",
@@ -155,9 +155,18 @@ pub struct AgentSpec {
 }
 
 type Dispatch = Arc<dyn Fn(AgentSpec) -> futures_util::future::BoxFuture<'static, Result<Value, String>> + Send + Sync>;
+/// The tokens the members used so far (`budget.spent()`; there is no limit,
+/// as in the TypeScript runtime: a child stops only when its task is done).
+pub type Spent = Arc<dyn Fn() -> f64 + Send + Sync>;
 
 /// Runs a script to its end: its return value, or why it failed.
-pub async fn run(script: String, args: Value, dispatch: Dispatch, logs: Arc<Mutex<Vec<String>>>) -> Result<Value, String> {
+pub async fn run(
+    script: String,
+    args: Value,
+    dispatch: Dispatch,
+    logs: Arc<Mutex<Vec<String>>>,
+    spent: Spent,
+) -> Result<Value, String> {
     let handle = tokio::runtime::Handle::current();
     let cancel = Arc::new(AtomicBool::new(false));
     let (done, result) = tokio::sync::oneshot::channel();
@@ -165,7 +174,7 @@ pub async fn run(script: String, args: Value, dispatch: Dispatch, logs: Arc<Mute
     std::thread::Builder::new()
         .name("bubble-workflow".into())
         .spawn(move || {
-            let _ = done.send(run_vm(&script, &args, handle, dispatch, flag, logs));
+            let _ = done.send(run_vm(&script, &args, handle, dispatch, flag, logs, spent));
         })
         .map_err(|e| e.to_string())?;
     // Dropping this future (Stop) ends the VM.
@@ -186,6 +195,7 @@ fn run_vm(
     dispatch: Dispatch,
     cancel: Arc<AtomicBool>,
     logs: Arc<Mutex<Vec<String>>>,
+    spent: Spent,
 ) -> Result<Value, String> {
     let runtime = Runtime::new().map_err(|e| e.to_string())?;
     runtime.set_memory_limit(256 * 1024 * 1024);
@@ -250,6 +260,11 @@ fn run_vm(
             })
             .map_err(|e| e.to_string())?;
             globals.set("__log", log).map_err(|e| e.to_string())?;
+        }
+        {
+            let spent = spent.clone();
+            let total = Function::new(ctx.clone(), move || spent()).map_err(|e| e.to_string())?;
+            globals.set("__spent", total).map_err(|e| e.to_string())?;
         }
         ctx.eval::<(), _>(format!("globalThis.args = {};", serde_json::to_string(args).unwrap_or("null".into())))
             .catch(&ctx)
@@ -383,6 +398,7 @@ pub async fn execute(children: &Arc<Children>, call: &ToolCall) -> ToolOutput {
                     fork_context: None,
                     schema: schema.clone(),
                     workflow: true,
+                    category: text("category"),
                 })?;
                 if let Ok(mut members) = members.lock() {
                     members.push(snapshot.id.clone());
@@ -417,7 +433,15 @@ pub async fn execute(children: &Arc<Children>, call: &ToolCall) -> ToolOutput {
     }
     let _close = CloseMembers(children.clone(), members.clone());
     let logs = Arc::new(Mutex::new(Vec::new()));
-    let result = run(script, args["args"].clone(), dispatch, logs.clone()).await;
+    let spent: Spent = {
+        let children = children.clone();
+        let members = members.clone();
+        Arc::new(move || {
+            let ids = members.lock().map(|m| m.clone()).unwrap_or_default();
+            ids.iter().filter_map(|id| children.snapshot(id)).map(|s| s.tokens as f64).sum()
+        })
+    };
+    let result = run(script, args["args"].clone(), dispatch, logs.clone(), spent).await;
     let logs = logs.lock().map(|l| l.clone()).unwrap_or_default();
     let agents = members.lock().map(|m| m.len()).unwrap_or(0);
     let failed = members
@@ -481,7 +505,7 @@ phase('work');
 const results = await parallel(args.map((a) => () => agent(a)));
 log('done ' + results.length);
 return { results, piped: await pipeline(['x'], (v) => agent(v + '1'), (r) => r.toUpperCase()) };"#;
-        let value = run(script.into(), json!(["a", "fail b", "c"]), echo_dispatch(), logs.clone()).await.unwrap();
+        let value = run(script.into(), json!(["a", "fail b", "c"]), echo_dispatch(), logs.clone(), Arc::new(|| 0.0)).await.unwrap();
         assert_eq!(value, json!({ "results": ["did a", null, "did c"], "piped": ["DID X1"] }));
         assert_eq!(*logs.lock().unwrap(), ["== work", "done 3"]);
     }
@@ -489,18 +513,18 @@ return { results, piped: await pipeline(['x'], (v) => agent(v + '1'), (r) => r.t
     #[tokio::test]
     async fn bare_failures_throw_and_nondeterminism_is_blocked() {
         let logs = Arc::new(Mutex::new(Vec::new()));
-        let failed = run("return await agent('fail');".into(), Value::Null, echo_dispatch(), logs.clone()).await;
+        let failed = run("return await agent('fail');".into(), Value::Null, echo_dispatch(), logs.clone(), Arc::new(|| 0.0)).await;
         assert_eq!(failed, Err("it failed".into()));
-        let date = run("return Date.now();".into(), Value::Null, echo_dispatch(), logs.clone()).await;
+        let date = run("return Date.now();".into(), Value::Null, echo_dispatch(), logs.clone(), Arc::new(|| 0.0)).await;
         assert!(date.unwrap_err().contains("deterministic"));
-        let promises = run("return await parallel([agent('a')]);".into(), Value::Null, echo_dispatch(), logs).await;
+        let promises = run("return await parallel([agent('a')]);".into(), Value::Null, echo_dispatch(), logs, Arc::new(|| 0.0)).await;
         assert!(promises.unwrap_err().contains("array of functions"));
     }
 
     #[tokio::test]
     async fn runaway_loops_are_interrupted() {
         let started = Instant::now();
-        let result = run("while (true) {}".into(), Value::Null, echo_dispatch(), Arc::new(Mutex::new(Vec::new()))).await;
+        let result = run("while (true) {}".into(), Value::Null, echo_dispatch(), Arc::new(Mutex::new(Vec::new())), Arc::new(|| 0.0)).await;
         assert!(result.is_err());
         assert!(started.elapsed() < COMPUTE_DEADLINE + Duration::from_secs(5));
     }

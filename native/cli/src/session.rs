@@ -125,7 +125,8 @@ impl Session {
         let hub = bubble_core::mcp::Hub::new();
         let toolbox = Arc::new(Toolbox::load(&hub, &client, &config, Some(&cwd)).await);
         let hooks = Arc::new(Hooks::load(&bubble_home(), Some(&cwd)));
-        let children = Children::new();
+        // The session's children outlive the process, as a task's do.
+        let children = Children::persistent(bubble_home().join("native").join("subagents").join(&task.id));
         children.set_env(delegate::Env {
             client: client.clone(),
             config: config.clone(),

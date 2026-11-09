@@ -216,7 +216,20 @@ fn subagents_view(conversation: Conversation) -> impl IntoElement {
                             dynamic(move || {
                                 let c = child.get();
                                 if !c.summary.is_empty() && c.status.is_final() {
-                                    markdown(c.summary.clone()).into_element()
+                                    let worktree = c.worktree.as_ref().filter(|w| w.changed == Some(true)).map(|w| {
+                                        format!("Changes kept in {} for review.\n{}", w.path.display(), w.diff_stat)
+                                    });
+                                    view()
+                                        .gap(px(6.0))
+                                        .child(markdown(c.summary.clone()))
+                                        .child(when(
+                                            {
+                                                let shown = worktree.is_some();
+                                                move || shown
+                                            },
+                                            move || text(worktree.clone().unwrap_or_default()).text_size(px(SMALL)).text_color(muted()),
+                                        ))
+                                        .into_element()
                                 } else if let Some(error) = c.error.clone() {
                                     text(error).text_size(px(SMALL)).text_color(failed()).into_element()
                                 } else {
