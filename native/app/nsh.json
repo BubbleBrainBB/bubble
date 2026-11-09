@@ -1,0 +1,9 @@
+{
+  "name": "Bubble",
+  "id": "ai.bubblebrain.bubble",
+  "version": "0.1.0",
+  "build": 1,
+  "rust": ".",
+  "root": "App",
+  "appearance": "light"
+}

@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["crates/bubble-core", "crates/bubble-store", "crates/bubble-github", "crates/bubble-term", "app", "cli"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+publish = false
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+futures-util = "0.3"
+log = "0.4"
+dirs = "5"

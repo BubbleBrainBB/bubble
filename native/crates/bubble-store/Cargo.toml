@@ -1,0 +1,15 @@
+[package]
+name = "bubble-store"
+description = "SQLite storage for Bubble Native: tasks, runs, messages, links and events."
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+bubble-core = { path = "../bubble-core" }
+anyhow.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
