@@ -6,6 +6,8 @@
 //! stored: it is derived from the task's lifecycle and its latest run, so the
 //! two can never disagree (docs/desktop-manager-design.md §2).
 
+pub mod import;
+
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};

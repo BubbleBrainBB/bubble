@@ -19,17 +19,21 @@ pub fn url(dialect: Dialect, base_url: &str) -> String {
     }
 }
 
-fn user_item(text: &str) -> Value {
-    json!({ "role": "user", "content": [{ "type": "input_text", "text": text }] })
+fn user_item(text: &str, images: &[crate::provider::Image]) -> Value {
+    let mut content = vec![json!({ "type": "input_text", "text": text })];
+    content.extend(images.iter().map(|i| json!({ "type": "input_image", "image_url": i.data_url() })));
+    json!({ "role": "user", "content": content })
 }
 
-/// The conversation as input items.
-fn input(messages: &[ChatMessage]) -> Vec<Value> {
+/// The conversation as input items; reasoning the model gave is echoed
+/// back (encrypted) when it is the same model.
+fn input(messages: &[ChatMessage], model: &ResolvedModel) -> Vec<Value> {
     let mut items = Vec::new();
     for message in messages {
         match message {
-            ChatMessage::User { text } => items.push(user_item(text)),
-            ChatMessage::Assistant { text, tool_calls, .. } => {
+            ChatMessage::User { text, images } => items.push(user_item(text, images)),
+            ChatMessage::Assistant { text, tool_calls, state, .. } => {
+                items.extend(crate::provider::echoed(state, "responses", model).iter().cloned());
                 if !text.is_empty() {
                     items.push(json!({
                         "type": "message",
@@ -110,7 +114,7 @@ pub fn body(dialect: Dialect, model: &ResolvedModel, request: &ChatRequest, sess
                     body["tool_choice"] = json!("auto");
                 }
             }
-            items.extend(input(&request.messages));
+            items.extend(input(&request.messages, model));
             body["input"] = json!(items);
             if level != Level::Off {
                 let effort = if level == Level::Ultra { "max" } else { level.as_str() };
@@ -126,7 +130,7 @@ pub fn body(dialect: Dialect, model: &ResolvedModel, request: &ChatRequest, sess
             if let Some(system) = &system {
                 items.push(json!({ "type": "message", "role": "system", "content": [{ "type": "input_text", "text": system }] }));
             }
-            items.extend(input(&request.messages));
+            items.extend(input(&request.messages, model));
             let thinking = if matches!(request.thinking, Level::Off | Level::Minimal) { "disabled" } else { "enabled" };
             let mut body = json!({
                 "model": model.model,
@@ -143,9 +147,10 @@ pub fn body(dialect: Dialect, model: &ResolvedModel, request: &ChatRequest, sess
         Dialect::OpenAi => {
             let mut body = json!({
                 "model": model.model,
-                "input": input(&request.messages),
+                "input": input(&request.messages, model),
                 "store": false,
                 "stream": true,
+                "include": ["reasoning.encrypted_content"],
             });
             if let Some(system) = &system {
                 body["instructions"] = json!(system);
@@ -196,6 +201,7 @@ mod tests {
                     text: String::new(),
                     reasoning: "r".into(),
                     tool_calls: vec![ToolCall { id: "call_1".into(), name: "ls".into(), arguments: String::new() }],
+                    state: serde_json::Value::Null,
                 },
                 ChatMessage::Tool { results: vec![ToolResult { call_id: "call_1".into(), content: "a.rs".into(), is_error: false }] },
             ],
@@ -203,6 +209,24 @@ mod tests {
             max_tokens: 1000,
             thinking: Level::High,
         }
+    }
+
+    #[test]
+    fn encrypted_reasoning_goes_back_to_the_same_model() {
+        let model = resolved("openai", "gpt-x");
+        let state = json!({ "kind": "responses", "provider": "openai", "model": "gpt-x", "items": [{ "type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "enc" }] });
+        let mut asked = request();
+        if let ChatMessage::Assistant { state: s, .. } = &mut asked.messages[1] {
+            *s = state;
+        }
+        let body = body(Dialect::OpenAi, &model, &asked, "s");
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        let input = body["input"].as_array().unwrap();
+        let at = input.iter().position(|i| i["type"] == "reasoning").expect("echoed");
+        assert_eq!(input[at]["encrypted_content"], "enc");
+        assert_eq!(input[at + 1]["type"], "function_call", "before the call it led to");
+        let other = super::body(Dialect::OpenAi, &resolved("openai", "gpt-y"), &asked, "s");
+        assert!(!other["input"].to_string().contains("encrypted_content"));
     }
 
     #[test]

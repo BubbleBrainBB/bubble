@@ -54,7 +54,8 @@ pub fn estimate_messages(messages: &[ChatMessage]) -> u64 {
     messages
         .iter()
         .map(|message| match message {
-            ChatMessage::User { text } => estimate_text(text) + 8,
+            // A picture costs about as much as a page of text.
+            ChatMessage::User { text, images } => estimate_text(text) + 8 + images.len() as u64 * 1600,
             ChatMessage::Assistant { text, tool_calls, .. } => {
                 estimate_text(text)
                     + 8
@@ -99,7 +100,7 @@ pub fn should_compact(window: Option<u64>, estimate: u64) -> bool {
 }
 
 fn is_summary(message: &ChatMessage) -> bool {
-    matches!(message, ChatMessage::User { text } if text.starts_with(SUMMARY_MARKER))
+    matches!(message, ChatMessage::User { text, .. } if text.starts_with(SUMMARY_MARKER))
 }
 
 /// How a history splits for compaction.
@@ -136,7 +137,7 @@ pub fn plan(history: &[ChatMessage]) -> Option<Plan> {
 
     let mut head = Vec::new();
     let mut overflow = None;
-    if let ChatMessage::User { text } = &history[first] {
+    if let ChatMessage::User { text, .. } = &history[first] {
         let chars: Vec<char> = text.chars().collect();
         if chars.len() > PINNED_INSTRUCTION_MAX_CHARS {
             head.push(ChatMessage::user(chars[..PINNED_INSTRUCTION_MAX_CHARS].iter().collect::<String>()));
@@ -181,8 +182,11 @@ pub fn serialize(plan: &Plan) -> String {
     let mut lines = Vec::new();
     for message in &plan.middle {
         match message {
-            ChatMessage::User { text } if is_summary(message) => lines.push(format!("[Prior compaction summary]\n{text}")),
-            ChatMessage::User { text } => lines.push(format!("USER: {text}")),
+            ChatMessage::User { text, .. } if is_summary(message) => lines.push(format!("[Prior compaction summary]\n{text}")),
+            ChatMessage::User { text, images } if !images.is_empty() => {
+                lines.push(format!("USER: {text} [{} image(s)]", images.len()))
+            }
+            ChatMessage::User { text, .. } => lines.push(format!("USER: {text}")),
             ChatMessage::Assistant { text, tool_calls, .. } => {
                 if !text.trim().is_empty() {
                     lines.push(format!("ASSISTANT: {text}"));
@@ -296,6 +300,7 @@ mod tests {
             text: String::new(),
             reasoning: String::new(),
             tool_calls: vec![ToolCall { id: id.into(), name: name.into(), arguments: format!("{{\"path\":\"{path}\"}}") }],
+            state: serde_json::Value::Null,
         }
     }
 
@@ -337,7 +342,7 @@ mod tests {
         assert!(matches!(plan.tail[0], ChatMessage::Assistant { .. }));
 
         let rebuilt = rebuild(plan, "Edited src/a.rs; next look at b.");
-        assert!(matches!(&rebuilt[1], ChatMessage::User { text } if text.starts_with(SUMMARY_MARKER)
+        assert!(matches!(&rebuilt[1], ChatMessage::User { text, .. } if text.starts_with(SUMMARY_MARKER)
             && text.contains("<read-files>\nsrc/a.rs\n</read-files>")
             && text.contains("<modified-files>\nsrc/a.rs\n</modified-files>")));
         assert_eq!(rebuilt.len(), 5);

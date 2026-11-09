@@ -236,3 +236,25 @@ fn interactive_sessions_read_prompts_and_ask_before_commands() {
     assert_eq!(read(&setup.project.join("ran.txt")).as_deref().map(str::trim), Some("ran"), "the yes ran it");
     assert!(stdout.contains("You said: hello again"));
 }
+
+#[test]
+fn session_hooks_fire_at_the_start_and_end() {
+    let setup = setup("session-hooks");
+    let log = setup.home.join("events.log");
+    std::fs::write(
+        setup.home.join("settings.json"),
+        json!({ "hooks": [
+            { "event": "SessionStart", "command": "sh", "args": ["-c", format!("cat >> {}; echo >> {}", log.display(), log.display())] },
+            { "event": "SessionEnd", "command": "sh", "args": ["-c", format!("cat >> {}; echo >> {}", log.display(), log.display())] },
+        ] })
+        .to_string(),
+    )
+    .unwrap();
+    let (code, _, stderr) = bubble(&setup, &["-p", "hello"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let events: Vec<Value> =
+        read(&log).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).unwrap()).collect();
+    let names: Vec<&str> = events.iter().map(|e| e["eventName"].as_str().unwrap_or("?")).collect();
+    assert_eq!(names, ["SessionStart", "SessionEnd"], "{events:?}");
+    assert_eq!(events[0]["payload"]["resumed"], false, "{}", events[0]);
+}

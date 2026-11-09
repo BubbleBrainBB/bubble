@@ -10,16 +10,21 @@ use bubble_core::prompt::Mode;
 use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
+use super::runner::Command;
 use super::state::{COMMANDS, Item, Kind, Line, Picker, ToolState, Tui};
 
-const ACCENT: u32 = 0x8A7FC6;
-const BRAND: u32 = 0xE89A6B;
-const MUTED: u32 = 0x8C8C8C;
-const TOOL: u32 = 0x59BCE8;
-const OK: u32 = 0x4FB06D;
-const WARN: u32 = 0xD7A13B;
-const ERROR: u32 = 0xE5534B;
-const THINK: u32 = 0xB48EAD;
+/// A color for a light and a dark terminal background: NSH picks by the
+/// color scheme the terminal reported (or `/theme` set).
+type Pair = (u32, u32);
+
+const ACCENT: Pair = (0x356FD2, 0x8A7FC6);
+const BRAND: Pair = (0xB45309, 0xE89A6B);
+const MUTED: Pair = (0x6F7377, 0x8C8C8C);
+const TOOL: Pair = (0x257E8A, 0x59BCE8);
+const OK: Pair = (0x2F7D4A, 0x4FB06D);
+const WARN: Pair = (0x8B4A00, 0xD7A13B);
+const ERROR: Pair = (0xB62633, 0xE5534B);
+const THINK: Pair = (0x5F666D, 0xB48EAD);
 
 /// `n` columns, in points.
 pub fn col(n: f32) -> Points {
@@ -31,12 +36,12 @@ pub fn row(n: f32) -> Points {
     px(n * bubble_term::CELL_H)
 }
 
-fn color(hex: u32) -> Rgba {
-    rgb(hex)
+fn color((light, dark): Pair) -> AdaptiveColor {
+    AdaptiveColor::new(rgb(light), rgb(dark))
 }
 
 /// A box drawn in box characters, its content one cell in.
-fn boxed(border: u32) -> View {
+fn boxed(border: Pair) -> View {
     view()
         .border(px(1.0))
         .rounded(px(4.0))
@@ -103,7 +108,7 @@ fn welcome(tui: Tui) -> impl IntoElement {
                         .flex_row()
                         .gap(col(1.0))
                         .child(text("Bubble").font_weight(FontWeight::BOLD))
-                        .child(muted(format!("native {}", env!("CARGO_PKG_VERSION")))),
+                        .child(muted(format!("native {}", crate::update::version()))),
                 )
                 .child(muted(move || info().map(|i| format!("{} · {}", i.model, i.thinking.as_str())).unwrap_or_else(|| "Starting…".into())))
                 .child(muted(move || info().map(|i| home_relative(&i.cwd)).unwrap_or_default()))
@@ -209,7 +214,15 @@ fn tool_view(tui: Tui, line: ReadSignal<Line>) -> AnyElement {
                 )),
         )
         .child(when(
-            move || !output().trim().is_empty() || matches!(state(), ToolState::Denied | ToolState::Stopped),
+            // A finished edit shows what it changed.
+            move || state() == ToolState::Done && line.with(|l| !l.diff.is_empty()),
+            move || diff_view(tui, line),
+        ))
+        .child(when(
+            move || {
+                let edit_shown = state() == ToolState::Done && line.with(|l| !l.diff.is_empty());
+                !edit_shown && (!output().trim().is_empty() || matches!(state(), ToolState::Denied | ToolState::Stopped))
+            },
             move || {
                 view().flex_row().pl(col(2.0)).child(muted("⎿ ")).child(
                     muted(move || {
@@ -234,6 +247,34 @@ fn tool_view(tui: Tui, line: ReadSignal<Line>) -> AnyElement {
             },
         ))
         .into_element()
+}
+
+/// Lines an edit's diff shows folded.
+const DIFF_LINES: usize = 20;
+
+fn diff_view(tui: Tui, line: ReadSignal<Line>) -> impl IntoElement {
+    view().pl(col(2.0)).child(dynamic(move || {
+        let diff = line.with(|l| l.diff.clone());
+        let (added, removed) = super::diff::counts(&diff);
+        let limit = if tui.expanded.get() { usize::MAX } else { DIFF_LINES };
+        let mut rows: Vec<AnyElement> = vec![muted(format!("⎿ +{added} added, -{removed} removed")).into_element()];
+        for (mark, text) in diff.iter().take(limit) {
+            let pair = match mark {
+                '+' => OK,
+                '-' => ERROR,
+                _ => MUTED,
+            };
+            rows.push(view().pl(col(2.0)).child(text_line(format!("{mark} {text}"), pair)).into_element());
+        }
+        if diff.len() > limit {
+            rows.push(muted(format!("  … +{} lines (ctrl+o to expand)", diff.len() - limit)).into_element());
+        }
+        view().children(rows).into_element()
+    }))
+}
+
+fn text_line(content: String, pair: Pair) -> Text {
+    text(content).text_color(color(pair))
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -468,11 +509,33 @@ struct Suggestion {
 /// project files the `@` word it ends in names.
 fn suggestions(tui: Tui, draft: &str) -> Vec<Suggestion> {
     if draft.starts_with('/') && !draft.contains(char::is_whitespace) {
-        return COMMANDS
+        let mut found: Vec<Suggestion> = COMMANDS
             .iter()
             .filter(|(c, _)| c.starts_with(draft) && *c != draft)
             .map(|(c, about)| Suggestion { label: c.to_string(), detail: about.to_string(), complete: format!("{c} "), command: true })
             .collect();
+        // MCP prompts and skills take words after them: Enter fills them in.
+        let typed = &draft[1..];
+        tui.prompts.with(|prompts| {
+            for p in prompts.iter().filter(|p| p.name.starts_with(typed) && p.name != typed) {
+                let args: String = p.arguments.iter().map(|(a, _)| format!(" <{a}>")).collect();
+                found.push(Suggestion {
+                    label: format!("/{}", p.name),
+                    detail: format!("[MCP:{}] {}{args}", p.server, p.description),
+                    complete: format!("/{} ", p.name),
+                    command: p.arguments.is_empty(),
+                });
+            }
+        });
+        if !typed.is_empty() {
+            tui.skills.with(|skills| {
+                for (name, about) in skills.iter().filter(|(n, _)| n.starts_with(typed) && *n != typed).take(6) {
+                    found.push(Suggestion { label: format!("/{name}"), detail: format!("skill: {about}"), complete: format!("/{name} "), command: false });
+                }
+            });
+        }
+        found.truncate(12);
+        return found;
     }
     let Some((at, query)) = super::files::mention_at_end(draft) else { return Vec::new() };
     tui.files.with(|files| {
@@ -572,7 +635,9 @@ fn composer(tui: Tui, at: Signal<usize>) -> impl IntoElement {
     };
     let submit = move || {
         let draft = tui.draft.get_untracked();
-        let list = suggestions(tui, &draft);
+        // A command typed in full runs as typed, whatever else it starts.
+        let exact = COMMANDS.iter().any(|(c, _)| *c == draft.trim());
+        let list = if exact { Vec::new() } else { suggestions(tui, &draft) };
         let text = match list.get(at.get_untracked()) {
             Some(s) if s.command => s.complete.trim().to_owned(),
             // A file is put in the draft; Enter again sends.
@@ -604,7 +669,7 @@ fn composer(tui: Tui, at: Signal<usize>) -> impl IntoElement {
                 .placeholder(move || {
                     if tui.busy() { "Queue a follow-up… (Esc stops)".to_owned() } else { "Ask Bubble, or / for commands".to_owned() }
                 })
-                .placeholder_color(color(MUTED))
+                .placeholder_color(move || if dark() { rgb(MUTED.1) } else { rgb(MUTED.0) })
                 .multiline(true)
                 .submit_behavior(SubmitBehavior::Submit)
                 .auto_focus(true)
@@ -690,6 +755,7 @@ pub fn screen(tui: Tui) -> impl IntoElement {
         }
     });
     on_key_with("ctrl+o", KeyOptions { when: When::Always, repeat: false }, move |_| tui.expanded.update(|e| *e = !*e));
+    on_key_with("ctrl+v", KeyOptions { when: When::Always, repeat: false }, move |_| tui.send(Command::PasteImage));
     view()
         .flex_1()
         .px(col(1.0))

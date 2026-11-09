@@ -32,6 +32,8 @@ pub struct Args {
 pub const HELP: &str = "Usage:
   bubble [options]                       Start an interactive session
   bubble [options] [-p] <prompt>         Run one prompt and exit (also reads a piped prompt with -p)
+  bubble import-sessions                 Bring in the TypeScript CLI's sessions (once; also done on first start)
+  bubble update [--check]                Install the latest version (or only check for one)
 
 Options:
   -m, --model <model>      Model to use (provider:model)

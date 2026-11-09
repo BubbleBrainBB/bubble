@@ -170,7 +170,7 @@ async fn turn_steps(client: &reqwest::Client, turn: Turn, events: &mpsc::Unbound
     let children = children.filter(|_| role == hooks::Role::Parent && cwd.is_some());
 
     // The person's message passes the prompt hooks first.
-    if let Some(ChatMessage::User { text }) = history.last_mut() {
+    if let Some(ChatMessage::User { text, .. }) = history.last_mut() {
         let outcome = fire(
             &hooks,
             role,
@@ -720,6 +720,7 @@ for line in sys.stdin:
             text: String::new(),
             reasoning: String::new(),
             tool_calls: vec![ToolCall { id: id.into(), name: "read".into(), arguments: "{\"path\":\"a.rs\"}".into() }],
+            state: serde_json::Value::Null,
         };
         let result = |id: &str, content: String| ChatMessage::Tool {
             results: vec![ToolResult { call_id: id.into(), content, is_error: false }],
@@ -760,7 +761,7 @@ for line in sys.stdin:
         }
         agent.await.unwrap().unwrap();
         let compacted = compacted.expect("the history was compacted");
-        assert!(matches!(&compacted[1], ChatMessage::User { text } if text.contains("Read a.rs; it is huge")));
+        assert!(matches!(&compacted[1], ChatMessage::User { text, .. } if text.contains("Read a.rs; it is huge")));
         let requests = server.await.unwrap();
         assert!(requests[0].contains("CONTEXT CHECKPOINT COMPACTION"));
         assert!(requests[1].contains("compaction-summary"));

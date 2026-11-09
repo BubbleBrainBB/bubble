@@ -536,9 +536,16 @@ fn tool_settings(app: AppState) -> impl IntoElement {
                             .text_size(px(SMALL))
                             .text_color(move || if server.get().failed { failed() } else { muted() }),
                     )
-                    .child(when(move || server.get().failed, move || {
-                        button("Retry", move || app.retry_server(&server.get_untracked().name))
-                            .label(format!("Retry {}", server.get_untracked().name))
+                    .child(dynamic(move || {
+                        let row = server.get();
+                        let name = row.name.clone();
+                        if row.status.starts_with(bubble_core::mcp_oauth::NEEDS_SIGN_IN) {
+                            button("Sign in", move || app.sign_in_server(&name)).label(format!("Sign in to {}", row.name)).into_element()
+                        } else if row.failed {
+                            button("Retry", move || app.retry_server(&name)).label(format!("Retry {}", row.name)).into_element()
+                        } else {
+                            view().into_element()
+                        }
                     }))
             },
         ))

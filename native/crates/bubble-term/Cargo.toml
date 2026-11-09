@@ -13,5 +13,8 @@ crossterm = { version = "0.29", features = ["bracketed-paste"] }
 unicode-width = "0.2"
 log.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 nsh-base = "0.4.0"

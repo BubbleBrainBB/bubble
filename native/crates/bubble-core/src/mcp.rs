@@ -244,6 +244,8 @@ pub struct Client {
     pending: Pending,
     closed: Arc<AtomicBool>,
     pub instructions: Option<String>,
+    /// The server offers prompts.
+    has_prompts: bool,
 }
 
 /// Removes a request's waiter however the request ends.
@@ -377,7 +379,7 @@ impl Client {
                 Link::Http { client: http.clone(), url: url.clone(), headers: headers.clone(), session: Mutex::new(None) }
             }
         };
-        let mut client = Client { link, next_id: AtomicU64::new(1), pending, closed, instructions: None };
+        let mut client = Client { link, next_id: AtomicU64::new(1), pending, closed, instructions: None, has_prompts: false };
         let result = client
             .request(
                 "initialize",
@@ -390,6 +392,7 @@ impl Client {
             )
             .await?;
         client.instructions = result["instructions"].as_str().map(str::to_owned);
+        client.has_prompts = result["capabilities"]["prompts"].is_object();
         client.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).await?;
         Ok(client)
     }
@@ -427,6 +430,13 @@ impl Client {
                 for (name, value) in headers {
                     request = request.header(name, value);
                 }
+                // A sign-in kept for the server, unless the configuration
+                // carries its own credentials.
+                if !headers.keys().any(|k| k.eq_ignore_ascii_case("authorization"))
+                    && let Some(token) = crate::mcp_oauth::bearer(client, url).await
+                {
+                    request = request.bearer_auth(token);
+                }
                 if let Some(id) = session.lock().ok().and_then(|s| s.clone()) {
                     request = request.header("mcp-session-id", id);
                 }
@@ -439,6 +449,11 @@ impl Client {
                 let status = response.status();
                 if status.as_u16() == 202 || status.as_u16() == 204 {
                     return Ok(());
+                }
+                if status.as_u16() == 401 {
+                    let challenge = response.headers().get("www-authenticate").and_then(|v| v.to_str().ok());
+                    crate::mcp_oauth::challenged(url, challenge);
+                    bail!("{}: the server answered 401", crate::mcp_oauth::NEEDS_SIGN_IN);
                 }
                 let event_stream = response
                     .headers()
@@ -497,6 +512,75 @@ impl Client {
                 return Ok(tools);
             }
         }
+    }
+
+    /// The prompts the server offers (none when it offers no prompts).
+    pub async fn list_prompts(&self) -> Result<Vec<McpPrompt>> {
+        let mut prompts = Vec::new();
+        if !self.has_prompts {
+            return Ok(prompts);
+        }
+        let mut cursor: Option<String> = None;
+        loop {
+            let params = match &cursor {
+                Some(cursor) => json!({ "cursor": cursor }),
+                None => json!({}),
+            };
+            let result = self.request("prompts/list", params, REQUEST_TIMEOUT).await?;
+            for prompt in result["prompts"].as_array().into_iter().flatten() {
+                let Some(name) = prompt["name"].as_str() else { continue };
+                prompts.push(McpPrompt {
+                    name: name.to_owned(),
+                    description: prompt["description"].as_str().map(str::to_owned),
+                    arguments: prompt["arguments"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|a| Some((a["name"].as_str()?.to_owned(), a["required"].as_bool().unwrap_or(false))))
+                        .collect(),
+                });
+            }
+            cursor = result["nextCursor"].as_str().filter(|c| !c.is_empty()).map(str::to_owned);
+            if cursor.is_none() {
+                return Ok(prompts);
+            }
+        }
+    }
+
+    /// A prompt's messages, as one text for the agent (roles kept only
+    /// when they mix, as in the TypeScript runtime).
+    pub async fn get_prompt(&self, name: &str, arguments: Value) -> Result<String> {
+        let result = self.request("prompts/get", json!({ "name": name, "arguments": arguments }), REQUEST_TIMEOUT).await?;
+        let messages = result["messages"].as_array().cloned().unwrap_or_default();
+        let all_user = messages.iter().all(|m| m["role"] == "user");
+        let mut parts = Vec::new();
+        for message in &messages {
+            let blocks = match &message["content"] {
+                Value::Array(blocks) => blocks.clone(),
+                block => vec![block.clone()],
+            };
+            let text = blocks
+                .iter()
+                .map(|b| match b["type"].as_str() {
+                    Some("text") => b["text"].as_str().unwrap_or_default().to_owned(),
+                    Some("resource") => b["resource"]["text"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("[resource: {}]", b["resource"]["mimeType"].as_str().unwrap_or("unknown"))),
+                    Some("image") => format!("[image: {}]", b["mimeType"].as_str().unwrap_or("unknown")),
+                    Some(other) => format!("[{other}]"),
+                    None => String::new(),
+                })
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.is_empty() {
+                continue;
+            }
+            let role = message["role"].as_str().unwrap_or("user");
+            parts.push(if all_user { text } else { format!("[{role}]\n{text}") });
+        }
+        Ok(parts.join("\n\n"))
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolOutput> {
@@ -570,11 +654,20 @@ pub struct McpTool {
     pub schema: Value,
 }
 
+/// A prompt a server offers: its name, what it is for, and its arguments
+/// (name, required).
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpPrompt {
+    pub name: String,
+    pub description: Option<String>,
+    pub arguments: Vec<(String, bool)>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
     NotStarted,
     Connecting,
-    Connected { tools: Vec<McpTool> },
+    Connected { tools: Vec<McpTool>, prompts: Vec<McpPrompt> },
     Failed(String),
 }
 
@@ -616,7 +709,7 @@ impl Server {
     /// The tools on offer, once connected.
     pub fn tools(&self) -> Vec<McpTool> {
         match self.status() {
-            Status::Connected { tools } => tools,
+            Status::Connected { tools, .. } => tools,
             _ => Vec::new(),
         }
     }
@@ -635,22 +728,51 @@ impl Server {
         let attempt = async {
             let client = Client::connect(&self.config, http).await?;
             let tools = client.list_tools().await?;
-            Ok::<_, anyhow::Error>((client, tools))
+            // A server whose prompts fail still serves its tools.
+            let prompts = client.list_prompts().await.unwrap_or_default();
+            Ok::<_, anyhow::Error>((client, tools, prompts))
         };
         match tokio::time::timeout(REQUEST_TIMEOUT * 2, attempt).await {
-            Ok(Ok((client, tools))) => {
+            Ok(Ok((client, tools, prompts))) => {
                 connection.client = Some(Arc::new(client));
                 connection.failed_at = None;
-                self.set_status(Status::Connected { tools });
+                self.set_status(Status::Connected { tools, prompts });
             }
             Ok(Err(error)) => {
                 connection.failed_at = Some(Instant::now());
-                self.set_status(Status::Failed(format!("{error:#}")));
+                let message = format!("{error:#}");
+                self.set_status(Status::Failed(if message.contains(crate::mcp_oauth::NEEDS_SIGN_IN) {
+                    format!("{}: /mcp login {}", crate::mcp_oauth::NEEDS_SIGN_IN, self.name)
+                } else {
+                    message
+                }));
             }
             Err(_) => {
                 connection.failed_at = Some(Instant::now());
                 self.set_status(Status::Failed("did not answer within a minute".into()));
             }
+        }
+    }
+
+    /// The address of an HTTP server.
+    pub fn url(&self) -> Option<&str> {
+        match &self.config {
+            ServerConfig::Http { url, .. } => Some(url),
+            _ => None,
+        }
+    }
+
+    /// Starts signing in to this (HTTP) server in the browser.
+    pub async fn login(&self, http: &reqwest::Client) -> Result<crate::mcp_oauth::Pending> {
+        let url = self.url().ok_or_else(|| anyhow!("{} is a local (stdio) server; it has no sign-in", self.name))?;
+        crate::mcp_oauth::begin(http, url).await
+    }
+
+    /// Forgets the sign-in of this server.
+    pub fn logout(&self) -> Result<bool> {
+        match self.url() {
+            Some(url) => crate::mcp_oauth::forget(url),
+            None => Ok(false),
         }
     }
 
@@ -673,6 +795,23 @@ impl Server {
                 ToolOutput { content: format!("Error calling {}.{tool}: {error:#}", self.name), is_error: true }
             }
         }
+    }
+
+    /// The prompts on offer, once connected.
+    pub fn prompts(&self) -> Vec<McpPrompt> {
+        match self.status() {
+            Status::Connected { prompts, .. } => prompts,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Prompt `name` with `arguments` (by the prompt's argument names).
+    pub async fn prompt(&self, name: &str, arguments: Value) -> Result<String> {
+        let client = self.connection.lock().await.client.clone();
+        let Some(client) = client.filter(|c| !c.is_closed()) else {
+            bail!("MCP server \"{}\" is not connected", self.name);
+        };
+        client.get_prompt(name, arguments).await
     }
 
     /// The tool specs, named `mcp__<server>__<tool>`.
@@ -814,7 +953,12 @@ for line in sys.stdin:
     m = json.loads(line)
     if m.get("method") == "initialize":
         send({"jsonrpc": "2.0", "method": "ping", "id": "p1"})
-        send({"jsonrpc": "2.0", "id": m["id"], "result": {"serverInfo": {"name": "t", "version": "1"}, "capabilities": {"tools": {}}}})
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"serverInfo": {"name": "t", "version": "1"}, "capabilities": {"tools": {}, "prompts": {}}}})
+    elif m.get("method") == "prompts/list":
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"prompts": [{"name": "review", "description": "Review a file", "arguments": [{"name": "path", "required": True}, {"name": "focus"}]}]}})
+    elif m.get("method") == "prompts/get":
+        a = m["params"]["arguments"]
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"messages": [{"role": "user", "content": {"type": "text", "text": "Review " + a["path"] + " for " + a.get("focus", "anything")}}]}})
     elif m.get("method") == "tools/list":
         if m["params"].get("cursor"):
             send({"jsonrpc": "2.0", "id": m["id"], "result": {"tools": [{"name": "echo", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}}]}})
@@ -845,6 +989,11 @@ for line in sys.stdin:
         assert_eq!(specs[0].0.parameters, json!({ "type": "object", "properties": {} }));
         let output = servers[0].call("echo", json!({ "text": "hi" })).await;
         assert_eq!(output, ToolOutput { content: "echo: hi".into(), is_error: false });
+        let prompts = servers[0].prompts();
+        assert_eq!(prompts[0].name, "review");
+        assert_eq!(prompts[0].arguments, [("path".to_owned(), true), ("focus".to_owned(), false)]);
+        let text = servers[0].prompt("review", json!({ "path": "src/a.rs", "focus": "error handling" })).await.unwrap();
+        assert_eq!(text, "Review src/a.rs for error handling");
         // The same configuration again shares the connection.
         let again = hub.servers_for(configured);
         assert!(Arc::ptr_eq(&again[0], &servers[0]));

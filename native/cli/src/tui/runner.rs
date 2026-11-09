@@ -34,6 +34,56 @@ pub enum Command {
     Context,
     /// The MCP servers, or reconnect the one named.
     Mcp(Option<String>),
+    /// Take the clipboard's image for the next prompt.
+    PasteImage,
+    /// Sign in to an MCP server in the browser.
+    McpLogin(String),
+    /// Forget an MCP server's sign-in.
+    McpLogout(String),
+    /// Send an MCP server's prompt, with its arguments as typed.
+    McpPrompt { server: String, name: String, args: String },
+}
+
+/// An MCP prompt a person can run as `/name args`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PromptInfo {
+    pub server: String,
+    pub name: String,
+    pub description: String,
+    /// Argument names, and whether each is required.
+    pub arguments: Vec<(String, bool)>,
+}
+
+/// Arguments as typed: words, or "quoted phrases".
+pub fn split_args(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        let mut word = String::new();
+        if c == '"' || c == '\'' {
+            chars.next();
+            for next in chars.by_ref() {
+                if next == c {
+                    break;
+                }
+                word.push(next);
+            }
+        } else {
+            while let Some(&next) = chars.peek() {
+                if next.is_whitespace() {
+                    break;
+                }
+                word.push(next);
+                chars.next();
+            }
+        }
+        out.push(word);
+    }
+    out
 }
 
 /// What the screen shows about the session.
@@ -57,9 +107,11 @@ pub enum Update {
     /// The turn ended: stopped by the person, or with an error.
     Ended { stopped: bool, error: Option<String> },
     Sessions(Vec<Task>),
+    /// A clipboard image waits under this label for the prompt.
+    Pasted(String),
     /// The project's files (for `@` mentions), the prompts typed here, and
     /// the skills (name, description).
-    Helpers { files: Vec<String>, history: Vec<String>, skills: Vec<(String, String)> },
+    Helpers { files: Vec<String>, history: Vec<String>, skills: Vec<(String, String)>, prompts: Vec<PromptInfo> },
     Notice(String),
     Error(String),
 }
@@ -82,6 +134,8 @@ fn info(session: &Session) -> Info {
 struct Forward {
     updates: UnboundedSender<Update>,
     mode: Mode,
+    hooks: Arc<bubble_core::hooks::Hooks>,
+    cwd: std::path::PathBuf,
 }
 
 impl Host for Forward {
@@ -90,6 +144,20 @@ impl Host for Forward {
             AgentEvent::ApprovalNeeded { respond, .. } if self.mode != Mode::Build => {
                 let _ = respond.send(crate::automatic(self.mode));
                 return;
+            }
+            AgentEvent::ApprovalNeeded { ref permission, .. } => {
+                // Someone may be away from the terminal: a hook can tell them.
+                let message = format!("Bubble needs your approval: {}", permission.summary);
+                self.hooks
+                    .run(bubble_core::hooks::Role::Parent, bubble_core::hooks::Event {
+                        name: "Notification",
+                        cwd: &self.cwd,
+                        target: "approval",
+                        payload: serde_json::json!({ "message": message, "detail": permission.detail }),
+                        full: serde_json::json!({}),
+                    })
+                    .await;
+                event
             }
             AgentEvent::HostCall { respond, .. } => {
                 let _ = respond.send(ToolOutput { content: "Not available here.".into(), is_error: true });
@@ -120,14 +188,38 @@ pub async fn run(mut args: Args, mut commands: UnboundedReceiver<Command>, updat
     };
     let _ = updates.send(Update::Opened(info(&session), session.history.clone()));
     send_helpers(&session, &updates, true).await;
+    // The TypeScript CLI's sessions come in once, in the background.
+    if session.store.setting(bubble_store::import::DONE).ok().flatten().is_none() {
+        let updates = updates.clone();
+        tokio::task::spawn_blocking(move || {
+            let report = open_store().and_then(|store| store.import_ts_sessions(&bubble_home().join("sessions")));
+            if let Ok(report) = report
+                && report.imported > 0
+            {
+                let _ = updates.send(Update::Notice(format!(
+                    "Brought in {} sessions from the TypeScript Bubble; /session lists this folder's.",
+                    report.imported
+                )));
+            }
+        });
+    }
+    // Clipboard images by label, and how many images this session numbered.
+    let mut pasted: std::collections::HashMap<String, bubble_core::Image> = std::collections::HashMap::new();
+    let mut numbered = 0usize;
     while let Some(command) = commands.recv().await {
         match command {
             Command::Prompt(prompt) => {
                 let folder = session.cwd.display().to_string();
                 super::files::remember(&prompt, &folder);
                 let prompt = super::files::expand(&prompt, &session.cwd);
-                let mut host = Forward { updates: updates.clone(), mode: session.mode };
-                let result = session.turn(&prompt, &mut host, stop.notified()).await;
+                let (prompt, images, problems) = super::images::attach(&prompt, &pasted, numbered);
+                numbered += images.len().saturating_sub(pasted.keys().filter(|l| prompt.contains(l.as_str())).count());
+                for problem in problems {
+                    let _ = updates.send(Update::Error(format!("Image not attached: {problem}")));
+                }
+                let mut host =
+                    Forward { updates: updates.clone(), mode: session.mode, hooks: session.hooks(), cwd: session.cwd.clone() };
+                let result = session.turn_with(&prompt, images, &mut host, stop.notified()).await;
                 let _ = updates.send(match result {
                     Ok(done) => Update::Ended { stopped: !done, error: None },
                     Err(error) => Update::Ended { stopped: false, error: Some(format!("{error:#}")) },
@@ -189,6 +281,118 @@ pub async fn run(mut args: Args, mut commands: UnboundedReceiver<Command>, updat
                 let _ = updates.send(text);
                 let _ = updates.send(Update::Ended { stopped: false, error: None });
             }
+            Command::McpLogin(name) => {
+                let found = session.toolbox().servers.iter().find(|s| s.name == name).cloned();
+                let outcome = match found {
+                    None => Err(format!("No MCP server named {name}.")),
+                    Some(server) => match server.login(session.client()).await {
+                        Err(error) => Err(format!("{error:#}")),
+                        Ok(pending) => {
+                            let opened = login::open_browser(&pending.url);
+                            let _ = updates.send(Update::Notice(format!(
+                                "{} sign in to {name} there. If it did not open, use this address:\n{}\nEsc cancels.",
+                                if opened { "Your browser is opening:" } else { "Open your browser and" },
+                                pending.url
+                            )));
+                            let stopped = stop.notified();
+                            let finished = tokio::select! {
+                                result = pending.finish(session.client()) => Some(result),
+                                () = stopped => None,
+                            };
+                            match finished {
+                                None => Ok("Sign-in canceled.".to_owned()),
+                                Some(Err(error)) => Err(format!("{error:#}")),
+                                Some(Ok(())) => {
+                                    server.reset().await;
+                                    server.ensure(session.client()).await;
+                                    Ok(format!("Signed in to {name}.\n{}", mcp_status(&session.toolbox().servers)))
+                                }
+                            }
+                        }
+                    },
+                };
+                let _ = updates.send(match outcome {
+                    Ok(text) => Update::Notice(text),
+                    Err(error) => Update::Error(error),
+                });
+                let _ = updates.send(Update::Ended { stopped: false, error: None });
+                send_helpers(&session, &updates, false).await;
+            }
+            Command::McpLogout(name) => {
+                let found = session.toolbox().servers.iter().find(|s| s.name == name).cloned();
+                let _ = updates.send(match found.map(|s| s.logout()) {
+                    None => Update::Error(format!("No MCP server named {name}.")),
+                    Some(Ok(true)) => Update::Notice(format!("Signed out of {name} on this device.")),
+                    Some(Ok(false)) => Update::Notice(format!("No sign-in is stored for {name}.")),
+                    Some(Err(error)) => Update::Error(format!("{error:#}")),
+                });
+            }
+            Command::McpPrompt { server, name, args } => {
+                let found = session.toolbox().servers.iter().find(|s| s.name == server).cloned();
+                let prompt = found.as_ref().and_then(|s| s.prompts().into_iter().find(|p| bubble_core::mcp::normalize(&p.name) == name));
+                let text = match (found, prompt) {
+                    (Some(server), Some(prompt)) => {
+                        let values = split_args(&args);
+                        let missing: Vec<&str> = prompt
+                            .arguments
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, (_, required))| *required && values.get(*i).is_none())
+                            .map(|(_, (n, _))| n.as_str())
+                            .collect();
+                        if missing.is_empty() {
+                            let mut map = serde_json::Map::new();
+                            for (i, (arg, _)) in prompt.arguments.iter().enumerate() {
+                                // The last argument takes whatever is left.
+                                let value = if i + 1 == prompt.arguments.len() && values.len() > i {
+                                    values[i..].join(" ")
+                                } else {
+                                    match values.get(i) {
+                                        Some(v) => v.clone(),
+                                        None => continue,
+                                    }
+                                };
+                                map.insert(arg.clone(), serde_json::Value::String(value));
+                            }
+                            server.prompt(&prompt.name, serde_json::Value::Object(map)).await.map_err(|e| format!("{e:#}"))
+                        } else {
+                            Err(format!("/{name} needs {}", missing.iter().map(|m| format!("<{m}>")).collect::<Vec<_>>().join(" ")))
+                        }
+                    }
+                    _ => Err(format!("MCP prompt {name} of {server} is not available")),
+                };
+                match text {
+                    Ok(text) if !text.trim().is_empty() => {
+                        let mut host =
+                            Forward { updates: updates.clone(), mode: session.mode, hooks: session.hooks(), cwd: session.cwd.clone() };
+                        let result = session.turn(&text, &mut host, stop.notified()).await;
+                        let _ = updates.send(match result {
+                            Ok(done) => Update::Ended { stopped: !done, error: None },
+                            Err(error) => Update::Ended { stopped: false, error: Some(format!("{error:#}")) },
+                        });
+                        let _ = updates.send(Update::Info(info(&session)));
+                    }
+                    Ok(_) => {
+                        let _ = updates.send(Update::Ended { stopped: false, error: Some(format!("/{name} returned no text")) });
+                    }
+                    Err(error) => {
+                        let _ = updates.send(Update::Ended { stopped: false, error: Some(error) });
+                    }
+                }
+            }
+            Command::PasteImage => {
+                let found = tokio::task::spawn_blocking(super::images::clipboard).await.unwrap_or(Ok(None));
+                let _ = updates.send(match found {
+                    Ok(Some(image)) => {
+                        numbered += 1;
+                        let label = super::images::label(numbered, &image);
+                        pasted.insert(label.clone(), image);
+                        Update::Pasted(label)
+                    }
+                    Ok(None) => Update::Notice("No image on the clipboard.".into()),
+                    Err(problem) => Update::Error(format!("Image not attached: {problem}")),
+                });
+            }
             Command::Context => {
                 let _ = updates.send(Update::Notice(session.context()));
             }
@@ -242,6 +446,7 @@ pub async fn run(mut args: Args, mut commands: UnboundedReceiver<Command>, updat
             }
         }
     }
+    session.end().await;
     // A session left without a word is not kept.
     let _ = session.store.discard_if_empty(&session.task.id);
 }
@@ -257,12 +462,13 @@ fn mcp_status(servers: &[Arc<bubble_core::mcp::Server>]) -> String {
         let status = match server.status() {
             Status::NotStarted => "not started".to_owned(),
             Status::Connecting => "connecting…".to_owned(),
-            Status::Connected { tools } => format!("{} tools", tools.len()),
+            Status::Connected { tools, prompts } if prompts.is_empty() => format!("{} tools", tools.len()),
+            Status::Connected { tools, prompts } => format!("{} tools, {} prompts", tools.len(), prompts.len()),
             Status::Failed(error) => format!("failed: {error}"),
         };
         lines.push(format!("  {} ({}) — {status}", server.name, server.scope.label()));
     }
-    lines.push("/mcp reconnect <name> tries one again.".into());
+    lines.push("/mcp reconnect <name> tries one again; /mcp login <name> signs in to one that needs it.".into());
     lines.join("\n")
 }
 
@@ -276,8 +482,21 @@ async fn send_helpers(session: &Session, updates: &UnboundedSender<Update>, with
     .await;
     let skills =
         session.toolbox().skills.visible().map(|s| (s.name.clone(), s.description.clone())).collect::<Vec<_>>();
+    let prompts = session
+        .toolbox()
+        .servers
+        .iter()
+        .flat_map(|server| {
+            server.prompts().into_iter().map(|p| PromptInfo {
+                server: server.name.clone(),
+                name: bubble_core::mcp::normalize(&p.name),
+                description: p.description.unwrap_or_default(),
+                arguments: p.arguments,
+            })
+        })
+        .collect();
     if let Ok((files, history)) = found {
-        let _ = updates.send(Update::Helpers { files, history, skills });
+        let _ = updates.send(Update::Helpers { files, history, skills, prompts });
     }
 }
 
@@ -323,5 +542,14 @@ pub fn decision(choice: char) -> Decision {
         'y' => Decision::AllowOnce,
         'a' => Decision::AllowForTask,
         _ => Decision::Deny,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn arguments_split_on_spaces_outside_quotes() {
+        assert_eq!(super::split_args(r#"src/a.rs "error handling" x"#), ["src/a.rs", "error handling", "x"]);
+        assert!(super::split_args("   ").is_empty());
     }
 }

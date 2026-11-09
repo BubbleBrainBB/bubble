@@ -132,7 +132,9 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
         .unwrap();
     let long = Duration::from_secs(10);
 
-    // A first task makes the project, and so the repository, known.
+    // A first task makes the project, and so the repository, known. (The
+    // app's first render can come late on a cold start.)
+    app.wait_for_within("id:nav-tasks", long).unwrap();
     app.press("id:nav-tasks").unwrap();
     app.press("text:New task").unwrap();
     app.type_text("text:What needs doing?", "Set up").unwrap();

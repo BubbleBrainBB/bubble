@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
+use serde_json::json;
 use bubble_core::delegate::{self, Children};
 use bubble_core::hooks::{self, Hooks};
 use bubble_core::prompt::{self, Mode};
@@ -142,7 +143,7 @@ impl Session {
             grants.lock().map_err(|_| anyhow!("poisoned"))?.insert("files".into());
         }
         let system = compose(&model, &cwd, args.mode);
-        Ok(Session {
+        let session = Session {
             store,
             task,
             run_id: run.id,
@@ -160,7 +161,29 @@ impl Session {
             grants,
             unlocked: Default::default(),
             system,
-        })
+        };
+        let resumed = !session.history.is_empty();
+        session
+            .hook("SessionStart", json!({ "resumed": resumed, "printMode": args.print || args.prompt.is_some(), "providerId": session.model.provider.id, "model": session.model.model }))
+            .await;
+        Ok(session)
+    }
+
+    /// Runs the person's hooks for a session event (`SessionStart`,
+    /// `SessionEnd`, `Notification`).
+    pub async fn hook(&self, name: &str, payload: serde_json::Value) {
+        self.hooks
+            .run(hooks::Role::Parent, hooks::Event { name, cwd: &self.cwd, target: "session", payload, full: json!({}) })
+            .await;
+    }
+
+    /// The session is over: `SessionEnd` hooks run.
+    pub async fn end(&self) {
+        self.hook("SessionEnd", json!({ "providerId": self.model.provider.id, "model": self.model.model })).await;
+    }
+
+    pub fn hooks(&self) -> Arc<Hooks> {
+        self.hooks.clone()
     }
 
     /// Switches to model `reference` (`provider:model`) from the next turn.
@@ -268,12 +291,23 @@ impl Session {
     /// finishing stops it and keeps what came so far; whether it ran to
     /// its end.
     pub async fn turn<H: Host>(&mut self, prompt: &str, host: &mut H, stop: impl Future<Output = ()>) -> Result<bool> {
+        self.turn_with(prompt, Vec::new(), host, stop).await
+    }
+
+    /// [`Session::turn`] with pictures sent along.
+    pub async fn turn_with<H: Host>(
+        &mut self,
+        prompt: &str,
+        images: Vec<bubble_core::Image>,
+        host: &mut H,
+        stop: impl Future<Output = ()>,
+    ) -> Result<bool> {
         if self.history.is_empty() && self.task.title == UNTITLED {
             let title = title_from(prompt);
             self.store.rename_task(&self.task.id, &title)?;
             self.task.title = title;
         }
-        let message = ChatMessage::user(prompt.to_owned());
+        let message = ChatMessage::user_with_images(prompt.to_owned(), images);
         self.store.append_message_with(
             &self.run_id,
             MessageRole::User,

@@ -76,6 +76,9 @@ pub struct ToolResult {
 pub enum ChatMessage {
     User {
         text: String,
+        /// Pictures sent with the text (pasted into the composer).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<Image>,
     },
     Assistant {
         #[serde(default)]
@@ -86,19 +89,42 @@ pub enum ChatMessage {
         reasoning: String,
         #[serde(default)]
         tool_calls: Vec<ToolCall>,
+        /// What the provider wants echoed back on later turns: Anthropic's
+        /// thinking blocks and their signatures, Responses' encrypted
+        /// reasoning, Gemini's parts with their thought signatures.
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        state: Value,
     },
     Tool {
         results: Vec<ToolResult>,
     },
 }
 
+/// A picture in a message: its media type and its bytes in base64.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Image {
+    pub media_type: String,
+    pub data: String,
+}
+
+impl Image {
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.data)
+    }
+}
+
 impl ChatMessage {
     pub fn user(text: impl Into<String>) -> Self {
-        ChatMessage::User { text: text.into() }
+        ChatMessage::User { text: text.into(), images: Vec::new() }
+    }
+
+    /// A message with pictures.
+    pub fn user_with_images(text: impl Into<String>, images: Vec<Image>) -> Self {
+        ChatMessage::User { text: text.into(), images }
     }
 
     pub fn assistant(text: impl Into<String>) -> Self {
-        ChatMessage::Assistant { text: text.into(), reasoning: String::new(), tool_calls: Vec::new() }
+        ChatMessage::Assistant { text: text.into(), reasoning: String::new(), tool_calls: Vec::new(), state: Value::Null }
     }
 }
 
@@ -192,6 +218,8 @@ pub struct ChatOutcome {
     pub tool_calls: Vec<ToolCall>,
     pub stop_reason: Option<String>,
     pub usage: Option<Usage>,
+    /// To echo back with the reply (see [`ChatMessage::Assistant`]).
+    pub state: Value,
 }
 
 impl ChatOutcome {
@@ -201,6 +229,7 @@ impl ChatOutcome {
             text: self.text.clone(),
             reasoning: self.reasoning.clone(),
             tool_calls: self.tool_calls.clone(),
+            state: self.state.clone(),
         }
     }
 }
@@ -228,6 +257,7 @@ pub async fn stream_chat(
         Protocol::Responses(dialect) => {
             (crate::responses::url(dialect, &model.base_url), crate::responses::body(dialect, model, request, session_id()))
         }
+        Protocol::Gemini => (crate::gemini::url(&model.base_url, &model.model), crate::gemini::body(model, request)),
     };
     let mut attempt = 0u32;
     let mut force_refresh = false;
@@ -287,7 +317,7 @@ pub async fn stream_chat(
             state.handle(model.protocol, &event, &mut on_event)?;
         }
     }
-    Ok(state.finish())
+    Ok(state.finish(model))
 }
 
 /// A reply being assembled from its events.
@@ -298,6 +328,31 @@ struct StreamState {
     calls: BTreeMap<u64, ToolCall>,
     /// Reasoning summary parts seen (Responses APIs).
     reasoning_parts: usize,
+    /// Anthropic thinking blocks (with signatures) by the stream's index.
+    thinking: BTreeMap<u64, Value>,
+    /// Responses reasoning items (with encrypted content).
+    reasoning_items: Vec<Value>,
+    /// Gemini's parts, as they came (with their thought signatures).
+    gemini_parts: Vec<Value>,
+}
+
+/// The provider state of a reply, as kept: which protocol and model it is
+/// for (only that model can read it back), and what to echo.
+fn provider_state(kind: &str, model: &ResolvedModel, items: Vec<Value>) -> Value {
+    if items.is_empty() {
+        return Value::Null;
+    }
+    json!({ "kind": kind, "provider": model.provider.id, "model": model.model, "items": items })
+}
+
+/// What a kept reply's state echoes for `kind` and `model`: nothing when it
+/// came from another model.
+pub(crate) fn echoed<'a>(state: &'a Value, kind: &str, model: &ResolvedModel) -> &'a [Value] {
+    if state["kind"] == kind && state["provider"] == model.provider.id.as_str() && state["model"] == model.model.as_str() {
+        state["items"].as_array().map(Vec::as_slice).unwrap_or_default()
+    } else {
+        &[]
+    }
 }
 
 impl StreamState {
@@ -306,6 +361,7 @@ impl StreamState {
             Protocol::OpenAiChat => self.handle_openai(event, on_event),
             Protocol::AnthropicMessages => self.handle_anthropic(event, on_event),
             Protocol::Responses(_) => self.handle_responses(event, on_event),
+            Protocol::Gemini => self.handle_gemini(event, on_event),
         }
     }
 
@@ -340,6 +396,17 @@ impl StreamState {
                     if arguments.len() > call.arguments.len() {
                         call.arguments = arguments.to_owned();
                     }
+                }
+            }
+            "response.output_item.done" if value["item"]["type"] == "reasoning" => {
+                // Encrypted reasoning goes back with the next request, so the
+                // model keeps its train of thought across tool calls.
+                if value["item"]["encrypted_content"].is_string() {
+                    let mut item = value["item"].clone();
+                    if let Some(map) = item.as_object_mut() {
+                        map.remove("status");
+                    }
+                    self.reasoning_items.push(item);
                 }
             }
             "response.output_text.delta" | "response.refusal.delta" => self.text(value["delta"].as_str().unwrap_or_default(), on_event),
@@ -377,7 +444,21 @@ impl StreamState {
         Ok(false)
     }
 
-    fn finish(mut self) -> ChatOutcome {
+    fn finish(mut self, model: &ResolvedModel) -> ChatOutcome {
+        self.outcome.state = match model.protocol {
+            // Unsigned thinking (some compatible endpoints) is not echoed.
+            Protocol::AnthropicMessages => provider_state(
+                "anthropic",
+                model,
+                self.thinking
+                    .into_values()
+                    .filter(|b| b["type"] == "redacted_thinking" || b["signature"].as_str().is_some_and(|s| !s.is_empty()))
+                    .collect(),
+            ),
+            Protocol::Responses(_) => provider_state("responses", model, std::mem::take(&mut self.reasoning_items)),
+            Protocol::Gemini => provider_state("gemini", model, std::mem::take(&mut self.gemini_parts)),
+            _ => Value::Null,
+        };
         self.outcome.tool_calls = self
             .calls
             .into_values()
@@ -463,6 +544,55 @@ impl StreamState {
         Ok(false)
     }
 
+    fn handle_gemini(&mut self, event: &SseEvent, on_event: &mut impl FnMut(StreamEvent)) -> Result<bool> {
+        let data = event.data.trim();
+        if data.is_empty() {
+            return Ok(false);
+        }
+        let value: Value = serde_json::from_str(data).with_context(|| format!("an unreadable event: {data}"))?;
+        if value["error"].is_object() {
+            bail!("the provider reported an error: {}", message_of(&value["error"]));
+        }
+        let candidate = &value["candidates"][0];
+        for part in candidate["content"]["parts"].as_array().into_iter().flatten() {
+            crate::gemini::keep_part(&mut self.gemini_parts, part);
+            if let Some(call) = part.get("functionCall") {
+                let index = self.calls.len() as u64;
+                let id = call["id"].as_str().map(str::to_owned).unwrap_or_else(|| format!("call_{index}"));
+                self.calls.insert(
+                    index,
+                    ToolCall {
+                        id,
+                        name: call["name"].as_str().unwrap_or_default().to_owned(),
+                        arguments: call["args"].to_string(),
+                    },
+                );
+            } else if let Some(text) = part["text"].as_str() {
+                if part["thought"] == true {
+                    self.reasoning(text, on_event);
+                } else {
+                    self.text(text, on_event);
+                }
+            }
+        }
+        if let Some(reason) = candidate["finishReason"].as_str() {
+            self.outcome.stop_reason = Some(reason.to_lowercase());
+        }
+        let usage = &value["usageMetadata"];
+        if usage.is_object() {
+            let thoughts = usage["thoughtsTokenCount"].as_u64().unwrap_or(0);
+            let input = usage["promptTokenCount"].as_u64().unwrap_or(0);
+            self.outcome.usage = Some(Usage {
+                input_tokens: input,
+                output_tokens: usage["candidatesTokenCount"].as_u64().unwrap_or(0) + thoughts,
+                cache_read_tokens: usage["cachedContentTokenCount"].as_u64().unwrap_or(0).min(input),
+                cache_creation_tokens: 0,
+                reasoning_tokens: thoughts,
+            });
+        }
+        Ok(false)
+    }
+
     fn handle_anthropic(&mut self, event: &SseEvent, on_event: &mut impl FnMut(StreamEvent)) -> Result<bool> {
         let value: Value = serde_json::from_str(event.data.trim())
             .with_context(|| format!("an unreadable event: {}", event.data))?;
@@ -474,6 +604,16 @@ impl StreamState {
             }
             "content_block_start" => {
                 let block = &value["content_block"];
+                let index = value["index"].as_u64().unwrap_or(0);
+                match block["type"].as_str() {
+                    Some("thinking") => {
+                        self.thinking.insert(index, json!({ "type": "thinking", "thinking": "", "signature": block["signature"].as_str().unwrap_or_default() }));
+                    }
+                    Some("redacted_thinking") => {
+                        self.thinking.insert(index, json!({ "type": "redacted_thinking", "data": block["data"] }));
+                    }
+                    _ => {}
+                }
                 if block["type"] == "tool_use" {
                     let index = value["index"].as_u64().unwrap_or(self.calls.len() as u64);
                     self.calls.insert(
@@ -490,7 +630,22 @@ impl StreamState {
                 let delta = &value["delta"];
                 match delta["type"].as_str() {
                     Some("text_delta") => self.text(delta["text"].as_str().unwrap_or_default(), on_event),
-                    Some("thinking_delta") => self.reasoning(delta["thinking"].as_str().unwrap_or_default(), on_event),
+                    Some("thinking_delta") => {
+                        let piece = delta["thinking"].as_str().unwrap_or_default();
+                        let index = value["index"].as_u64().unwrap_or(0);
+                        if let Some(block) = self.thinking.get_mut(&index) {
+                            let text = format!("{}{piece}", block["thinking"].as_str().unwrap_or_default());
+                            block["thinking"] = json!(text);
+                        }
+                        self.reasoning(piece, on_event)
+                    }
+                    Some("signature_delta") => {
+                        let index = value["index"].as_u64().unwrap_or(0);
+                        if let Some(block) = self.thinking.get_mut(&index) {
+                            let signature = format!("{}{}", block["signature"].as_str().unwrap_or_default(), delta["signature"].as_str().unwrap_or_default());
+                            block["signature"] = json!(signature);
+                        }
+                    }
                     Some("input_json_delta") => {
                         let index = value["index"].as_u64().unwrap_or(0);
                         if let Some(call) = self.calls.get_mut(&index) {
@@ -523,6 +678,9 @@ fn headers(model: &ResolvedModel, token: Option<&Token>) -> Result<HeaderMap> {
         Protocol::AnthropicMessages => {
             headers.insert("x-api-key", HeaderValue::from_str(secret)?);
             headers.insert("anthropic-version", HeaderValue::from_static(ANTHROPIC_VERSION));
+        }
+        Protocol::Gemini => {
+            headers.insert("x-goog-api-key", HeaderValue::from_str(secret)?);
         }
         _ => {
             headers.insert("authorization", HeaderValue::from_str(&format!("Bearer {secret}"))?);
@@ -583,8 +741,13 @@ fn openai_body(model: &ResolvedModel, request: &ChatRequest) -> Value {
     }
     for message in &request.messages {
         match message {
-            ChatMessage::User { text } => messages.push(json!({ "role": "user", "content": text })),
-            ChatMessage::Assistant { text, reasoning, tool_calls } => {
+            ChatMessage::User { text, images } if images.is_empty() => messages.push(json!({ "role": "user", "content": text })),
+            ChatMessage::User { text, images } => {
+                let mut parts = vec![json!({ "type": "text", "text": text })];
+                parts.extend(images.iter().map(|i| json!({ "type": "image_url", "image_url": { "url": i.data_url() } })));
+                messages.push(json!({ "role": "user", "content": parts }));
+            }
+            ChatMessage::Assistant { text, reasoning, tool_calls, .. } => {
                 let mut out = json!({
                     "role": "assistant",
                     "content": if text.is_empty() { Value::Null } else { json!(text) },
@@ -679,9 +842,18 @@ fn anthropic_body(model: &ResolvedModel, request: &ChatRequest) -> Value {
         .messages
         .iter()
         .map(|message| match message {
-            ChatMessage::User { text } => json!({ "role": "user", "content": text }),
-            ChatMessage::Assistant { text, tool_calls, .. } => {
-                let mut blocks = Vec::new();
+            ChatMessage::User { text, images } if images.is_empty() => json!({ "role": "user", "content": text }),
+            ChatMessage::User { text, images } => {
+                let mut blocks: Vec<Value> = images
+                    .iter()
+                    .map(|i| json!({ "type": "image", "source": { "type": "base64", "media_type": i.media_type, "data": i.data } }))
+                    .collect();
+                blocks.push(json!({ "type": "text", "text": text }));
+                json!({ "role": "user", "content": blocks })
+            }
+            ChatMessage::Assistant { text, tool_calls, state, .. } => {
+                // Thinking (with its signature) comes first, as it was given.
+                let mut blocks: Vec<Value> = echoed(state, "anthropic", model).to_vec();
                 if !text.is_empty() {
                     blocks.push(json!({ "type": "text", "text": text }));
                 }
@@ -722,17 +894,86 @@ fn anthropic_body(model: &ResolvedModel, request: &ChatRequest) -> Value {
     for (key, value) in reasoning.fields {
         body[key] = value;
     }
+    // Prompt caching on Anthropic itself, as the TypeScript provider does:
+    // the system prompt and the tools, then two places in the messages (at
+    // most four breakpoints in all).
+    let cache = model.provider.id == "anthropic" || official_anthropic(&model.base_url);
+    let mut breakpoints = 0;
     if let Some(system) = request.system.as_deref().filter(|s| !s.trim().is_empty()) {
-        body["system"] = json!(system);
+        body["system"] = if cache {
+            breakpoints += 1;
+            json!([{ "type": "text", "text": system, "cache_control": { "type": "ephemeral" } }])
+        } else {
+            json!(system)
+        };
     }
     if !request.tools.is_empty() {
-        body["tools"] = request
+        let mut tools: Vec<Value> = request
             .tools
             .iter()
             .map(|tool| json!({ "name": tool.name, "description": tool.description, "input_schema": tool.parameters }))
             .collect();
+        if cache && let Some(last) = tools.last_mut() {
+            last["cache_control"] = json!({ "type": "ephemeral" });
+            breakpoints += 1;
+        }
+        body["tools"] = json!(tools);
+    }
+    let message_cache = std::env::var("BUBBLE_ANTHROPIC_MESSAGE_CACHE").map(|v| v != "0" && v != "false").unwrap_or(true);
+    if cache && message_cache && official_anthropic(&model.base_url) {
+        if let Some(messages) = body["messages"].as_array_mut() {
+            place_cache_breakpoints(messages, 4 - breakpoints);
+        }
     }
     body
+}
+
+fn official_anthropic(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url).ok().and_then(|u| u.host_str().map(|h| h == "api.anthropic.com")).unwrap_or(false)
+}
+
+/// Puts `cache_control` on the last block of `message` that can take it
+/// (not thinking); whether it could.
+fn mark_cacheable(message: &mut Value) -> bool {
+    if let Some(text) = message["content"].as_str().map(str::to_owned) {
+        if text.is_empty() {
+            return false;
+        }
+        message["content"] = json!([{ "type": "text", "text": text, "cache_control": { "type": "ephemeral" } }]);
+        return true;
+    }
+    let Some(blocks) = message["content"].as_array_mut() else { return false };
+    for block in blocks.iter_mut().rev() {
+        if block["type"] == "thinking" || block["type"] == "redacted_thinking" {
+            continue;
+        }
+        block["cache_control"] = json!({ "type": "ephemeral" });
+        return true;
+    }
+    false
+}
+
+/// The rolling message breakpoints: the newest message writes the cache,
+/// and the message before the last assistant one (where the previous
+/// request ended) reads it back, whatever the size of the turn between.
+fn place_cache_breakpoints(messages: &mut [Value], budget: usize) {
+    if budget == 0 || messages.is_empty() {
+        return;
+    }
+    let mut used = 0;
+    let tail = messages.len() - 1;
+    if budget >= 2
+        && let Some(last_assistant) = messages.iter().rposition(|m| m["role"] == "assistant")
+        && last_assistant >= 1
+        && last_assistant - 1 < tail
+        && messages[last_assistant - 1]["role"] != "assistant"
+        && mark_cacheable(&mut messages[last_assistant - 1])
+    {
+        used += 1;
+    }
+    if budget > used {
+        mark_cacheable(&mut messages[tail]);
+    }
 }
 
 fn message_of(error: &Value) -> String {
@@ -832,6 +1073,25 @@ pub(crate) mod tests {
         reqwest::Client::builder().no_proxy().build().unwrap()
     }
 
+    #[test]
+    fn images_go_in_each_protocols_shape() {
+        let image = crate::provider::Image { media_type: "image/png".into(), data: "AAAA".into() };
+        let asked = ChatRequest {
+            messages: vec![ChatMessage::user_with_images("what is this?", vec![image])],
+            ..request()
+        };
+        let chat = openai_body(&model("http://x", "openai", "kimi-for-coding"), &asked);
+        assert_eq!(chat["messages"][1]["content"][1], json!({ "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }));
+        let anthropic = anthropic_body(&model("http://x", "anthropic", "anthropic"), &asked);
+        assert_eq!(anthropic["messages"][0]["content"][0]["source"], json!({ "type": "base64", "media_type": "image/png", "data": "AAAA" }));
+        assert_eq!(anthropic["messages"][0]["content"][1]["text"], "what is this?");
+        let responses = crate::responses::body(crate::config::Dialect::OpenAi, &model("http://x", "openai-responses", "zen"), &asked, "s");
+        let input = responses["input"].to_string();
+        assert!(input.contains("\"input_image\"") && input.contains("data:image/png;base64,AAAA"), "{input}");
+        // Without pictures, text stays a plain string.
+        assert_eq!(openai_body(&model("http://x", "openai", "kimi-for-coding"), &request())["messages"][1]["content"], "hi");
+    }
+
     fn request() -> ChatRequest {
         ChatRequest {
             system: Some("Be brief.".into()),
@@ -925,6 +1185,9 @@ pub(crate) mod tests {
             "200 OK",
             vec![
                 "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":20,\"output_tokens\":1}}}\n\n\
+                 event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":5,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n\
+                 event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":5,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"List src.\"}}\n\n\
+                 event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":5,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig==\"}}\n\n\
                  event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Let me look.\"}}\n\n\
                  event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"ls\",\"input\":{}}}\n\n\
                  event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n\n\
@@ -961,10 +1224,75 @@ pub(crate) mod tests {
         assert_eq!(first_body["tools"][0]["input_schema"]["type"], "object");
         assert_eq!(first_body["system"], "Be brief.");
         let second_body = body_of(&requests[1]);
-        assert_eq!(second_body["messages"][1]["content"][1]["type"], "tool_use");
-        assert_eq!(second_body["messages"][1]["content"][1]["input"]["path"], "src");
+        // The signed thinking goes back first, as Anthropic requires with tools.
+        assert_eq!(second_body["messages"][1]["content"][0], json!({ "type": "thinking", "thinking": "List src.", "signature": "sig==" }));
+        assert_eq!(second_body["messages"][1]["content"][2]["type"], "tool_use");
+        assert_eq!(second_body["messages"][1]["content"][2]["input"]["path"], "src");
+        // Another model cannot read it: nothing is echoed.
+        let other = anthropic_body(&super::tests::model("http://x", "anthropic-messages", "other-anthropic"), &request);
+        assert_eq!(other["messages"][1]["content"][0]["type"], "text");
         assert_eq!(second_body["messages"][2]["content"][0]["type"], "tool_result");
         assert_eq!(second_body["messages"][2]["content"][0]["tool_use_id"], "toolu_1");
+    }
+
+    #[tokio::test]
+    async fn gemini_streams_thoughts_text_and_signed_calls() {
+        let (url, server) = serve(
+            "200 OK",
+            vec![
+                "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Plan it.\",\"thought\":true}]}}]}\r\n\r\n\
+                 data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Looking.\"},{\"functionCall\":{\"name\":\"ls\",\"args\":{\"path\":\"src\"}},\"thoughtSignature\":\"sig\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":10,\"thoughtsTokenCount\":5,\"cachedContentTokenCount\":60}}\r\n\r\n"
+                    .to_owned(),
+            ],
+        )
+        .await;
+        let config = Config::parse(&format!(
+            r#"{{"providers":[{{"id":"google","baseURL":"{url}/v1beta","apiKey":"secret","protocol":"ai-sdk"}}]}}"#
+        ))
+        .unwrap();
+        let model = config.resolve("google:gemini-3-pro").unwrap();
+        let mut seen = Vec::new();
+        let outcome = stream_chat(&client(), &model, &request(), |e| seen.push(e)).await.unwrap();
+        assert_eq!(outcome.reasoning, "Plan it.");
+        assert_eq!(outcome.text, "Looking.");
+        assert_eq!(outcome.tool_calls[0].name, "ls");
+        assert_eq!(outcome.tool_calls[0].arguments_json()["path"], "src");
+        assert_eq!(outcome.usage, Some(Usage { input_tokens: 100, output_tokens: 15, cache_read_tokens: 60, cache_creation_tokens: 0, reasoning_tokens: 5 }));
+        assert_eq!(outcome.state["items"][2]["thoughtSignature"], "sig");
+        let sent = &server.await.unwrap()[0];
+        assert!(sent.starts_with("POST /v1beta/models/gemini-3-pro:streamGenerateContent?alt=sse"), "{sent}");
+        assert!(sent.contains("x-goog-api-key: secret"));
+        assert_eq!(body_of(sent)["contents"][0]["parts"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn anthropic_gets_cache_breakpoints_and_others_do_not() {
+        let mut asked = request();
+        asked.tools = vec![ToolSpec { name: "ls".into(), description: "List".into(), parameters: json!({"type":"object"}) }];
+        asked.messages = vec![
+            ChatMessage::user("list"),
+            ChatMessage::Assistant {
+                text: String::new(),
+                reasoning: String::new(),
+                tool_calls: vec![ToolCall { id: "t1".into(), name: "ls".into(), arguments: "{}".into() }],
+                state: Value::Null,
+            },
+            ChatMessage::Tool { results: vec![ToolResult { call_id: "t1".into(), content: "a.rs".into(), is_error: false }] },
+        ];
+        let official = Config::parse(r#"{"providers":[{"id":"anthropic","baseURL":"https://api.anthropic.com","apiKey":"k","protocol":"anthropic"}]}"#)
+            .unwrap()
+            .resolve("anthropic:claude-sonnet-4-6")
+            .unwrap();
+        let body = anthropic_body(&official, &asked);
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+        // Read back where the last request ended (the user's message), and
+        // written at the newest (the tool results).
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["messages"][1].to_string().find("cache_control").is_none());
+        let compatible = anthropic_body(&model("http://x", "anthropic-messages", "minimax-anthropic"), &asked);
+        assert!(!compatible.to_string().contains("cache_control"));
     }
 
     #[tokio::test]
@@ -998,7 +1326,7 @@ pub(crate) mod tests {
             system: None,
             messages: vec![
                 ChatMessage::user("hi"),
-                ChatMessage::Assistant { text: "hello".into(), reasoning: String::new(), tool_calls: Vec::new() },
+                ChatMessage::assistant("hello"),
             ],
             tools: Vec::new(),
             max_tokens: 10,
@@ -1078,6 +1406,7 @@ pub(crate) mod tests {
             text: "hi".into(),
             reasoning: "r".into(),
             tool_calls: vec![ToolCall { id: "1".into(), name: "bash".into(), arguments: "{}".into() }],
+            state: Value::Null,
         };
         let text = serde_json::to_string(&message).unwrap();
         assert!(text.contains("\"role\":\"assistant\""));

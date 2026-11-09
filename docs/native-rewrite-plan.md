@@ -62,9 +62,9 @@ native/
 
 ## 待定（不阻塞 N0–N2）
 
-- TS CLI 何时、是否换用 Rust 核心。在此之前两边独立。
-- 旧会话历史（`~/.bubble/sessions`）要不要导入。
-- 打包与签名（NSH 二进制目前未签名）。
+- ~~TS CLI 何时、是否换用 Rust 核心~~：2026-11-09 定为 npm 同名包按平台分发 Rust 二进制、作为新大版本替换 TS 版（发布由用户决定何时触发）。
+- ~~旧会话历史（`~/.bubble/sessions`）要不要导入~~：2026-11-09 定为全部导入（已做）。
+- 打包与签名：CLI 走 npm 不需要签名；桌面应用（NSH 打的 Bubble.app）仍未签名，需要 Apple Developer ID 证书，由用户提供。
 
 ## 进度
 
@@ -168,6 +168,26 @@ native/
   - 重启续跑：任务的子代理记录（快照、历史、模型、档位等）存到 `~/.bubble/native/subagents/<任务id>/agent_N.json`，每轮结束和状态变化时写入。应用或 CLI 重新打开该任务时恢复：已结束的照旧，运行中被切断的标为失败（"Interrupted when Bubble closed"），`send_input` 带着完整上下文继续；新 id 接着编号。桌面应用打开任务即显示这些子代理，可写子代理的展开项显示保留的 worktree 和 diff。
   - 测试 150 个全过（新增：worktree 创建/清理/策略、档位路由、调度器类别上限与 429 降容、磁盘恢复、端到端 implementer：写进 worktree、push 被代码拒绝、项目不变、记录落盘）。真实验证（Kimi K3）：让 implementer 给 calc.py 加 multiply 和测试，它在 worktree 里改了两个文件并跑通测试，父代理报告了 worktree 路径和 diff stat，项目目录未变；我另行在 worktree 里复核 diff 和测试后删除了它。
   - 未做：子代理运行中被关闭/取消时不检查 worktree（保留并显示路径，不给 diff stat）；TS 的启动速率间隔（burst 4 + 500ms）没移植；路由菜单未按 TS 的完整格式放进工具描述（只给类别说明，`/context` 不显示）。
+
+- 2026-11-09：第 8 批完成（未提交）：零散缺口。
+  - Hooks：`SessionStart`（会话打开，payload 含 resumed / printMode / provider / model）和 `SessionEnd`（各模式退出时）同 TS；`Notification` TS 声明了但从未触发，这里在 TUI 和行模式弹出审批时触发（"Bubble needs your approval: …"），可用来接桌面通知。
+  - 浅色主题：启动时问终端背景色（OSC 11，后跟一个 DA 查询，不支持 OSC 11 的终端立即结束等待），再看 `COLORFGBG`，默认深色，同 TS；结果作为 NSH 的颜色方案传给引擎，TUI 的颜色都改成 NSH 的 AdaptiveColor 明暗成对值，由 NSH 自己按方案取色。`/theme auto|light|dark` 即时切换（`set_color_scheme`）并写回 config.json 的 `theme`（与 TS 同字段）。
+  - diff 预览：成功的 `edit` 下方显示改动（LCS 行 diff，变化前后各留 2 行上下文，删除红、添加绿，"+N added, -M removed"），折叠 20 行，Ctrl-O 展开，同 TS；恢复会话时也显示。
+  - 图片：核心的用户消息加了 `images`，三种协议各按自己的格式发送（OpenAI `image_url` data URL、Anthropic base64 image block、Responses `input_image`），压缩估算按每张约 1600 token。TUI 里 Ctrl+V 读剪贴板图片（macOS osascript，Linux wl-paste / xclip），在输入框插入 `[image#1.png]`；粘贴或拖入的图片文件路径在发送时读入并替换成标签，同 TS；超过约 3.7MB 的图片拒绝（未做 TS 的自动缩放）。
+  - MCP prompts：连接时读 `prompts/list`，`/提示名 参数` 按位置（支持引号）填参数、`prompts/get` 取回、按 TS 规则拼成一条用户消息发给代理；命令提示里也列出 MCP prompts 和技能。`/mcp` 状态显示 prompts 数量。
+  - MCP OAuth（TS 没有）：HTTP 服务器回 401 时记下 `WWW-Authenticate`；`/mcp login 名字`（桌面 Settings 里是 Sign in 按钮）按 MCP 授权规范走：受保护资源元数据 → 授权服务器元数据（RFC 8414 路径规则，兼容 openid-configuration 和旧规范的默认地址）→ 动态客户端注册 → 浏览器 PKCE 登录（带 `resource` 参数）→ token 存 `~/.bubble/mcp-auth.json`（0600），之后请求自动带 Bearer，快过期时用 refresh token 刷新；`/mcp logout 名字` 删除。用 Python 假服务器测了整套流程。
+  - Google 原生协议：config 里 protocol 为 `ai-sdk`（TS 的叫法）、`gemini` 或 `google` 时走 `models/{model}:streamGenerateContent?alt=sse`：系统指令、函数声明（JSON schema 去掉 Gemini 不收的字段）、图片 inlineData、按调用名回传函数结果、Gemini 3 用 thinkingLevel / 2.5 用 thinkingBudget 并取回思考摘要、用量含缓存与思考 token。以前 Rust 版遇到 `ai-sdk` 直接报不支持。
+  - 推理回放：助手消息加了 provider 状态字段，按"同一 provider + 同一模型"才回放：Anthropic 的 thinking 块及签名（含 redacted_thinking，未签名的不回放）放在内容最前；Responses（OpenAI 方言请求加 `include: reasoning.encrypted_content`，Codex 原本就请求但没回放）把加密推理项放回对应调用之前；Gemini 原样回放模型的 parts 及 thoughtSignature。顺带修了 Rust 版 Anthropic 开思考 + 工具调用时从不回传 thinking 块的问题（真 Anthropic API 会因此拒绝请求）。
+  - 其他修复：TUI 里完整输入的命令（如 `/mcp`）直接执行，不再被同前缀的技能提示抢走；GitHub 测试在冷启动时先等首屏再点击（之前偶发失败的原因）。
+  - 测试 163 个全过。真实验证：Gemini 2.5 Flash 和 Gemini 3.1 Pro（原生协议，后者一轮并行两次调用并回放签名）、Claude Sonnet 4.6（开 high 思考，三轮工具调用）、ChatGPT gpt-6.1-sol（Responses，带缓存命中 19712 token）都完成了"ls + 读文件 + 回答"的工具任务。
+  - Anthropic prompt cache（发现缺失后补上）：官方 Anthropic 才加断点，同 TS：系统提示、最后一个工具、消息里两处（最新一条写入，上一次请求结束处读回），最多 4 个，`BUBBLE_ANTHROPIC_MESSAGE_CACHE=0` 关掉消息部分。同一真实任务：之前 40558 输入 token 全按新输入计费，之后只有 5 个未缓存，26970 读缓存、13583 写缓存。
+  - 未做：桌面应用的输入框还不能粘贴图片；图片不自动缩放。
+
+- 2026-11-09：第 9 批完成（未提交）：发布与退役 TS 的准备。用户定：旧会话全部导入；npm 同名包按平台分发；飞书继续缓。
+  - 旧会话导入：`bubble-store/src/import.rs` 读 TS 的 `~/.bubble/sessions/<目录>/<时间>.jsonl`（metadata 的标题/目录/模型，user_message 含图片，assistant_message 及按 id 挂上的 tool_call，tool_result 合并成一步，summary 变成检查点 = 摘要 + 进行中的那一轮，旧格式 message；marker / todos / provider_error 略过；没有用户消息的文件跳过）。每个会话成为该目录下已完成（done）的 CLI 任务，保留原始时间，原文件不动；每个文件记一次，重复导入无效；导入的任务带标记，记忆 phase 1 跳过（TS 记忆已读过）。`bubble import-sessions` 手动执行，TUI 和桌面应用首次启动时在后台自动执行一次。真实导入：先备份了 bubble.db，1249 个会话导入、493 个空会话跳过、0 失败，用时 4 秒；`/session` 能看到并续接。桌面应用只在已是项目的文件夹里显示导入的会话（否则侧栏会多出 99 个文件夹分组），其余在 CLI 的 `/session` 里。
+  - npm 打包（未发布）：`native/npm/`：主包 `@bubblebrain-ai/bubble`（optionalDependencies 列出 5 个平台包，`bin/bubble.js` 启动器找到本机平台的二进制运行，转发 SIGTERM/SIGHUP、Ctrl+C 交给终端、退出码原样返回）；`build.mjs --version x.y.z [--target …] [--pack]` 构建并组装平台包 `@bubblebrain-ai/bubble-{darwin-arm64,darwin-x64,linux-x64,linux-arm64,win32-x64}`，版本号通过 `BUBBLE_VERSION` 编进二进制（`--version`、TUI 欢迎区都用它）。`.github/workflows/native-release.yml`：手动触发，5 个平台各自构建、校验 `--version`、上传产物；只有勾选 publish 才用 `NPM_TOKEN` 先发平台包再发主包。本机验证：打出 darwin-arm64 的两个 tgz，装进临时 prefix，`bubble --version` 为 1.0.0-native.0、`-p` 的退出码正确、全屏 TUI 经启动器正常运行并退出。Linux/Windows 未在本机编译（缺交叉 C 工具链），依赖树里没有 GTK/X11 之类的桌面库，首次跑 CI 时才会真正验证。
+  - `bubble update [--check]`：同 TS：查 npm 的 latest，按二进制真实路径判断安装方式（npm / bun / pnpm / yarn 用对应命令全局安装；Homebrew 和源码构建给出提示），`--check` 只报告。
+  - 测试 166 个全过。
 
 ## 修订记录
 

@@ -1,7 +1,9 @@
 //! The full-screen interactive session: an NSH app drawn in the terminal
 //! by `bubble-term`, its agent a [`runner`] task on the runtime.
 
+pub mod diff;
 pub mod files;
+pub mod images;
 pub mod runner;
 pub mod state;
 pub mod view;
@@ -48,10 +50,37 @@ pub fn config(args: Args, runtime: tokio::runtime::Handle) -> EngineConfig {
     config
 }
 
+/// The theme in config.json (`"theme": "light"` or `{"mode": "light"}`,
+/// as the TypeScript TUI writes it): `light`, `dark` or `auto`.
+pub fn theme() -> String {
+    let text = std::fs::read_to_string(bubble_core::bubble_home().join("config.json")).unwrap_or_default();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    value["theme"].as_str().or(value["theme"]["mode"].as_str()).unwrap_or("auto").to_owned()
+}
+
+/// Keeps `mode` as config.json's theme, leaving the rest as it was.
+pub fn save_theme(mode: &str) -> std::io::Result<()> {
+    let path = bubble_core::bubble_home().join("config.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".into());
+    let mut value: serde_json::Value = serde_json::from_str(&text).map_err(std::io::Error::other)?;
+    if !value.is_object() {
+        return Err(std::io::Error::other("config.json is not an object"));
+    }
+    value["theme"] = serde_json::json!(mode);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&value).map_err(std::io::Error::other)? + "\n")?;
+    std::fs::rename(tmp, path)
+}
+
 /// Takes over the terminal until the person quits.
 pub fn run(args: Args, runtime: tokio::runtime::Handle) -> std::io::Result<()> {
     let mouse = std::env::var("BUBBLE_TUI_MOUSE").map(|v| v != "0").unwrap_or(true);
-    bubble_term::run(config(args, runtime), bubble_term::Options { mouse })
+    let scheme = match theme().as_str() {
+        "light" => Some(nsh_core::platform::ColorScheme::Light),
+        "dark" => Some(nsh_core::platform::ColorScheme::Dark),
+        _ => None,
+    };
+    bubble_term::run(config(args, runtime), bubble_term::Options { mouse, scheme })
 }
 
 #[cfg(test)]
@@ -217,6 +246,20 @@ mod tests {
             assert!(std::time::Instant::now() < end, "/compact never answered:\n{}", term.text());
             term.settle();
         }
+
+        // /theme light recolors (NSH picks the light half of each pair).
+        let prompt_color = |term: &Virtual| {
+            let screen = term.screen();
+            let row = screen.grid.lines().iter().rposition(|l| l.contains("Ask Bubble")).unwrap();
+            let x = screen.grid.lines()[row].chars().position(|c| c == '›').unwrap();
+            screen.grid.get(x as u16, row as u16).unwrap().fg
+        };
+        assert_eq!(prompt_color(&term), Some(0x8A7FC6));
+        term.type_text("/theme light");
+        term.key("enter");
+        wait(&mut term, "Theme: light");
+        assert_eq!(prompt_color(&term), Some(0x356FD2));
+        assert_eq!(super::theme(), "light");
 
         term.key("ctrl+c");
         assert!(term.exited, "Ctrl+C on an empty composer quits");

@@ -28,6 +28,8 @@ pub enum Protocol {
     AnthropicMessages,
     /// An OpenAI Responses API (`POST …/responses`).
     Responses(Dialect),
+    /// Google's Gemini API (`POST …/models/{model}:streamGenerateContent`).
+    Gemini,
 }
 
 /// Which Responses API.
@@ -79,6 +81,8 @@ impl ProviderConfig {
             Some("anthropic-messages") | Some("anthropic") => Ok(Protocol::AnthropicMessages),
             Some("ark-responses") => Ok(Protocol::Responses(Dialect::Ark)),
             Some("openai-responses") => Ok(Protocol::Responses(Dialect::OpenAi)),
+            // `ai-sdk` is the TypeScript CLI's name for its Gemini protocol.
+            Some("ai-sdk") | Some("gemini") | Some("google") | Some("google-generative-ai") => Ok(Protocol::Gemini),
             Some(other) => bail!(
                 "provider {} uses the {other} protocol, which Bubble Native does not support yet",
                 self.id

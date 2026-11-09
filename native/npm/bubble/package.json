@@ -1,0 +1,10 @@
+{
+  "name": "@bubblebrain-ai/bubble",
+  "version": "0.0.0",
+  "description": "A terminal coding agent",
+  "repository": { "type": "git", "url": "git+https://github.com/BubbleBrainBB/bubble.git" },
+  "bin": { "bubble": "bin/bubble.js" },
+  "files": ["bin", "README.md"],
+  "engines": { "node": ">=18" },
+  "optionalDependencies": {}
+}

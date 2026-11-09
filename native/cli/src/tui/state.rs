@@ -43,6 +43,8 @@ pub struct Line {
     pub live: bool,
     /// The tool call it shows.
     pub call: Option<String>,
+    /// An edit's diff.
+    pub diff: Vec<super::diff::DiffLine>,
 }
 
 /// A tool waiting for a yes.
@@ -86,18 +88,19 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/session", "Browse this folder's sessions and resume one"),
     ("/compact", "Summarize the older conversation now; text after it says what to keep"),
     ("/context", "Show what fills the model's context"),
-    ("/mcp", "Show MCP servers; /mcp reconnect <name> tries one again"),
+    ("/mcp", "MCP servers: /mcp, /mcp reconnect|login|logout <name>"),
     ("/skills", "Pick a skill to use"),
     ("/login", "Sign in to a subscription: /login openai or /login grok"),
     ("/logout", "Sign out of a subscription on this device"),
     ("/new", "Start a new session"),
     ("/clear", "Start a new session (alias of /new)"),
+    ("/theme", "Colors for a light or dark terminal: /theme auto, light or dark"),
     ("/help", "Show commands and keys"),
     ("/quit", "Exit Bubble"),
 ];
 
 pub const HELP: &str = "Keys: Enter sends · Shift+Enter, Alt+Enter or Ctrl+J adds a line · Up/Down recall earlier prompts · \
-@ completes a file (its contents go with the prompt) · Esc stops the agent · Ctrl+C stops, clears, then exits · \
+@ completes a file (its contents go with the prompt) · Ctrl+V pastes an image (or paste an image's path) · Esc stops the agent · Ctrl+C stops, clears, then exits · \
 Tab completes or switches Build/Plan · Ctrl+O shows full tool output · PgUp/PgDn scroll · y/a/n answer a question";
 
 #[derive(Clone, Copy)]
@@ -126,6 +129,8 @@ pub struct Tui {
     pub recall: Signal<Option<usize>>,
     /// The skills a person can name (`/<skill> task`), with descriptions.
     pub skills: Signal<Vec<(String, String)>>,
+    /// The MCP prompts a person can run (`/<prompt> args`).
+    pub prompts: Signal<Vec<super::runner::PromptInfo>>,
     next_id: Stored<u64>,
     /// The reply streaming in, and its reasoning.
     reply: Stored<Option<u64>>,
@@ -155,6 +160,7 @@ impl Tui {
             history: signal(Vec::new()),
             recall: signal(None),
             skills: signal(Vec::new()),
+            prompts: signal(Vec::new()),
             next_id: stored(0),
             reply: stored(None),
             thought: stored(None),
@@ -197,7 +203,7 @@ impl Tui {
 
     pub fn push(&self, kind: Kind, text: impl Into<String>) -> u64 {
         let id = self.id();
-        let line = Line { id, kind, text: text.into(), live: false, call: None };
+        let line = Line { id, kind, text: text.into(), live: false, call: None, diff: Vec::new() };
         self.lines.update(|lines| lines.push(line));
         self.changed();
         id
@@ -348,11 +354,30 @@ impl Tui {
             }
             "/compact" => self.work("Summarizing", Command::Compact((!rest.is_empty()).then(|| rest.to_owned()))),
             "/context" => self.send(Command::Context),
+            "/theme" => {
+                let appearance = match rest {
+                    "light" => Appearance::Light,
+                    "dark" => Appearance::Dark,
+                    "auto" | "" => Appearance::System,
+                    other => {
+                        self.push(Kind::Error, format!("Unknown theme {other}: auto, light or dark"));
+                        return;
+                    }
+                };
+                set_color_scheme(appearance);
+                let mode = if rest.is_empty() { "auto" } else { rest };
+                match super::save_theme(mode) {
+                    Ok(()) => self.push(Kind::Notice, format!("Theme: {mode} (kept in config.json)")),
+                    Err(error) => self.push(Kind::Error, format!("Theme {mode} is on, but config.json could not be updated: {error}")),
+                };
+            }
             "/mcp" => match rest.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((rest, "")) {
                 ("", _) | ("list", _) => self.send(Command::Mcp(None)),
                 ("reconnect", server) if !server.is_empty() => self.send(Command::Mcp(Some(server.to_owned()))),
+                ("login", server) if !server.is_empty() => self.work("Waiting for the sign-in", Command::McpLogin(server.to_owned())),
+                ("logout", server) if !server.is_empty() => self.send(Command::McpLogout(server.to_owned())),
                 _ => {
-                    self.push(Kind::Error, "Usage: /mcp [list | reconnect <name>]");
+                    self.push(Kind::Error, "Usage: /mcp [list | reconnect <name> | login <name> | logout <name>]");
                 }
             },
             "/skills" => {
@@ -369,6 +394,18 @@ impl Tui {
                 }
             }
             _ => {
+                // `/<prompt> args`: an MCP server's prompt.
+                let bare = name.trim_start_matches('/');
+                if let Some(prompt) = self.prompts.with_untracked(|p| p.iter().find(|p| p.name == bare).cloned()) {
+                    self.push(Kind::User, text.to_owned());
+                    self.activity.set("Working".into());
+                    if self.turns.get_untracked() == 0 {
+                        self.started.set(bubble_store::now_ms());
+                    }
+                    self.turns.update(|t| *t += 1);
+                    self.send(Command::McpPrompt { server: prompt.server, name: prompt.name, args: rest.to_owned() });
+                    return;
+                }
                 // `/<skill> task`: the agent loads that skill for the task.
                 let skill = name.trim_start_matches('/');
                 if !rest.is_empty() && self.skills.with_untracked(|s| s.iter().any(|(n, _)| n == skill)) {
@@ -450,15 +487,15 @@ impl Tui {
         let mut lines = Vec::new();
         for message in history {
             match message {
-                ChatMessage::User { text } => {
-                    lines.push(Line { id: self.id(), kind: Kind::User, text: text.clone(), live: false, call: None })
+                ChatMessage::User { text, .. } => {
+                    lines.push(Line { id: self.id(), kind: Kind::User, text: text.clone(), live: false, call: None, diff: Vec::new() })
                 }
-                ChatMessage::Assistant { text, reasoning, tool_calls } => {
+                ChatMessage::Assistant { text, reasoning, tool_calls, .. } => {
                     if !reasoning.trim().is_empty() {
-                        lines.push(Line { id: self.id(), kind: Kind::Reasoning, text: reasoning.clone(), live: false, call: None });
+                        lines.push(Line { id: self.id(), kind: Kind::Reasoning, text: reasoning.clone(), live: false, call: None, diff: Vec::new() });
                     }
                     if !text.trim().is_empty() {
-                        lines.push(Line { id: self.id(), kind: Kind::Assistant, text: text.clone(), live: false, call: None });
+                        lines.push(Line { id: self.id(), kind: Kind::Assistant, text: text.clone(), live: false, call: None, diff: Vec::new() });
                     }
                     for call in tool_calls {
                         lines.push(Line {
@@ -467,6 +504,7 @@ impl Tui {
                             text: bubble_core::tools::describe(call),
                             live: false,
                             call: Some(call.id.clone()),
+                            diff: super::diff::of_call(call),
                         });
                     }
                 }
@@ -525,9 +563,19 @@ impl Tui {
                 let selected = items.iter().position(|i| i.label == current).unwrap_or(0);
                 self.open(Picker { title: "Resume a session".into(), items, selected });
             }
-            Update::Helpers { files, history, skills } => {
+            Update::Pasted(label) => {
+                self.draft.update(|draft| {
+                    if !draft.is_empty() && !draft.ends_with(char::is_whitespace) {
+                        draft.push(' ');
+                    }
+                    draft.push_str(&label);
+                    draft.push(' ');
+                });
+            }
+            Update::Helpers { files, history, skills, prompts } => {
                 self.files.set(files);
                 self.skills.set(skills);
+                self.prompts.set(prompts);
                 if !history.is_empty() {
                     self.history.set(history);
                 }
@@ -611,7 +659,11 @@ impl Tui {
             AgentEvent::ToolStarted { call, description } => {
                 self.finish_reply();
                 let id = self.push(Kind::Tool { state: ToolState::Running, output: String::new() }, description);
-                self.update_line(id, |line| line.call = Some(call.id.clone()));
+                let diff = super::diff::of_call(&call);
+                self.update_line(id, |line| {
+                    line.call = Some(call.id.clone());
+                    line.diff = diff;
+                });
             }
             AgentEvent::ApprovalNeeded { permission, respond, .. } => {
                 self.respond.replace(Some(respond));

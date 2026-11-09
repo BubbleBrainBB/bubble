@@ -408,6 +408,7 @@ name = "bubble-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bubble-core",
  "bubble-store",
  "bubble-term",
@@ -416,6 +417,7 @@ dependencies = [
  "nsh-base",
  "nsh-core",
  "nsh-engine",
+ "regex",
  "reqwest",
  "serde_json",
  "tokio",
@@ -468,6 +470,7 @@ name = "bubble-term"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "libc",
  "log",
  "nsh-base",
  "nsh-core",

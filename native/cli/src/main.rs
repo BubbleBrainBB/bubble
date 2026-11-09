@@ -4,6 +4,7 @@
 
 mod args;
 mod changes;
+mod update;
 mod session;
 mod tui;
 
@@ -230,6 +231,8 @@ impl Host for StreamHost {
 /// The interactive session: streams like plain output and asks for yeses.
 struct InteractiveHost {
     mode: Mode,
+    hooks: Option<std::sync::Arc<bubble_core::hooks::Hooks>>,
+    cwd: std::path::PathBuf,
     paint: Paint,
     lines: tokio::sync::mpsc::UnboundedReceiver<String>,
     grants: Vec<String>,
@@ -260,6 +263,18 @@ impl Host for InteractiveHost {
                     Mode::Bypass => Decision::AllowOnce,
                     Mode::Plan => Decision::Refuse(PLAN_REFUSAL),
                     Mode::Build => {
+                        if let Some(hooks) = &self.hooks {
+                            let message = format!("Bubble needs your approval: {}", permission.summary);
+                            hooks
+                                .run(bubble_core::hooks::Role::Parent, bubble_core::hooks::Event {
+                                    name: "Notification",
+                                    cwd: &self.cwd,
+                                    target: "approval",
+                                    payload: json!({ "message": message, "detail": permission.detail }),
+                                    full: json!({}),
+                                })
+                                .await;
+                        }
                         println!("{}", self.paint.wrap("33", &format!("? {}: {}", permission.summary, permission.detail)));
                         let choices = if permission.rememberable { "[y]es once / [a]lways this session / [n]o" } else { "[y]es / [n]o" };
                         print!("  {choices} › ");
@@ -379,6 +394,7 @@ async fn stream_json(mut session: Session) -> Result<()> {
         }
         write_line(&result);
     }
+    session.end().await;
     Ok(())
 }
 
@@ -412,7 +428,15 @@ async fn interactive(mut session: Session, first: Option<String>) -> Result<()> 
     if !session.history.is_empty() {
         println!("{}", paint.dim(&format!("Resumed with {} earlier messages.", session.history.len())));
     }
-    let mut host = InteractiveHost { mode: session.mode, paint, lines: incoming, grants: Vec::new(), at_line_start: true };
+    let mut host = InteractiveHost {
+        mode: session.mode,
+        hooks: Some(session.hooks()),
+        cwd: session.cwd.clone(),
+        paint,
+        lines: incoming,
+        grants: Vec::new(),
+        at_line_start: true,
+    };
     let mut next = first;
     loop {
         let prompt = match next.take() {
@@ -444,6 +468,7 @@ async fn interactive(mut session: Session, first: Option<String>) -> Result<()> 
     }
     // A session left without a word is not kept.
     let _ = session.store.discard_if_empty(&session.task.id);
+    session.end().await;
     Ok(())
 }
 
@@ -484,6 +509,7 @@ async fn run(args: Args) -> Result<i32> {
                         result["changes"] = changed;
                     }
                     println!("{result}");
+                    session.end().await;
                     return Ok(0);
                 }
                 Err(error) => {
@@ -495,13 +521,16 @@ async fn run(args: Args) -> Result<i32> {
                         failure["changes"] = changed;
                     }
                     println!("{failure}");
+                    session.end().await;
                     return Ok(1);
                 }
             }
         }
         let mut host = PlainHost { mode: args.mode, paint: Paint { on: std::io::stdout().is_terminal() }, tally: Tally::default() };
-        session.turn(&prompt, &mut host, std::future::pending()).await?;
+        let outcome = session.turn(&prompt, &mut host, std::future::pending()).await;
         println!();
+        session.end().await;
+        outcome?;
         return Ok(0);
     }
     let session = Session::open(&args, None, store).await?;
@@ -509,8 +538,42 @@ async fn run(args: Args) -> Result<i32> {
     Ok(0)
 }
 
+/// `bubble import-sessions`: the TypeScript CLI's sessions into the store.
+fn import_sessions() -> i32 {
+    let store = match Store::open(bubble_home().join("native").join("bubble.db")) {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            return 1;
+        }
+    };
+    let root = bubble_home().join("sessions");
+    println!("Importing sessions from {} …", root.display());
+    match store.import_ts_sessions(&root) {
+        Ok(report) => {
+            println!("Imported {} sessions; {} skipped (already imported or empty).", report.imported, report.skipped);
+            for failure in &report.failed {
+                eprintln!("  could not import {failure}");
+            }
+            i32::from(!report.failed.is_empty())
+        }
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            1
+        }
+    }
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("import-sessions") {
+        std::process::exit(import_sessions());
+    }
+    if matches!(argv.first().map(String::as_str), Some("update" | "upgrade")) {
+        let check = argv.iter().any(|a| a == "--check");
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
+        std::process::exit(runtime.block_on(update::run(check)));
+    }
     let current = std::env::current_dir().unwrap_or_default();
     let args = match args::parse(&argv, current) {
         Ok(args) => args,
@@ -524,7 +587,7 @@ fn main() {
         return;
     }
     if args.version {
-        println!("bubble {} (native)", env!("CARGO_PKG_VERSION"));
+        println!("bubble {} (native)", update::version());
         return;
     }
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");

@@ -227,7 +227,33 @@ impl AppState {
         state.discover_models();
         state.start_tools();
         state.start_memory();
+        state.import_sessions();
         state
+    }
+
+    /// The TypeScript CLI's sessions, brought in once in the background.
+    fn import_sessions(&self) {
+        let done = self.with_store(|s| s.setting(bubble_store::import::DONE)).flatten().is_some();
+        if done {
+            return;
+        }
+        let app = *self;
+        spawn(async move {
+            let imported = background(async move {
+                tokio::task::spawn_blocking(|| {
+                    let store = bubble_store::Store::open(bubble_home().join("native").join("bubble.db"))?;
+                    store.import_ts_sessions(&bubble_home().join("sessions"))
+                })
+                .await
+                .map_err(|e| anyhow!("{e}"))?
+            })
+            .await;
+            match imported {
+                Ok(Ok(report)) if report.imported > 0 => app.refresh_tasks(),
+                Ok(Err(error)) => log::warn!("importing sessions: {error:#}"),
+                _ => {}
+            }
+        });
     }
 
     /// Phase 1 for conversations that changed since they were last read,
@@ -267,6 +293,10 @@ impl AppState {
         let mut candidates: Vec<(String, String, Vec<ChatMessage>, usize, String)> = Vec::new();
         let tasks = self.with_store(|s| s.list_tasks()).unwrap_or_default();
         for task in tasks.iter().take(24) {
+            // Imported sessions were already read by the TypeScript memory.
+            if self.with_store(|s| Ok(s.is_imported(&task.task.id))).unwrap_or(false) {
+                continue;
+            }
             let source = format!("task:{}", task.task.id);
             let messages: Vec<Message> = self
                 .with_store(|s| Ok(s.runs_for_task(&task.task.id)?.iter().flat_map(|r| s.messages(&r.id).unwrap_or_default()).collect()))
@@ -427,7 +457,7 @@ impl AppState {
             .map(|server| {
                 let (status, failed) = match server.status() {
                     mcp::Status::NotStarted | mcp::Status::Connecting => ("Connecting…".to_owned(), false),
-                    mcp::Status::Connected { tools } => {
+                    mcp::Status::Connected { tools, .. } => {
                         (format!("{} tool{}", tools.len(), if tools.len() == 1 { "" } else { "s" }), false)
                     }
                     mcp::Status::Failed(error) => (error.lines().next().unwrap_or_default().to_owned(), true),
@@ -439,6 +469,33 @@ impl AppState {
     }
 
     /// Tries a failed server again.
+    /// Signs in to an MCP server that needs it, in the browser.
+    pub fn sign_in_server(&self, name: &str) {
+        let app = *self;
+        let servers: Vec<_> = self.hub.get().servers().into_iter().filter(|s| s.name == name).collect();
+        spawn(async move {
+            let _ = background(async move {
+                let client = http_client()?;
+                for server in servers {
+                    let pending = server.login(&client).await?;
+                    bubble_core::login::open_browser(&pending.url);
+                    pending.finish(&client).await?;
+                    server.reset().await;
+                    server.ensure(&client).await;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+            app.refresh_servers();
+        });
+        self.mcp_servers.update(|rows| {
+            for row in rows.iter_mut().filter(|r| r.name == name) {
+                row.status = "Finish signing in in your browser…".into();
+                row.failed = false;
+            }
+        });
+    }
+
     pub fn retry_server(&self, name: &str) {
         let app = *self;
         let servers: Vec<_> = self.hub.get().servers().into_iter().filter(|s| s.name == name).collect();
@@ -600,7 +657,15 @@ impl AppState {
     }
 
     pub fn refresh_tasks(&self) {
-        if let Some(tasks) = self.with_store(|s| s.list_tasks()) {
+        if let Some(mut tasks) = self.with_store(|s| s.list_tasks()) {
+            // Sessions imported from the TypeScript CLI show only in folders
+            // that are projects here; the rest stay in `bubble`'s /session.
+            let imported = self.with_store(|s| s.imported_task_ids()).unwrap_or_default();
+            if !imported.is_empty() {
+                let projects: HashSet<Option<String>> =
+                    tasks.iter().filter(|t| !imported.contains(&t.task.id)).map(|t| t.task.project_cwd.clone()).collect();
+                tasks.retain(|t| !imported.contains(&t.task.id) || projects.contains(&t.task.project_cwd));
+            }
             self.tasks.set(tasks);
         }
     }
@@ -1212,7 +1277,7 @@ impl Conversation {
                 self.changed();
             }
             AgentEvent::Assistant(message) => {
-                let ChatMessage::Assistant { text, tool_calls, reasoning } = &message else { return };
+                let ChatMessage::Assistant { text, tool_calls, reasoning, .. } = &message else { return };
                 let saved = app.with_store(|s| {
                     s.append_message_with(run_id, MessageRole::Assistant, text, serde_json::to_string(&message).ok().as_deref())
                 });
@@ -1333,7 +1398,7 @@ fn lines_of(store: &Store, runs: &[Run]) -> anyhow::Result<Vec<Line>> {
             }
             let parsed = message.content.as_deref().and_then(|c| serde_json::from_str::<ChatMessage>(c).ok());
             match parsed {
-                Some(ChatMessage::Assistant { text, tool_calls, reasoning }) => {
+                Some(ChatMessage::Assistant { text, tool_calls, reasoning, .. }) => {
                     if !text.trim().is_empty() || !reasoning.trim().is_empty() {
                         lines.push(Line {
                             at: message.created_at,
@@ -1411,7 +1476,7 @@ mod tests {
             message(MessageRole::User, Some(ChatMessage::user("go"))),
             message(
                 MessageRole::Assistant,
-                Some(ChatMessage::Assistant { text: String::new(), reasoning: String::new(), tool_calls: vec![call] }),
+                Some(ChatMessage::Assistant { text: String::new(), reasoning: String::new(), tool_calls: vec![call], state: serde_json::Value::Null }),
             ),
         ];
         let history = history_of(&messages);

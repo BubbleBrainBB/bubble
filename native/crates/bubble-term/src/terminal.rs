@@ -11,6 +11,7 @@ use crossterm::event::{
 };
 use crossterm::{execute, terminal};
 use nsh_core::EventKind;
+use nsh_core::platform::ColorScheme;
 use nsh_core::keymap::{Key, Keystroke, Modifiers};
 use nsh_engine::EngineConfig;
 
@@ -24,12 +25,92 @@ pub struct Options {
     /// Clicks and the wheel go to the app (most terminals still select
     /// text with Shift or Option held).
     pub mouse: bool,
+    /// The background the app is told it has; `None`: asked of the
+    /// terminal ([`background_scheme`]).
+    pub scheme: Option<ColorScheme>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { mouse: true }
+        Options { mouse: true, scheme: None }
     }
+}
+
+/// Whether the terminal's background is light or dark: asked of the
+/// terminal (OSC 11), else `COLORFGBG`, else dark — as the TypeScript TUI
+/// decides. Call it with the terminal in raw mode.
+pub fn background_scheme() -> ColorScheme {
+    query_background(std::time::Duration::from_millis(300))
+        .or_else(|| colorfgbg(&std::env::var("COLORFGBG").unwrap_or_default()))
+        .unwrap_or(ColorScheme::Dark)
+}
+
+fn colorfgbg(value: &str) -> Option<ColorScheme> {
+    let background: u8 = value.rsplit(';').next()?.trim().parse().ok()?;
+    match background {
+        0..=6 => Some(ColorScheme::Dark),
+        7..=15 => Some(ColorScheme::Light),
+        _ => None,
+    }
+}
+
+/// The scheme of an OSC 11 answer (`rgb:RRRR/GGGG/BBBB`).
+fn parse_background(answer: &str) -> Option<ColorScheme> {
+    let rgb = answer.split("rgb:").nth(1)?;
+    let channels: Vec<f64> = rgb
+        .split(['/', '\x07', '\x1b'])
+        .take(3)
+        .map(|c| {
+            let hex: String = c.chars().take_while(char::is_ascii_hexdigit).collect();
+            let max = 16f64.powi(hex.len() as i32) - 1.0;
+            u32::from_str_radix(&hex, 16).ok().map(|v| f64::from(v) / max)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let [r, g, b] = channels[..] else { return None };
+    let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    Some(if luminance > 0.5 { ColorScheme::Light } else { ColorScheme::Dark })
+}
+
+/// Asks the terminal for its background; a device-attributes question
+/// after it ends the wait at once on terminals that do not answer OSC 11.
+#[cfg(unix)]
+fn query_background(timeout: std::time::Duration) -> Option<ColorScheme> {
+    use std::io::Read;
+    let mut out = io::stdout();
+    out.write_all(b"\x1b]11;?\x1b\\\x1b[c").ok()?;
+    out.flush().ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    let mut answer = Vec::new();
+    let mut stdin = io::stdin();
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let mut poll = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        // SAFETY: one valid pollfd for the call.
+        let ready = unsafe { libc::poll(&mut poll, 1, left.as_millis() as libc::c_int) };
+        if ready <= 0 {
+            break;
+        }
+        let mut buffer = [0u8; 256];
+        let Ok(n) = stdin.read(&mut buffer) else { break };
+        if n == 0 {
+            break;
+        }
+        answer.extend_from_slice(&buffer[..n]);
+        // The device-attributes answer (`ESC [ ? ... c`) comes last.
+        let text = String::from_utf8_lossy(&answer);
+        if text.contains("\x1b[?") && text.trim_end().ends_with('c') {
+            break;
+        }
+    }
+    parse_background(&String::from_utf8_lossy(&answer))
+}
+
+#[cfg(not(unix))]
+fn query_background(_: std::time::Duration) -> Option<ColorScheme> {
+    None
 }
 
 /// Puts the terminal back however `run` ends.
@@ -61,6 +142,7 @@ fn restore(mouse: bool, enhanced: bool) {
 pub fn run(config: EngineConfig, options: Options) -> io::Result<()> {
     let (mut width, mut height) = terminal::size()?;
     terminal::enable_raw_mode()?;
+    let scheme = options.scheme.unwrap_or_else(background_scheme);
     let mut out = io::stdout();
     execute!(out, terminal::EnterAlternateScreen, event::EnableBracketedPaste, crossterm::cursor::Hide)?;
     if options.mouse {
@@ -77,7 +159,7 @@ pub fn run(config: EngineConfig, options: Options) -> io::Result<()> {
         previous(info);
     }));
 
-    let Started { engine, mut environment, sender, receiver } = start(config, width, height)?;
+    let Started { engine, mut environment, sender, receiver } = start(config, width, height, scheme)?;
     if let Ok(mut exit) = EXIT.lock() {
         *exit = Some(sender.clone());
     }
@@ -324,6 +406,17 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backgrounds_are_read_from_answers() {
+        use super::ColorScheme;
+        assert_eq!(super::parse_background("\x1b]11;rgb:ffff/ffff/ffff\x1b\\\x1b[?62c"), Some(ColorScheme::Light));
+        assert_eq!(super::parse_background("\x1b]11;rgb:1e1e/1e1e/2020\x07"), Some(ColorScheme::Dark));
+        assert_eq!(super::parse_background("\x1b[?62c"), None);
+        assert_eq!(super::colorfgbg("15;0"), Some(ColorScheme::Dark));
+        assert_eq!(super::colorfgbg("0;15"), Some(ColorScheme::Light));
+        assert_eq!(super::colorfgbg(""), None);
+    }
+
     #[test]
     fn base64_matches_the_standard() {
         assert_eq!(super::base64(b"hi"), "aGk=");

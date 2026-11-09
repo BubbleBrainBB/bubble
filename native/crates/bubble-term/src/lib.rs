@@ -27,7 +27,7 @@ use nsh_core::platform::{ColorScheme, Idiom, Os};
 use nsh_core::{EventKind, MountBatch};
 use nsh_engine::{AppError, Engine, EngineConfig, EngineControl, MountSink};
 
-pub use terminal::{Options, run};
+pub use terminal::{Options, background_scheme, run};
 pub use text::{CELL_H, CELL_W, CellTextEngine};
 
 use model::{Out, Tree};
@@ -86,7 +86,12 @@ pub fn points(columns: u16, rows: u16) -> Size<Points> {
 
 /// `config` for a terminal of `columns` × `rows`: a desktop whose `mod` key
 /// is Control, with reduced motion (nothing here animates).
-pub fn configure(mut config: EngineConfig, columns: u16, rows: u16) -> EngineConfig {
+pub fn configure(config: EngineConfig, columns: u16, rows: u16) -> EngineConfig {
+    configure_with(config, columns, rows, ColorScheme::Dark)
+}
+
+/// [`configure`] for a terminal whose background is `scheme`.
+pub fn configure_with(mut config: EngineConfig, columns: u16, rows: u16, scheme: ColorScheme) -> EngineConfig {
     let viewport = points(columns, rows);
     config.viewport = viewport;
     let env = &mut config.environment;
@@ -96,7 +101,7 @@ pub fn configure(mut config: EngineConfig, columns: u16, rows: u16) -> EngineCon
     env.apple_keyboard = false;
     env.reduce_motion = true;
     env.pixel_ratio = 1.0;
-    env.color_scheme = ColorScheme::Dark;
+    env.color_scheme = scheme;
     config
 }
 
@@ -109,11 +114,11 @@ struct Started {
     receiver: Receiver<Message>,
 }
 
-fn start(config: EngineConfig, columns: u16, rows: u16) -> io::Result<Started> {
+fn start(config: EngineConfig, columns: u16, rows: u16, scheme: ColorScheme) -> io::Result<Started> {
     let (sender, receiver) = channel();
     let control = Arc::new(OnceLock::new());
     let sink = Sink { sender: sender.clone(), control: control.clone() };
-    let config = configure(config, columns, rows);
+    let config = configure_with(config, columns, rows, scheme);
     let environment = config.environment;
     let engine = Engine::start(config, || CellTextEngine, sink)?;
     let _ = control.set(engine.control());
@@ -165,7 +170,12 @@ pub struct Virtual {
 
 impl Virtual {
     pub fn start(config: EngineConfig, width: u16, height: u16) -> io::Result<Virtual> {
-        let Started { engine, environment, sender, receiver } = start(config, width, height)?;
+        Virtual::start_as(config, width, height, ColorScheme::Dark)
+    }
+
+    /// [`Virtual::start`] on a terminal with a `scheme` background.
+    pub fn start_as(config: EngineConfig, width: u16, height: u16, scheme: ColorScheme) -> io::Result<Virtual> {
+        let Started { engine, environment, sender, receiver } = start(config, width, height, scheme)?;
         if let Ok(mut exit) = EXIT.lock() {
             *exit = Some(sender.clone());
         }

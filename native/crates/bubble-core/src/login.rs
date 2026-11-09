@@ -84,6 +84,18 @@ fn base64url(bytes: &[u8]) -> String {
     out
 }
 
+/// A PKCE verifier and its S256 challenge.
+pub(crate) fn pkce() -> Result<(String, String)> {
+    let verifier = base64url(&random(32)?);
+    let challenge = base64url(&Sha256::digest(verifier.as_bytes()));
+    Ok((verifier, challenge))
+}
+
+/// `bytes` random bytes in hex.
+pub(crate) fn random_hex(bytes: usize) -> Result<String> {
+    Ok(hex(&random(bytes)?))
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -121,7 +133,7 @@ fn decode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn query(pairs: &[(&str, &str)]) -> String {
+pub(crate) fn query(pairs: &[(&str, &str)]) -> String {
     pairs.iter().map(|(k, v)| format!("{k}={}", encode(v))).collect::<Vec<_>>().join("&")
 }
 
@@ -143,8 +155,7 @@ pub async fn begin_with(subscription: Subscription, endpoints: Endpoints) -> Res
         }
     })?;
     let port = listener.local_addr()?.port();
-    let verifier = base64url(&random(32)?);
-    let challenge = base64url(&Sha256::digest(verifier.as_bytes()));
+    let (verifier, challenge) = pkce()?;
     let state = hex(&random(16)?);
     let (redirect_uri, path) = match subscription {
         // The ChatGPT client allows exactly this address.
@@ -236,52 +247,58 @@ impl Login {
 
     /// The code the browser brings back to the callback.
     async fn callback(&self) -> Result<String> {
-        loop {
-            let (mut stream, _) = self.listener.accept().await?;
-            let mut request = Vec::new();
-            let mut buffer = [0u8; 4096];
-            while !request.windows(4).any(|w| w == b"\r\n\r\n") && request.len() < 64 * 1024 {
-                match tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buffer)).await {
-                    Ok(Ok(0)) | Err(_) => break,
-                    Ok(Ok(n)) => request.extend_from_slice(&buffer[..n]),
-                    Ok(Err(_)) => break,
-                }
+        wait_for_code(&self.listener, self.path, &self.state).await
+    }
+}
+
+/// Waits on `listener` for the browser to come back to `path` with a code
+/// for `state`; other requests are answered and ignored.
+pub(crate) async fn wait_for_code(listener: &TcpListener, path: &str, state: &str) -> Result<String> {
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") && request.len() < 64 * 1024 {
+            match tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buffer)).await {
+                Ok(Ok(0)) | Err(_) => break,
+                Ok(Ok(n)) => request.extend_from_slice(&buffer[..n]),
+                Ok(Err(_)) => break,
             }
-            let text = String::from_utf8_lossy(&request);
-            let target = text.lines().next().and_then(|line| line.split_whitespace().nth(1)).unwrap_or("/");
-            let (path, query) = target.split_once('?').unwrap_or((target, ""));
-            let params: HashMap<String, String> = query
-                .split('&')
-                .filter_map(|pair| pair.split_once('='))
-                .map(|(k, v)| (decode(k), decode(v)))
-                .collect();
-            let reply = |status: &str, body: &str| {
-                format!(
-                    "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-            };
-            if path != self.path {
-                let _ = stream.write_all(reply("404 Not Found", "Not found").as_bytes()).await;
-                continue;
-            }
-            if let Some(error) = params.get("error") {
-                let detail = params.get("error_description").unwrap_or(error).clone();
-                let page = format!("<html><body><h2>Sign-in failed</h2><p>{}</p></body></html>", html_escape(&detail));
-                let _ = stream.write_all(reply("400 Bad Request", &page).as_bytes()).await;
-                bail!("the sign-in was refused: {detail}");
-            }
-            let Some(code) = params.get("code") else {
-                let _ = stream.write_all(reply("400 Bad Request", "No code").as_bytes()).await;
-                continue;
-            };
-            if params.get("state").map(String::as_str) != Some(self.state.as_str()) {
-                let _ = stream.write_all(reply("400 Bad Request", "State mismatch").as_bytes()).await;
-                bail!("the sign-in came back with the wrong state; try again");
-            }
-            let _ = stream.write_all(reply("200 OK", PAGE_OK).as_bytes()).await;
-            return Ok(code.clone());
         }
+        let text = String::from_utf8_lossy(&request);
+        let target = text.lines().next().and_then(|line| line.split_whitespace().nth(1)).unwrap_or("/");
+        let (request_path, query) = target.split_once('?').unwrap_or((target, ""));
+        let params: HashMap<String, String> = query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(k, v)| (decode(k), decode(v)))
+            .collect();
+        let reply = |status: &str, body: &str| {
+            format!(
+                "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        if request_path != path {
+            let _ = stream.write_all(reply("404 Not Found", "Not found").as_bytes()).await;
+            continue;
+        }
+        if let Some(error) = params.get("error") {
+            let detail = params.get("error_description").unwrap_or(error).clone();
+            let page = format!("<html><body><h2>Sign-in failed</h2><p>{}</p></body></html>", html_escape(&detail));
+            let _ = stream.write_all(reply("400 Bad Request", &page).as_bytes()).await;
+            bail!("the sign-in was refused: {detail}");
+        }
+        let Some(code) = params.get("code") else {
+            let _ = stream.write_all(reply("400 Bad Request", "No code").as_bytes()).await;
+            continue;
+        };
+        if params.get("state").map(String::as_str) != Some(state) {
+            let _ = stream.write_all(reply("400 Bad Request", "State mismatch").as_bytes()).await;
+            bail!("the sign-in came back with the wrong state; try again");
+        }
+        let _ = stream.write_all(reply("200 OK", PAGE_OK).as_bytes()).await;
+        return Ok(code.clone());
     }
 }
 

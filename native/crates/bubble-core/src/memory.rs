@@ -185,7 +185,7 @@ pub fn transcript(messages: &[ChatMessage]) -> String {
     let mut lines: Vec<(String, bool)> = Vec::new();
     for message in messages {
         match message {
-            ChatMessage::User { text } => {
+            ChatMessage::User { text, .. } => {
                 let (summary, body) = match text.trim().strip_prefix(SUMMARY_MARKER) {
                     Some(rest) => (true, rest.trim_end_matches("</bubble_internal_context>").trim().to_owned()),
                     None => (false, text.clone()),
@@ -538,6 +538,7 @@ mod tests {
                 text: "Looking.".into(),
                 reasoning: String::new(),
                 tool_calls: vec![ToolCall { id: "c".into(), name: "bash".into(), arguments: "{\"command\":\"make\"}".into() }],
+                state: serde_json::Value::Null,
             },
             ChatMessage::Tool { results: vec![ToolResult { call_id: "c".into(), content: "error: x".into(), is_error: true }] },
         ];

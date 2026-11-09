@@ -9,10 +9,12 @@ pub mod compact;
 pub mod config;
 pub mod delegate;
 pub mod discover;
+pub mod gemini;
 pub mod hooks;
 pub mod instructions;
 pub mod login;
 pub mod mcp;
+pub mod mcp_oauth;
 pub mod memory;
 pub mod model;
 pub mod prompt;
@@ -31,7 +33,7 @@ pub mod worktree;
 pub use agent::{AgentEvent, Decision, Turn, run_turn};
 pub use config::{Config, Protocol, ProviderConfig, ResolvedModel, bubble_home};
 pub use provider::{
-    ChatMessage, ChatOutcome, ChatRequest, StreamEvent, ToolCall, ToolResult, ToolSpec, Usage, http_client, stream_chat,
+    ChatMessage, ChatOutcome, ChatRequest, Image, StreamEvent, ToolCall, ToolResult, ToolSpec, Usage, http_client, stream_chat,
 };
 pub use model::Level;
 pub use toolbox::Toolbox;
