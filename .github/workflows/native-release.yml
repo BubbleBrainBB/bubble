@@ -1,10 +1,13 @@
 name: Native release
 
-# Builds the Rust `bubble` for every npm platform and, only when started by
-# hand with publish set, publishes the platform packages and then
-# @bubblebrain-ai/bubble (which needs the NPM_TOKEN secret).
+# Builds the Rust `bubble` for every npm platform and packs the npm
+# packages. A pushed tag `native-v<version>` only builds (publishing is done
+# from a maintainer's machine with the packed tarballs); a run started by
+# hand with publish set also publishes, with the NPM_TOKEN secret.
 
 on:
+  push:
+    tags: ["native-v*"]
   workflow_dispatch:
     inputs:
       version:
@@ -17,6 +20,9 @@ on:
       tag:
         description: "npm dist-tag"
         default: latest
+
+env:
+  VERSION: ${{ inputs.version || github.ref_name }}
 
 jobs:
   build:
@@ -38,13 +44,14 @@ jobs:
       - name: Rust
         run: rustup toolchain install stable --profile minimal && rustup default stable && rustc --version
       - name: Build and package
-        run: node native/npm/build.mjs --version "${{ inputs.version }}" --platforms-only
+        shell: bash
+        run: node native/npm/build.mjs --version "${VERSION#native-v}" --platforms-only
       - name: Test the binary
         shell: bash
         run: |
           exe=native/npm/dist/${{ matrix.platform }}/bin/bubble
           [ -f "$exe.exe" ] && exe="$exe.exe"
-          "$exe" --version | grep -F "${{ inputs.version }}"
+          "$exe" --version | grep -F "${VERSION#native-v}"
       - uses: actions/upload-artifact@v4
         with:
           name: bubble-${{ matrix.platform }}
@@ -77,7 +84,7 @@ jobs:
             main.optionalDependencies = Object.fromEntries(platforms.map((p) => ["@bubblebrain-ai/bubble-" + p, process.argv[1]]));
             fs.cpSync("native/npm/bubble", "native/npm/dist/bubble", { recursive: true });
             fs.writeFileSync("native/npm/dist/bubble/package.json", JSON.stringify(main, null, 2) + "\n");
-          ' "${{ inputs.version }}"
+          ' "${VERSION#native-v}"
       - name: Pack
         run: |
           mkdir -p tarballs
@@ -87,11 +94,11 @@ jobs:
           name: npm-tarballs
           path: tarballs
       - name: Publish
-        if: ${{ inputs.publish }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for d in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
-            npm publish "native/npm/dist/$d" --access public --tag "${{ inputs.tag }}"
+            npm publish "native/npm/dist/$d" --access public --tag "${{ inputs.tag || 'latest' }}"
           done
-          npm publish native/npm/dist/bubble --access public --tag "${{ inputs.tag }}"
+          npm publish native/npm/dist/bubble --access public --tag "${{ inputs.tag || 'latest' }}"

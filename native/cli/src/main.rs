@@ -569,6 +569,12 @@ fn main() {
     if argv.first().map(String::as_str) == Some("import-sessions") {
         std::process::exit(import_sessions());
     }
+    if argv.first().map(String::as_str) == Some("serve") {
+        eprintln!(
+            "The Feishu bot (`bubble serve --feishu`) is not in the native Bubble yet.\nRun it with the previous version: npx @bubblebrain-ai/bubble@0.0.62 serve --feishu"
+        );
+        std::process::exit(2);
+    }
     if matches!(argv.first().map(String::as_str), Some("update" | "upgrade")) {
         let check = argv.iter().any(|a| a == "--check");
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");

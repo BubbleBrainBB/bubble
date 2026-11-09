@@ -258,3 +258,12 @@ fn session_hooks_fire_at_the_start_and_end() {
     assert_eq!(names, ["SessionStart", "SessionEnd"], "{events:?}");
     assert_eq!(events[0]["payload"]["resumed"], false, "{}", events[0]);
 }
+
+#[test]
+fn serve_says_where_the_feishu_bot_is() {
+    let setup = setup("serve");
+    let (code, stdout, stderr) = bubble(&setup, &["serve", "--feishu"], None);
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty() && stderr.contains("0.0.62"), "{stderr}");
+    assert!(setup.requests.lock().unwrap().is_empty(), "no model was called");
+}
