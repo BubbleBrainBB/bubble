@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { THINKING_LEVELS, type PermissionMode, type ThinkingLevel } from "./types.js";
 import { isThinkingLevel } from "./variant/thinking-level.js";
 
-export type CliCommand = "default" | "serve" | "update";
+export type CliCommand = "default" | "serve" | "update" | "host";
 
 export interface CliArgs {
   command: CliCommand;
@@ -50,6 +50,10 @@ export function parseArgs(argv: string[]): CliArgs {
     } else if (argv[0] === "update" || argv[0] === "upgrade") {
       args.command = "update";
       startIndex = 1;
+    } else if (argv[0] === "host" && argv[1] === "--stdio") {
+      // The flag is required so a prompt that starts with "host" stays a prompt.
+      args.command = "host";
+      startIndex = 2;
     }
   }
 
@@ -160,6 +164,7 @@ Usage:
   bubble [options] [prompt]              Start interactive TUI
   bubble update [--check]                Update to the latest version (alias: upgrade)
   bubble serve --feishu [options]        Run as a Feishu bot host
+  bubble host --stdio                    Serve the agent to an app over stdin/stdout (JSON-RPC)
 
 Options (default):
   -m, --model <model>      Model to use
