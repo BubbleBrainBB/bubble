@@ -130,14 +130,10 @@ fn the_sidebar_pages_work() {
     app.set_viewport(nsh_core::element::size(nsh_core::element::px(1280.0), nsh_core::element::px(1600.0))).unwrap();
     let long = Duration::from_secs(10);
 
-    // Done folds after 20.
-    app.wait_for_within("id:nav-tasks", long).unwrap();
-    app.press("id:nav-tasks").unwrap();
-    app.wait_for("Show all 25").unwrap();
-    let folded = app.screen().count("text:/^Old \\d+$/").unwrap();
-    app.press("Show all 25").unwrap();
-    app.wait_for("Show fewer").unwrap();
-    assert_eq!(app.screen().count("text:/^Old \\d+$/").unwrap(), folded + 5);
+    // What was closed is not among the bots.
+    app.wait_for_within("id:nav-home", long).unwrap();
+    app.wait_for("id:side-Set up").unwrap();
+    assert_eq!(app.screen().count("text:/^Old \\d+$/").unwrap(), 0);
 
     // A project that is a watched repository.
     app.press("id:side-Set up").unwrap();
@@ -146,12 +142,14 @@ fn the_sidebar_pages_work() {
     app.press("label:Prepare for acme/demo").unwrap();
 
     // Pull requests: a task for #7, then a merge the person confirms.
+    app.press("id:nav-settings").unwrap();
     app.press("id:nav-pull-requests").unwrap();
     if let Err(e) = app.wait_for_within("text:#7 Add docs", long) {
         panic!("{e}\nTEXTS: {:?}", app.screen().texts());
     }
     app.press("Make a task").unwrap();
     app.wait_for("PR #7").unwrap();
+    app.press("id:nav-settings").unwrap();
     app.press("id:nav-pull-requests").unwrap();
     app.wait_for_within("Open task", long).unwrap();
     app.press("Merge").unwrap();
@@ -160,6 +158,7 @@ fn the_sidebar_pages_work() {
     assert!(root.join("merged").exists(), "gh pr merge ran");
 
     // Automations: made, then run now: a task with the prompt as its first message.
+    app.press("id:nav-settings").unwrap();
     app.press("id:nav-automations").unwrap();
     app.wait_for("No automations yet.").unwrap();
     app.press("New automation").unwrap();
@@ -174,6 +173,7 @@ fn the_sidebar_pages_work() {
     app.wait_for_within("On it.", long).unwrap();
 
     // Skills: listed, and found by what they do.
+    app.press("id:nav-settings").unwrap();
     app.press("id:nav-skills").unwrap();
     app.wait_for("release-notes").unwrap();
     app.type_text("id:skills-search", "merged pull").unwrap();
@@ -191,13 +191,18 @@ fn the_sidebar_pages_work() {
     app.press("label:Found in Nightly check").unwrap();
     app.wait_for("text:/Nightly check$/").unwrap();
 
-    // New work starts with the Manager: no task form of its own; a folder
-    // picked beside Projects goes into the Manager's composer.
-    assert!(!app.screen().texts().iter().any(|t| *t == "New Task" || *t == "New task"));
+    // A bot is made with a name, what it is for, and the folder it works in.
+    app.press("id:nav-new-bot").unwrap();
+    app.type_text("id:bot-name", "Docs").unwrap();
+    app.type_text("id:bot-instruction", "Keep the docs in step with the code").unwrap();
     app.on_pick_paths(vec![project.clone()]).unwrap();
-    app.press("label:Task in a new project").unwrap();
-    app.wait_for(&format!("text:In {}:", project.display())).unwrap();
-    app.wait_for("What should we work on?").unwrap();
+    app.press("Choose a folder").unwrap();
+    app.wait_for(&project.display().to_string()).unwrap();
+    app.press("Create bot").unwrap();
+    app.wait_for("id:side-Docs").unwrap();
+    app.wait_for("text:No messages yet").unwrap();
+    // Its conversation is open, named after it.
+    app.wait_for("text:Message Docs").unwrap();
 
     std::fs::remove_dir_all(&root).ok();
 }

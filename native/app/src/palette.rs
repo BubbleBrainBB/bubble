@@ -1,8 +1,8 @@
-//! The app's colors and sizes, taken from the Electron Bubble app
-//! (`desktop/src/ui/index.css`): a light gray window chrome, one raised card
-//! holding the sidebar and the content, gray user bubbles, black send
-//! button. Four type sizes, nothing under 12 px. Each color has a dark
-//! twin, which styles follow with the appearance.
+//! The app's colors and sizes. The window is laid out as a messenger is
+//! (the Grok Bot desktop app is the reference): a light gray sidebar of
+//! bots beside the white conversation. Four type sizes, nothing under
+//! 12 px. Each color has a dark twin, which styles follow with the
+//! appearance.
 
 use nsh_core::prelude::*;
 
@@ -14,17 +14,21 @@ fn pair_alpha(light: u32, dark: u32) -> AdaptiveColor {
     AdaptiveColor::new(rgba(light), rgba(dark))
 }
 
-/// The window around the card: the top strip and the icon rail.
-pub fn chrome() -> AdaptiveColor {
-    pair(0xF4F4F4, 0x161616)
-}
-/// The sidebar inside the card.
+/// The sidebar.
 pub fn side() -> AdaptiveColor {
-    pair(0xF8F8F8, 0x1B1B1B)
+    pair(0xF3F3F3, 0x181818)
 }
-/// The content pane.
+/// The conversation and the pages.
 pub fn pane() -> AdaptiveColor {
-    pair(0xFCFCFC, 0x1F1F1F)
+    pair(0xFDFDFD, 0x1F1F1F)
+}
+/// What a bot says: a bubble a step off the pane.
+pub fn bot_bubble() -> AdaptiveColor {
+    pair(0xF1F1F1, 0x2A2A2A)
+}
+/// Something new, or someone there: the dot beside a bot.
+pub fn online() -> AdaptiveColor {
+    pair(0x2F6FED, 0x5B8DEF)
 }
 pub fn paper() -> AdaptiveColor {
     pair(0xFFFFFF, 0x262626)
@@ -90,13 +94,10 @@ pub fn shadow() -> AdaptiveColor {
 pub const SMALL: f32 = 12.0;
 /// Conversation text and controls (`--conversation-font-size`).
 pub const BODY: f32 = 13.0;
-/// The workspace name, a list's titles.
-pub const TITLE: f32 = 15.0;
 /// Empty-state and settings headings.
 pub const HEADING: f32 = 18.0;
 
 pub const LINE: f32 = 0.5;
-pub const TOP_BAR: f32 = 38.0;
-pub const RAIL_WIDTH: f32 = 40.0;
-pub const SIDEBAR_WIDTH: f32 = 236.0;
+pub const TOP_BAR: f32 = 52.0;
+pub const SIDEBAR_WIDTH: f32 = 280.0;
 pub const READING_WIDTH: f32 = 720.0;

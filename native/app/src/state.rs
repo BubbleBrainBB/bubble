@@ -37,6 +37,14 @@ pub const DEFAULT_MAX_RUNS: u32 = 4;
 pub const THINKING: &str = "thinking_level";
 /// "system", "light" or "dark".
 pub const APPEARANCE: &str = "appearance";
+/// The bot whose conversation was open when the app closed.
+const OPEN_BOT: &str = "open_bot";
+/// When each bot's conversation was last looked at, as JSON.
+const BOTS_SEEN: &str = "bots_seen";
+
+fn bot_instruction_key(bot_id: &str) -> String {
+    format!("bot_instruction:{bot_id}")
+}
 /// A task's own model and effort, over the Settings ones.
 fn task_model_key(task_id: &str) -> String {
     format!("task_model:{task_id}")
@@ -105,7 +113,10 @@ pub struct SkillsSummary {
 pub enum Route {
     Home,
     Tasks,
+    /// A bot's conversation.
     Task(String),
+    /// The form that makes a bot.
+    NewBot,
     PullRequests,
     Automations,
     Skills,
@@ -168,13 +179,13 @@ pub struct AppState {
     pub hook_rules: Signal<Vec<String>>,
     pub route: Signal<Route>,
     pub tasks: Signal<Vec<TaskSummary>>,
+    /// The newest thing said in each bot's conversation.
+    pub previews: Signal<HashMap<String, bubble_store::Preview>>,
+    /// When the person last looked at each bot's conversation.
+    seen: Signal<HashMap<String, i64>>,
     /// GitHub events since the person last wrote to the Manager (Home's
     /// "while you were away").
     pub away: Signal<Vec<bubble_store::Event>>,
-    /// The Tasks page's new-task form is open.
-    /// Text to put in the Manager's composer once it shows (a project the
-    /// person picked to start work in).
-    pub manager_draft: Signal<Option<String>>,
     /// The task page's "link an issue or PR" row is open.
     pub linking: Signal<bool>,
     /// The task page's Changes panel is open.
@@ -240,10 +251,15 @@ impl AppState {
             memory_status: signal(String::new()),
             hook_rules: signal(Vec::new()),
             problem: signal((!problems.is_empty()).then(|| problems.join("\n"))),
-            route: signal(Route::Home),
+            // The conversation that was open comes back, as a messenger's does.
+            route: signal(match setting(OPEN_BOT) {
+                Some(id) if store.as_ref().is_some_and(|s| s.get_task(&id).ok().flatten().is_some_and(|t| t.lifecycle == Lifecycle::Open)) => Route::Task(id),
+                _ => Route::Home,
+            }),
             tasks: signal(Vec::new()),
+            previews: signal(HashMap::new()),
+            seen: signal(setting(BOTS_SEEN).and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default()),
             away: signal(Vec::new()),
-            manager_draft: signal(None),
             linking: signal(false),
             changes_open: signal(false),
             automations: signal(crate::automations::load(setting(crate::automations::KEY).as_deref())),
@@ -262,6 +278,16 @@ impl AppState {
         };
         state.refresh_tasks();
         state.refresh_away();
+        // Which conversation is open is kept for the next start.
+        effect(move || {
+            let open = match state.route.get() {
+                Route::Task(id) => Some(id),
+                Route::Home => None,
+                // A page is not a place to come back to.
+                _ => return,
+            };
+            untracked(|| state.with_store(|s| s.set_setting(OPEN_BOT, open.as_deref())));
+        });
         state.resume_queue();
         github::start(state);
         crate::automations::start(state);
@@ -636,6 +662,70 @@ impl AppState {
             }
             self.tasks.set(tasks);
         }
+        if let Some(previews) = self.with_store(|s| s.previews()) {
+            self.previews.set(previews);
+        }
+        // What arrives in the conversation on screen is seen as it arrives.
+        if let Route::Task(open) = self.route.get_untracked() {
+            self.mark_seen(&open);
+        }
+    }
+
+    /// The bots, the one that spoke or was spoken to last first: the
+    /// conversations the person keeps (the command line's sessions and
+    /// what was closed are found by searching).
+    pub fn bots(&self) -> Vec<TaskSummary> {
+        let previews = self.previews.get();
+        let mut bots: Vec<TaskSummary> = self
+            .tasks
+            .get()
+            .into_iter()
+            .filter(|t| t.task.origin != Origin::Cli && !matches!(t.task.lifecycle, Lifecycle::Done | Lifecycle::Canceled))
+            .collect();
+        let latest = |t: &TaskSummary| previews.get(&t.task.id).map_or(t.task.updated_at, |p| p.at.max(t.task.created_at));
+        bots.sort_by(|a, b| latest(b).cmp(&latest(a)));
+        bots
+    }
+
+    /// Whether a bot said something the person has not looked at.
+    pub fn unread(&self, bot_id: &str) -> bool {
+        let Some(preview) = self.previews.with(|p| p.get(bot_id).cloned()) else { return false };
+        matches!(preview.role, MessageRole::Assistant | MessageRole::External)
+            && preview.at > self.seen.with(|seen| seen.get(bot_id).copied().unwrap_or(0))
+    }
+
+    /// The person is looking at a bot's conversation.
+    pub fn mark_seen(&self, bot_id: &str) {
+        let now = bubble_store::now_ms();
+        let newest = self.previews.with_untracked(|p| p.get(bot_id).map(|p| p.at));
+        let known = self.seen.with_untracked(|seen| seen.get(bot_id).copied());
+        // Nothing new since the last look: nothing to write.
+        if known.is_some_and(|at| newest.is_none_or(|n| at >= n)) {
+            return;
+        }
+        self.seen.update(|seen| {
+            seen.insert(bot_id.to_owned(), now);
+        });
+        let json = self.seen.with_untracked(|seen| serde_json::to_string(seen).ok());
+        self.with_store(|s| s.set_setting(BOTS_SEEN, json.as_deref()));
+    }
+
+    /// Makes a bot: a name, what it is for (its standing instructions),
+    /// and the project folder it works in, if any.
+    pub fn create_bot(&self, name: &str, instruction: &str, project: Option<&str>) -> Option<String> {
+        let id = self.create_task(name.trim(), project)?;
+        self.set_bot_instruction(&id, instruction);
+        Some(id)
+    }
+
+    /// What a bot was told it is for.
+    pub fn bot_instruction(&self, bot_id: &str) -> String {
+        self.with_store(|s| s.setting(&bot_instruction_key(bot_id))).flatten().unwrap_or_default()
+    }
+
+    pub fn set_bot_instruction(&self, bot_id: &str, instruction: &str) {
+        let instruction = instruction.trim();
+        self.with_store(|s| s.set_setting(&bot_instruction_key(bot_id), (!instruction.is_empty()).then_some(instruction)));
     }
 
     pub fn default_model(&self) -> Option<String> {
@@ -1230,8 +1320,8 @@ impl Conversation {
                 Some(task_id) => {
                     let task = s.get_task(task_id)?.ok_or_else(|| anyhow!("the task is gone"))?;
                     let runs = s.runs_for_task(task_id)?;
-                    let reusable =
-                        runs.last().filter(|r| r.status != RunStatus::Failed && fresh.is_none()).cloned();
+                    // A bot's conversation is one: a failed turn does not start another.
+                    let reusable = runs.last().filter(|_| fresh.is_none()).cloned();
                     let (run, index) = match reusable {
                         Some(run) => (run, None),
                         None => {
@@ -1367,7 +1457,8 @@ impl Conversation {
                 let cwd = project.as_deref().map(PathBuf::from).filter(|p| p.is_dir());
                 let tools = if cwd.is_some() { github::task_tools(app, project.as_deref()) } else { Vec::new() };
                 let full = app.task_full_access(id) && self.driven_by_person(app, &run.id);
-                (None, Some(task_prompt(&title, project.as_deref(), cwd.is_some(), full)), cwd, tools)
+                let instruction = app.bot_instruction(id);
+                (None, Some(task_prompt(&title, &instruction, project.as_deref(), cwd.is_some(), full)), cwd, tools)
             }
         };
         // The newest message is what the agent answers; it keeps the rest
@@ -1758,13 +1849,13 @@ fn prompt_of(messages: &[Message]) -> (String, Vec<bubble_host::Picture>, Option
     (text, pictures, engine::recap_of(&history_of(&messages[..index])))
 }
 
-fn task_prompt(title: &str, project: Option<&str>, has_tools: bool, full: bool) -> String {
+fn task_prompt(name: &str, instruction: &str, project: Option<&str>, has_tools: bool, full: bool) -> String {
     let place = match (project, has_tools) {
         (Some(path), true) => format!(
             "You work in the project folder {path}. Use the tools to read, search, change files and run commands there; \
              relative paths start in that folder. {}",
             if full {
-                "The person gave this task full access: changes and commands go ahead without asking. \
+                "The person gave this bot full access: changes and commands go ahead without asking. \
                  Say what a risky step will do before you take it, prefer reversible steps, and never push, \
                  delete or expose credentials just because nothing asks."
             } else {
@@ -1772,12 +1863,16 @@ fn task_prompt(title: &str, project: Option<&str>, has_tools: bool, full: bool) 
             }
         ),
         (Some(path), false) => format!("The project folder {path} cannot be found, so you have no tools; say what you would do."),
-        (None, _) => "The task has no project folder, so you have no tools; say what you would do and what you need.".to_owned(),
+        (None, _) => "You have no project folder, so no file or command tools; say what you would do and what you need.".to_owned(),
+    };
+    let purpose = match instruction.trim() {
+        "" => String::new(),
+        instruction => format!(" What the person set you up for:\n{instruction}\n"),
     };
     format!(
-        "You are a Bubble agent working on one task: \"{title}\". {place} \
-         Messages may come from the person, from the Manager, who hands out the work, or from GitHub (reviews, comments, checks). \
-         Work until the task is done or you need the person, then say briefly what you did and what is left. \
+        "You are \"{name}\", one of the person's Bubble bots: a long-lived agent with one continuing conversation.{purpose} {place} \
+         Messages may come from the person, from the main bot, which coordinates the bots, or from GitHub (reviews, comments, checks). \
+         Work until what was asked is done or you need the person, then say briefly what you did and what is left. \
          Answer in the language the person writes in."
     )
 }

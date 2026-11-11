@@ -141,8 +141,7 @@ fn a_mention_is_triaged_into_a_task_and_shown_on_home() {
     let long = Duration::from_secs(15);
 
     // A first task makes the project known; then the repository is watched.
-    app.wait_for_within("id:nav-tasks", long).unwrap();
-    app.press("id:nav-tasks").unwrap();
+    app.wait_for_within("id:nav-home", long).unwrap();
     app.press("id:side-Set up").unwrap();
     app.press("id:nav-settings").unwrap();
     app.wait_for_within("acme/demo", long).unwrap();

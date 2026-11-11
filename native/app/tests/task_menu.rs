@@ -81,15 +81,14 @@ fn a_task_runs_again_links_a_pr_and_is_canceled() {
     app.set_viewport(nsh_core::element::size(nsh_core::element::px(1280.0), nsh_core::element::px(820.0))).unwrap();
     let long = Duration::from_secs(10);
 
-    app.wait_for_within("id:nav-tasks", long).unwrap();
-    app.press("id:nav-tasks").unwrap();
+    app.wait_for_within("id:nav-home", long).unwrap();
     app.press("id:side-Menu task").unwrap();
-    app.type_text("text:Message this task", "Do the thing").unwrap();
+    app.type_text("id:composer", "Do the thing").unwrap();
     app.submit("text:Do the thing").unwrap();
     app.wait_for_within("Hello from the stand-in model.", long).unwrap();
 
     // Run again: a second run, from the first message, saying why.
-    app.press("label:Task actions").unwrap();
+    app.press("label:Bot actions").unwrap();
     app.press("Run again on").unwrap();
     app.press("label:mock:test-model").unwrap();
     if let Err(e) = app.wait_for_within("text:/^rerun on mock:test-model$/", long) {
@@ -100,16 +99,17 @@ fn a_task_runs_again_links_a_pr_and_is_canceled() {
     assert_eq!(app.screen().count("text:Do the thing"), Ok(2), "the first message, sent again");
 
     // Link a PR by its link.
-    app.press("label:Task actions").unwrap();
+    app.press("label:Bot actions").unwrap();
     app.press("Link an issue or PR").unwrap();
     app.type_text("text:#12, owner/repo#12 or a GitHub link", "https://github.com/acme/demo/pull/4").unwrap();
     app.press("Link").unwrap();
     app.wait_for("PR #4").unwrap();
 
-    // Cancel: the task is closed.
-    app.press("label:Task actions").unwrap();
-    app.press("Cancel task").unwrap();
-    app.wait_for("Reopen").unwrap();
+    // Archive: the bot stops and leaves the list, and the main bot is back.
+    app.press("label:Bot actions").unwrap();
+    app.press("Archive bot").unwrap();
+    app.wait_for_gone("id:side-Menu task", long).unwrap();
+    app.wait_for("What should we work on?").unwrap();
 
     std::fs::remove_dir_all(&root).ok();
 }

@@ -131,37 +131,36 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
     // Home: the Manager answers a plain message itself.
     app.wait_for("What should we work on?").unwrap();
     app.wait_for("text:mock:test-model").unwrap();
-    app.type_text("text:Message Manager", "Say hello").unwrap();
+    app.type_text("id:composer", "Say hello").unwrap();
     app.submit("text:Say hello").unwrap();
     app.wait_for_within("text:/Hello from the stand-in model/", long).unwrap();
 
     // One task at a time.
     app.press("id:nav-settings").unwrap();
-    app.wait_for("Tasks running at once").unwrap();
+    app.wait_for("Bots working at once").unwrap();
     for _ in 0..3 {
-        app.press("label:Fewer tasks at once").unwrap();
+        app.press("label:Fewer bots at once").unwrap();
     }
     app.wait_for("1").unwrap();
 
     // The Manager turns a request into a task, shown as a card; the task's
     // agent starts at once and stops to ask before its command.
     app.press("id:nav-home").unwrap();
-    app.type_text("text:Message Manager", "Please ship the notes").unwrap();
+    app.type_text("id:composer", "Please ship the notes").unwrap();
     app.submit("text:Please ship the notes").unwrap();
     app.wait_for_within("Started it.", long).unwrap();
     app.wait_for("Ship the notes").unwrap();
     app.wait_for_within("text:/^Needs you, project$/", long).unwrap();
 
     // A second task, started by the person, waits for the free slot.
-    app.press("id:nav-tasks").unwrap();
     app.press("id:side-Second task").unwrap();
-    app.type_text("text:Message this task", "Write the file").unwrap();
+    app.type_text("id:composer", "Write the file").unwrap();
     app.submit("text:Write the file").unwrap();
-    app.wait_for("Queued until another task finishes").unwrap();
+    app.wait_for("Queued until another bot finishes").unwrap();
 
     // The first task gets its yes and finishes, which starts the second.
     app.press("id:side-Ship the notes").unwrap();
-    app.wait_for("From Manager").unwrap();
+    app.wait_for("From Bubble").unwrap();
     app.wait_for("Write out.txt with the word shipped.").unwrap();
     app.press("Allow once").unwrap();
     app.wait_for_within("All done.", long).unwrap();
@@ -176,7 +175,7 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
     assert_eq!(std::fs::read_to_string(project.join("out.txt")).unwrap().trim(), "shipped");
 
     // Stop ends a running command at once, and the task can go on.
-    app.type_text("text:Message this task", "Wait for me").unwrap();
+    app.type_text("id:composer", "Wait for me").unwrap();
     app.submit("text:Wait for me").unwrap();
     app.wait_for_within("Allow once", long).unwrap();
     app.press("Allow once").unwrap();

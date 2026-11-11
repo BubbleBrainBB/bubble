@@ -233,6 +233,14 @@ pub struct Task {
     pub closed_at: Option<i64>,
 }
 
+/// The newest message of a conversation, for a list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Preview {
+    pub text: String,
+    pub role: MessageRole,
+    pub at: i64,
+}
+
 /// A task with what lists show about it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TaskSummary {
@@ -471,6 +479,32 @@ impl Store {
 
     /// Every task with its derived state, what wants a person first, then
     /// the most recently changed.
+    /// The newest thing said in each open conversation the app lists (the
+    /// command line's sessions are not among them), by task.
+    pub fn previews(&self) -> Result<std::collections::HashMap<String, Preview>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare(
+            "SELECT t.id, m.text, m.role, m.created_at
+             FROM tasks t
+             JOIN messages m ON m.id = (
+               SELECT m2.id FROM messages m2 JOIN runs r2 ON r2.id = m2.run_id
+               WHERE r2.task_id = t.id AND m2.text != '' AND m2.role IN ('user', 'assistant', 'external', 'system')
+               ORDER BY m2.created_at DESC, m2.seq DESC LIMIT 1
+             )
+             WHERE t.lifecycle = 'open' AND t.origin != 'cli'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let role: String = row.get(2)?;
+            Ok((row.get::<_, String>(0)?, Preview { text: row.get(1)?, role: MessageRole::parse(&role).unwrap_or(MessageRole::Assistant), at: row.get(3)? }))
+        })?;
+        let mut previews = std::collections::HashMap::new();
+        for row in rows {
+            let (task, preview) = row?;
+            previews.insert(task, preview);
+        }
+        Ok(previews)
+    }
+
     pub fn list_tasks(&self) -> Result<Vec<TaskSummary>> {
         let conn = self.conn();
         let mut statement = conn.prepare(
@@ -1569,6 +1603,36 @@ mod tests {
         assert!(store.stage1("task:a").unwrap().unwrap().selected);
         assert!(!store.stage1("task:b").unwrap().unwrap().selected);
         assert!(legacy_stage1(Path::new("/nonexistent/state.sqlite")).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn a_preview_is_the_newest_words_of_an_open_conversation() {
+        let dir = std::env::temp_dir().join(format!("bubble-preview-{}", uuid::Uuid::new_v4()));
+        let store = Store::open(dir.join("bubble.db")).unwrap();
+        let bot = store.create_task(NewTask { title: "Docs", project_cwd: None, origin: Origin::User }).unwrap();
+        let quiet = store.create_task(NewTask { title: "Quiet", project_cwd: None, origin: Origin::User }).unwrap();
+        let cli = store.create_task(NewTask { title: "Terminal", project_cwd: None, origin: Origin::Cli }).unwrap();
+        let run = |task: &Task| {
+            store.create_run(NewRun { task_id: Some(&task.id), role: RunRole::Task, model: None, cwd: None, status: RunStatus::Idle }).unwrap()
+        };
+        let (bot_run, cli_run) = (run(&bot), run(&cli));
+        store.append_message(&bot_run.id, MessageRole::User, "Write the guide").unwrap();
+        store.append_message(&bot_run.id, MessageRole::Assistant, "The guide is written.").unwrap();
+        // Tool results and empty replies are not what a list shows.
+        store.append_message(&bot_run.id, MessageRole::Tool, "").unwrap();
+        store.append_message(&cli_run.id, MessageRole::User, "from the terminal").unwrap();
+
+        let previews = store.previews().unwrap();
+        assert_eq!(previews[&bot.id].text, "The guide is written.");
+        assert_eq!(previews[&bot.id].role, MessageRole::Assistant);
+        assert!(!previews.contains_key(&quiet.id), "nothing said yet");
+        assert!(!previews.contains_key(&cli.id), "terminal sessions are not listed");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

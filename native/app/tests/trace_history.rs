@@ -198,7 +198,8 @@ fn legacy_cards_and_answers_stay_above_the_next_prompt_in_layout() {
     let geometry = Arc::new(Mutex::new(Geometry::default()));
     let capture = geometry.clone();
     app.observe(move |_, batch| capture.lock().unwrap().apply(batch));
-    app.press("id:nav-tasks").unwrap();
+    // Away and back, so the conversation is laid out again under the observer.
+    app.press("id:nav-settings").unwrap();
     app.press("id:nav-home").unwrap();
     app.wait_for("Original final answer").unwrap();
     app.type_text("id:composer", "New follow-up request").unwrap();

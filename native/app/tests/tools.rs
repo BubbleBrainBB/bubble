@@ -41,7 +41,7 @@ fn model_server(seen: &Path) -> String {
             if system.contains("- notes-helper: Keeps notes tidy") && told.contains("mcp__echo__echo") {
                 std::fs::write(&seen, "").ok();
             }
-            if system.contains("gave this task full access") {
+            if system.contains("gave this bot full access") {
                 std::fs::write(seen.with_extension("full"), "").ok();
             }
             let last = request["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or_default();
@@ -158,9 +158,8 @@ fn tasks_use_mcp_tools_and_settings_show_what_is_there() {
     app.wait_for("text:/^\\d+ skills? in .*home/skills/").unwrap();
 
     // A task loads the tool, asks before calling it, and gets its answer.
-    app.press("id:nav-tasks").unwrap();
     app.press("id:side-Echo").unwrap();
-    app.type_text("text:Message this task", "Echo hi").unwrap();
+    app.type_text("id:composer", "Echo hi").unwrap();
     app.submit("text:Echo hi").unwrap();
     // The calls so far fold into one row; the question stays out, and the
     // group holding the waiting call opens by itself.

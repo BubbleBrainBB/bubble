@@ -7,7 +7,7 @@ use std::rc::Rc;
 use nsh_core::prelude::*;
 
 use crate::palette::*;
-use crate::sidebar::{CHAT_ICON, FOLDER_ICON};
+use crate::sidebar::FOLDER_ICON;
 use crate::state::{AppState, Route};
 use crate::ui::*;
 
@@ -17,25 +17,52 @@ fn strip_title(label: impl IntoReactive<SharedString>) -> Text {
     text(label).text_size(px(BODY)).text_color(secondary()).number_of_lines(1)
 }
 
-/// The screen's title and actions, shown in the top strip over the pane.
+/// Who a conversation is with: a pill in the middle of the top strip.
+fn who(face: Svg, name: impl IntoReactive<SharedString>) -> View {
+    view()
+        .h(px(32.0))
+        .pl(px(6.0))
+        .pr(px(14.0))
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .rounded_full()
+        .bg(paper())
+        .border(px(LINE))
+        .border_color(hairline())
+        .shadow_lg()
+        .shadow_color(shadow())
+        .child(face)
+        .child(text(name).text_size(px(BODY)).font_weight(FontWeight::MEDIUM).text_color(ink()).number_of_lines(1))
+}
+
+/// The top strip over the pane: a page's title, or who the conversation
+/// is with and what can be done about it.
 pub fn title_bar(app: AppState, route: Route) -> AnyElement {
     let row = view().flex_1().min_w(px(0.0)).flex_row().items_center().gap(px(8.0));
+    let page = |title: &'static str| row.child(strip_title(title)).into_element();
+    // The pill sits in the middle whatever stands on either side.
+    let side = || view().flex_1().min_w(px(0.0)).flex_row().items_center().gap(px(8.0));
     match route {
-        Route::Home => row
-            .child(icon(CHAT_ICON, 15.0).text_color(secondary()))
-            .child(strip_title("Manager"))
+        Route::Home => view()
+            .flex_1()
+            .flex_row()
+            .items_center()
+            .child(side())
+            .child(who(crate::avatar::main(22.0), crate::sidebar::MAIN_BOT))
+            .child(side())
             .into_element(),
-        Route::PullRequests => row.child(strip_title("Pull requests")).into_element(),
-        Route::Automations => row.child(strip_title("Automations")).into_element(),
-        Route::Skills => row.child(strip_title("Skills")).into_element(),
-        Route::Search => row.child(strip_title("Search")).into_element(),
-        Route::Settings => row.child(strip_title("Settings")).into_element(),
-        Route::Tasks => row.child(strip_title("Tasks").flex_1()).into_element(),
+        Route::PullRequests => page("Pull requests"),
+        Route::Automations => page("Routines"),
+        Route::Skills => page("Skills"),
+        Route::Search => page("Search"),
+        Route::Settings => page("Settings"),
+        Route::Tasks => page("Bots"),
+        Route::NewBot => page("New bot"),
         Route::Task(id) => {
             let summary_id = id.clone();
             let summary = move || app.tasks.with(|tasks| tasks.iter().find(|t| t.task.id == summary_id).cloned());
             let for_title = summary.clone();
-            let for_done = summary.clone();
             let chips_id = id.clone();
             let menu_id = id.clone();
             let start_id = id.clone();
@@ -47,67 +74,177 @@ pub fn title_bar(app: AppState, route: Route) -> AnyElement {
                         && crate::github::brief_of(app, &id).is_some()
                 }
             };
-            row.child(icon(FOLDER_ICON, 15.0).text_color(secondary()))
+            // Where it works, said quietly on the left.
+            let folder = {
+                let summary = summary.clone();
+                move || SharedString::from(summary().and_then(|s| s.task.project_cwd).map(|cwd| project_name(&cwd)).unwrap_or_default())
+            };
+            let has_folder = {
+                let summary = summary.clone();
+                move || summary().is_some_and(|s| s.task.project_cwd.is_some())
+            };
+            view()
+                .flex_1()
+                .flex_row()
+                .items_center()
+                .child(side().child(when(has_folder, move || {
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(icon(FOLDER_ICON, 14.0).text_color(muted()))
+                        .child(text(folder.clone()).text_size(px(SMALL)).text_color(muted()).number_of_lines(1))
+                })))
+                .child(who(
+                    crate::avatar::bot(&id, 22.0),
+                    move || SharedString::from(for_title().map(|s| s.task.title).unwrap_or_default()),
+                ))
                 .child(
-                    strip_title(move || {
-                        SharedString::from(match for_title() {
-                            Some(s) => match s.task.project_cwd {
-                                Some(cwd) => format!("{}  /  {}", project_name(&cwd), s.task.title),
-                                None => s.task.title,
-                            },
-                            None => String::new(),
-                        })
-                    })
-                    .flex_1(),
-                )
-                .child(dynamic(move || {
-                    app.task_revision.get();
-                    crate::github::link_chips(app, &chips_id)
-                        .into_iter()
-                        .map(|(label, url)| {
-                            view()
-                                .h(px(24.0))
-                                .px(px(9.0))
-                                .justify_center()
-                                .rounded(px(6.0))
-                                .border(px(LINE))
-                                .border_color(border())
-                                .window_drag(false)
-                                .cursor(Cursor::Pointer)
-                                .hover(|s| s.bg(tertiary()))
-                                .on_press(move || {
-                                    let url = url.clone();
-                                    spawn(async move {
-                                        let _ = open_url(url).await;
-                                    });
+                    side()
+                        .justify_end()
+                        .child(dynamic(move || {
+                            app.task_revision.get();
+                            crate::github::link_chips(app, &chips_id)
+                                .into_iter()
+                                .map(|(label, url)| {
+                                    view()
+                                        .h(px(24.0))
+                                        .px(px(9.0))
+                                        .justify_center()
+                                        .rounded(px(6.0))
+                                        .border(px(LINE))
+                                        .border_color(border())
+                                        .window_drag(false)
+                                        .cursor(Cursor::Pointer)
+                                        .hover(|s| s.bg(tertiary()))
+                                        .on_press(move || {
+                                            let url = url.clone();
+                                            spawn(async move {
+                                                let _ = open_url(url).await;
+                                            });
+                                        })
+                                        .child(text(label).text_size(px(SMALL)).text_color(secondary()))
                                 })
-                                .child(text(label).text_size(px(SMALL)).text_color(secondary()))
-                        })
-                        .collect::<Vec<_>>()
-                }))
-                .child(when(can_start, move || {
-                    let id = start_id.clone();
-                    primary_button("Start", move || crate::github::start_task(app, &id))
-                }))
-                .child(dynamic(move || {
-                    let done = for_done()
-                        .map(|s| matches!(s.task.lifecycle, Lifecycle::Done | Lifecycle::Canceled))
-                        .unwrap_or(false);
-                    let id = id.clone();
-                    if done {
-                        button("Reopen", move || app.set_lifecycle(&id, Lifecycle::Open)).into_element()
-                    } else {
-                        button("Mark done", move || app.set_lifecycle(&id, Lifecycle::Done)).into_element()
-                    }
-                }))
-                .child(dynamic(move || {
-                    let label = if app.changes_open.get() { "Hide changes" } else { "Changes" };
-                    button(label, move || app.changes_open.update(|o| *o = !*o))
-                }))
-                .child(task_menu(app, menu_id))
+                                .collect::<Vec<_>>()
+                        }))
+                        .child(when(can_start, move || {
+                            let id = start_id.clone();
+                            primary_button("Start", move || crate::github::start_task(app, &id))
+                        }))
+                        .child(dynamic(move || {
+                            let label = if app.changes_open.get() { "Hide changes" } else { "Changes" };
+                            button(label, move || app.changes_open.update(|o| *o = !*o))
+                        }))
+                        .child(task_menu(app, menu_id)),
+                )
                 .into_element()
         }
     }
+}
+
+/// The form that makes a bot: what to call it, what it is for, and the
+/// folder it works in.
+pub fn new_bot(app: AppState) -> impl IntoElement {
+    let name = signal(String::new());
+    let instruction = signal(String::new());
+    let folder = signal(None::<String>);
+    let problem = signal(None::<String>);
+    let create = Rc::new(move || {
+        let chosen = name.get_untracked();
+        if chosen.trim().is_empty() {
+            problem.set(Some("Give the bot a name.".into()));
+            return;
+        }
+        match app.create_bot(&chosen, &instruction.get_untracked(), folder.get_untracked().as_deref()) {
+            Some(id) => app.route.set(Route::Task(id)),
+            None => problem.set(Some("The bot could not be saved.".into())),
+        }
+    });
+    let field = |label: &'static str, hint: &'static str| {
+        view()
+            .gap(px(2.0))
+            .child(text(label).text_size(px(BODY)).text_color(ink()))
+            .child(text(hint).text_size(px(SMALL)).text_color(muted()))
+    };
+    let input = |value: Signal<String>, placeholder: &'static str, id: &'static str| {
+        nsh_base::input()
+            .value(value)
+            .placeholder(placeholder.to_owned())
+            .placeholder_color(move || color(muted()))
+            .px(px(12.0))
+            .py(px(8.0))
+            .rounded(px(10.0))
+            .border(px(LINE))
+            .border_color(border())
+            .bg(paper())
+            .text_size(px(BODY))
+            .text_color(ink())
+            .test_id(id)
+            .on_change(move |v: &str| value.set(v.to_owned()))
+    };
+    let on_enter = create.clone();
+    scroll().flex_1().child(
+        view()
+            .w_full()
+            .max_w(px(480.0))
+            .mx(auto())
+            .px(px(24.0))
+            .pt(px(40.0))
+            .pb(px(24.0))
+            .gap(px(18.0))
+            .child(
+                view()
+                    .gap(px(4.0))
+                    .child(text("New bot").text_size(px(HEADING)).font_weight(FontWeight::SEMIBOLD))
+                    .child(
+                        text("A bot is an agent you keep: one conversation that goes on, in a folder of its own if it works with files.")
+                            .text_size(px(BODY))
+                            .text_color(muted()),
+                    ),
+            )
+            .child(
+                view().gap(px(6.0)).child(field("Name", "What you call it; you can change it later")).child(
+                    input(name, "Docs", "bot-name").auto_focus(true).h(px(36.0)).on_submit(move |_: &str| on_enter()),
+                ),
+            )
+            .child(
+                view()
+                    .gap(px(6.0))
+                    .child(field("What is it for?", "Its standing instructions, in your words; leave empty for a general helper"))
+                    .child(input(instruction, "Keep the documentation in step with the code.", "bot-instruction").multiline(true).min_h(px(84.0))),
+            )
+            .child(
+                view().gap(px(6.0)).child(field("Folder", "The project it reads and changes; without one it only talks")).child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(button("Choose a folder", move || {
+                            let picked = pick_paths(nsh_core::file_dialog::OpenDialog::folders().button_label("Use folder"));
+                            spawn(async move {
+                                if let Ok(Some(paths)) = picked.await {
+                                    folder.set(paths.into_iter().next().map(|p| p.display().to_string()));
+                                }
+                            });
+                        }))
+                        .child(
+                            text(move || folder.get().unwrap_or_else(|| "No folder".to_owned()))
+                                .flex_1()
+                                .text_size(px(SMALL))
+                                .text_color(muted())
+                                .number_of_lines(1),
+                        ),
+                ),
+            )
+            .child(dynamic(move || problem.get().map(|message| text(message).text_size(px(SMALL)).text_color(failed()))))
+            .child(
+                view()
+                    .flex_row()
+                    .gap(px(8.0))
+                    .child(primary_button("Create bot", move || create()))
+                    .child(button("Cancel", move || app.route.set(Route::Home))),
+            ),
+    )
 }
 
 const MORE_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.2" fill="currentColor"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="12.5" cy="8" r="1.2" fill="currentColor"/></svg>"##;
@@ -151,7 +288,7 @@ fn task_menu(app: AppState, task_id: String) -> impl IntoElement {
                 .window_drag(false)
                 .cursor(Cursor::Pointer)
                 .hover(|s| s.bg(tertiary()))
-                .label("Task actions")
+                .label("Bot actions")
                 .child(icon(MORE_ICON, 16.0).text_color(secondary())),
         )
         .child(dynamic(move || {
@@ -193,7 +330,14 @@ fn task_menu(app: AppState, task_id: String) -> impl IntoElement {
             if !matches!(lifecycle, Some(Lifecycle::Done | Lifecycle::Canceled)) {
                 items.push(nsh_base::menu_separator().h(px(LINE)).my(px(4.0)).bg(hairline()).into_element());
                 let id = task_id.clone();
-                items.push(menu_item_of("Cancel task", move || app.cancel_task(&id)).into_element());
+                // Stops it and takes it off the list; searching still finds it.
+                items.push(
+                    menu_item_of("Archive bot", move || {
+                        app.cancel_task(&id);
+                        app.route.set(Route::Home);
+                    })
+                    .into_element(),
+                );
             }
             items
         }))
@@ -268,10 +412,10 @@ pub fn home(app: AppState) -> impl IntoElement {
             app,
             conversation,
             "What should we work on?",
-            "Tell Manager what needs doing.",
+            "Tell Bubble what needs doing; it hands the work to your bots.",
         ))
         .child(away_row(app))
-        .child(composer(app, conversation, "Message Manager", ComposerFor::Manager))
+        .child(composer(app, conversation, format!("Message {}", crate::sidebar::MAIN_BOT), ComposerFor::Manager))
 }
 
 /// What a GitHub event became, in a few words.
@@ -472,6 +616,8 @@ pub fn tasks(app: AppState) -> impl IntoElement {
 
 pub fn task(app: AppState, task_id: String) -> impl IntoElement {
     let conversation = app.task_conversation(&task_id);
+    app.mark_seen(&task_id);
+    let bot_name = app.with_store(|s| s.get_task(&task_id)).flatten().map(|t| t.title).unwrap_or_else(|| "this bot".to_owned());
     let link_id = task_id.clone();
     app.linking.set(false);
     let panel_id = task_id.clone();
@@ -489,7 +635,7 @@ pub fn task(app: AppState, task_id: String) -> impl IntoElement {
                     "What should the agent do?",
                     "Describe what the agent should do, then send.",
                 ))
-                .child(composer(app, conversation, "Message this task", ComposerFor::Task(task_id))),
+                .child(composer(app, conversation, format!("Message {bot_name}"), ComposerFor::Task(task_id))),
         )
         .child(when(move || app.changes_open.get(), move || crate::changes::panel(app, panel_id.clone())))
 }
@@ -708,19 +854,19 @@ pub fn settings(app: AppState) -> impl IntoElement {
             .px(px(28.0))
             .py(px(28.0))
             .gap(px(28.0))
-            .child(text("Manager and tasks").text_size(px(HEADING)).font_weight(FontWeight::SEMIBOLD))
+            .child(text("Bubble and your bots").text_size(px(HEADING)).font_weight(FontWeight::SEMIBOLD))
             .child(model_choice(
                 app,
                 RunRole::Manager,
-                "Manager model",
-                "Runs the Home conversation, plans and hands out tasks",
+                "Main bot's model",
+                "Runs the conversation with Bubble, which coordinates your bots",
                 app.manager_model,
             ))
             .child(model_choice(
                 app,
                 RunRole::Task,
-                "Task model",
-                "Used for every task unless you ask for another model",
+                "Bots' model",
+                "Used by every bot unless you give one its own",
                 app.task_model,
             ))
             .child(
@@ -732,8 +878,8 @@ pub fn settings(app: AppState) -> impl IntoElement {
                         view()
                             .flex_1()
                             .gap(px(2.0))
-                            .child(text("Tasks running at once").text_size(px(BODY)).text_color(ink()))
-                            .child(text("Tasks beyond this wait in a queue").text_size(px(SMALL)).text_color(muted())),
+                            .child(text("Bots working at once").text_size(px(BODY)).text_color(ink()))
+                            .child(text("Bots beyond this wait their turn").text_size(px(SMALL)).text_color(muted())),
                     )
                     .child(
                         view()
@@ -742,11 +888,11 @@ pub fn settings(app: AppState) -> impl IntoElement {
                             .rounded(px(8.0))
                             .border(px(LINE))
                             .border_color(border())
-                            .child(step_button("−", "Fewer tasks at once", move || {
+                            .child(step_button("−", "Fewer bots at once", move || {
                                 app.set_max_runs(app.max_runs.get_untracked().saturating_sub(1))
                             }))
                             .child(text(move || app.max_runs.get().to_string()).min_w(px(24.0)).text_size(px(BODY)))
-                            .child(step_button("+", "More tasks at once", move || {
+                            .child(step_button("+", "More bots at once", move || {
                                 app.set_max_runs(app.max_runs.get_untracked() + 1)
                             })),
                     ),
@@ -756,6 +902,7 @@ pub fn settings(app: AppState) -> impl IntoElement {
             .child(account_settings(app))
             .child(tool_settings(app))
             .child(github_settings(app))
+            .child(more_pages(app))
             .child(when(move || app.problem.get().is_some(), move || {
                 text(move || app.problem.get().unwrap_or_default()).text_size(px(SMALL)).text_color(failed())
             })),
@@ -763,6 +910,30 @@ pub fn settings(app: AppState) -> impl IntoElement {
 }
 
 /// Light, dark, or as the system is.
+/// Pages that are on their way into the bots' conversations and settings,
+/// reached from here until they are.
+fn more_pages(app: AppState) -> impl IntoElement {
+    let link = move |label: &'static str, id: &'static str, route: Route| {
+        button(label, move || app.route.set(route.clone())).test_id(id)
+    };
+    view()
+        .gap(px(8.0))
+        .child(
+            view()
+                .gap(px(2.0))
+                .child(text("More").text_size(px(BODY)).text_color(ink()))
+                .child(text("Skills the bots can load, routines that start work on a schedule, and open pull requests").text_size(px(SMALL)).text_color(muted())),
+        )
+        .child(
+            view()
+                .flex_row()
+                .gap(px(8.0))
+                .child(link("Skills", "nav-skills", Route::Skills))
+                .child(link("Routines", "nav-automations", Route::Automations))
+                .child(link("Pull requests", "nav-pull-requests", Route::PullRequests)),
+        )
+}
+
 fn appearance_settings(app: AppState) -> impl IntoElement {
     use nsh_core::platform::Appearance;
     let options = [("As the system", Appearance::System), ("Light", Appearance::Light), ("Dark", Appearance::Dark)];

@@ -139,8 +139,7 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
 
     // A first task makes the project, and so the repository, known. (The
     // app's first render can come late on a cold start.)
-    app.wait_for_within("id:nav-tasks", long).unwrap();
-    app.press("id:nav-tasks").unwrap();
+    app.wait_for_within("id:nav-home", long).unwrap();
     app.press("id:side-Set up").unwrap();
 
     // Settings: the repository is found and set to prepare.
@@ -151,7 +150,6 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
     app.wait_for("text:/^Agents work on new issues and reviews/").unwrap();
 
     // The assignment becomes a task waiting to start, linked to the issue.
-    app.press("id:nav-tasks").unwrap();
     app.wait_for_within("#7 Login breaks", long).unwrap();
     app.press("id:side-#7 Login breaks").unwrap();
     app.wait_for("Issue #7").unwrap();

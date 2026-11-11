@@ -133,7 +133,9 @@ fn model() -> (String, mpsc::Sender<()>, mpsc::Sender<()>) {
 fn start() -> Headless {
     let mut app = Headless::start(EngineConfig::new(Root::of::<bubble_app::App>())).unwrap();
     app.set_viewport(size(px(1280.0), px(1800.0))).unwrap();
-    app.wait_for("What should we work on?").unwrap();
+    // The conversation that was open comes back on a restart, so the main
+    // bot's empty screen is not always what shows first.
+    app.wait_for_within("id:nav-home", Duration::from_secs(10)).unwrap();
     app
 }
 
@@ -154,8 +156,9 @@ fn ordered(app: &Headless, snippets: &[&str]) {
     let indices = snippets
         .iter()
         .map(|s| {
+            // The last place: the sidebar repeats the newest words above the conversation.
             text.iter()
-                .position(|t| t.contains(s))
+                .rposition(|t| t.contains(s))
                 .unwrap_or_else(|| panic!("missing {s:?}: {text:?}"))
         })
         .collect::<Vec<_>>();
@@ -186,7 +189,6 @@ fn live_order_disclosures_terminal_states_and_restart_agree() {
         .create_task(bubble_store::NewTask { title: "Trace regression", project_cwd: Some(project.to_str().unwrap()), origin: bubble_store::Origin::User })
         .unwrap();
     let mut app = start();
-    app.press("id:nav-tasks").unwrap();
     app.press("id:side-Trace regression").unwrap();
     app.type_text("id:composer", "Inspect").unwrap();
     app.submit("id:composer").unwrap();

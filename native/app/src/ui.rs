@@ -177,6 +177,28 @@ pub fn conversation_view(
     }))
 }
 
+/// When something was said, as a messenger writes it over a message:
+/// "Today 8:51 AM", "Yesterday 3:02 PM", "Nov 9, 3:02 PM".
+pub fn stamp(at: i64, now: chrono::DateTime<chrono::Local>) -> String {
+    use chrono::TimeZone;
+    let Some(time) = chrono::Local.timestamp_millis_opt(at).single() else { return String::new() };
+    let clock = time.format("%-I:%M %p");
+    let days = (now.date_naive() - time.date_naive()).num_days();
+    match days {
+        0 => format!("Today {clock}"),
+        1 => format!("Yesterday {clock}"),
+        _ if time.format("%Y").to_string() == now.format("%Y").to_string() => format!("{} {clock}", time.format("%b %-d,")),
+        _ => format!("{} {clock}", time.format("%b %-d, %Y,")),
+    }
+}
+
+/// The time over a message that opens a turn, in the middle of the column.
+fn stamp_line(line: ReadSignal<Line>) -> impl IntoElement {
+    when(move || line.get().at > 0, move || {
+        text(move || stamp(line.get().at, chrono::Local::now())).self_center().pb(px(8.0)).text_size(px(SMALL)).text_color(muted())
+    })
+}
+
 /// One block of the transcript, hidden while the turn it belongs to is
 /// folded.
 fn block_view(
@@ -1088,6 +1110,9 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
                 .into_element()
         }
         LineKind::Message(MessageRole::User) => view()
+            .child(stamp_line(line))
+            .child(
+                view()
             .self_end()
             .max_w(percentage(0.8))
             .items_end()
@@ -1095,9 +1120,9 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
             .child(when(move || !line.get().text.trim().is_empty(), move || {
                 view()
                     .bg(user_bubble())
-                    .rounded(px(10.0))
-                    .px(px(20.0))
-                    .py(px(10.0))
+                    .rounded(px(18.0))
+                    .px(px(16.0))
+                    .py(px(9.0))
                     .child(text(move || line.get().text).text_size(px(BODY)).line_height(px(21.0)).text_color(ink()))
             }))
             .child(when(move || line.get().images > 0, move || {
@@ -1107,7 +1132,8 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
                 })
                 .text_size(px(SMALL))
                 .text_color(muted())
-            }))
+            })),
+            )
             .into_element(),
         LineKind::Message(MessageRole::Assistant) => dynamic(move || {
             let current = line.get();
@@ -1119,7 +1145,7 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
             if current.pending && current.text.is_empty() && waiting_on_person() {
                 view().into_element()
             } else if current.pending && current.text.is_empty() && conversation.queued.get() {
-                text("Queued until another task finishes").text_size(px(BODY)).text_color(muted()).into_element()
+                text("Queued until another bot finishes").text_size(px(BODY)).text_color(muted()).into_element()
             } else if current.pending && current.text.is_empty() {
                 // Reasoning shows as it streams: its last few lines.
                 let tail: Vec<&str> = current.reasoning.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -1132,31 +1158,38 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
                     }))
                     .into_element()
             } else {
-                // Reasoning is part of the work, not of the reply (as in Codex).
-                view().gap(px(6.0)).child((!current.text.trim().is_empty()).then(|| markdown(current.text.clone()))).into_element()
+                // What the bot says is a bubble; its reasoning is part of
+                // the work above it, not of the reply.
+                view()
+                    .child((!current.text.trim().is_empty()).then(|| {
+                        view().self_start().max_w(percentage(1.0)).px(px(14.0)).py(px(10.0)).rounded(px(18.0)).bg(bot_bubble()).child(markdown(current.text.clone()))
+                    }))
+                    .into_element()
             }
         }),
         LineKind::Message(MessageRole::Tool | MessageRole::Checkpoint) => view().into_element(),
         LineKind::Message(MessageRole::External) => view()
             .gap(px(6.0))
+            .child(stamp_line(line))
             .child(text("From GitHub").text_size(px(SMALL)).text_color(muted()))
             .child(
                 view()
-                    .px(px(16.0))
+                    .px(px(14.0))
                     .py(px(10.0))
-                    .rounded(px(10.0))
+                    .rounded(px(18.0))
                     .bg(tertiary())
                     .child(text(move || line.get().text).text_size(px(BODY)).line_height(px(21.0))),
             )
             .into_element(),
         LineKind::Message(MessageRole::System) => view()
             .gap(px(6.0))
-            .child(text("From Manager").text_size(px(SMALL)).text_color(muted()))
+            .child(stamp_line(line))
+            .child(text("From Bubble").text_size(px(SMALL)).text_color(muted()))
             .child(
                 view()
-                    .px(px(16.0))
+                    .px(px(14.0))
                     .py(px(10.0))
-                    .rounded(px(10.0))
+                    .rounded(px(18.0))
                     .bg(tertiary())
                     .child(text(move || line.get().text).text_size(px(BODY)).line_height(px(21.0))),
             )
@@ -1545,21 +1578,12 @@ fn access_menu(app: AppState, task_id: String) -> impl IntoElement {
 pub fn composer(
     app: AppState,
     conversation: Conversation,
-    placeholder: &'static str,
+    placeholder: String,
     target: ComposerFor,
 ) -> impl IntoElement {
     use bubble_core::Image;
     use bubble_core::mentions;
     let draft = signal(String::new());
-    if target == ComposerFor::Manager {
-        // A project picked in the sidebar, handed over to write about.
-        effect(move || {
-            if let Some(text) = app.manager_draft.get() {
-                draft.set(text);
-                app.manager_draft.set(None);
-            }
-        });
-    }
     let images = signal(Vec::<Image>::new());
     let problem = signal(None::<String>);
     let focused = signal(false);
@@ -1762,7 +1786,7 @@ pub fn composer(
             .child(
                 nsh_base::input()
                     .value(draft)
-                    .placeholder(placeholder.to_owned())
+                    .placeholder(placeholder.clone())
                     .placeholder_color(move || color(muted()))
                     .multiline(true)
                     .submit_behavior(SubmitBehavior::Submit)

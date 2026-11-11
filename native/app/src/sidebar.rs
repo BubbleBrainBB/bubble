@@ -1,280 +1,221 @@
-//! The icon rail on the window chrome, and the sidebar inside the card:
-//! the Manager, the pages, and every project with its tasks.
+//! The sidebar, as a messenger has it: the main bot on top, then every bot
+//! with the newest thing said in its conversation, and Settings at the
+//! bottom. Nothing else lives here: what bots do shows in their
+//! conversations.
 
-use std::collections::HashSet;
-
-use bubble_store::{TaskState, TaskSummary};
+use bubble_store::{MessageRole, TaskState, TaskSummary};
 use nsh_core::prelude::*;
 
+use crate::avatar;
 use crate::palette::*;
 use crate::state::{AppState, Route};
-use crate::ui::{icon, project_name, state_icon};
+use crate::ui::icon;
 
 // Icons draw in `currentColor`, the text color of the element they sit in.
-pub const CHAT_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M3 3.5h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7l-3 2.5v-2.5H3a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M5 6.5h6M5 8.75h4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>"##;
-const TASKS_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 8.1l1.6 1.6 3.4-3.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const SETTINGS_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.6 3.6l1.05 1.05M11.35 11.35l1.05 1.05M3.6 12.4l1.05-1.05M11.35 4.65l1.05-1.05" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>"##;
 pub const FOLDER_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 4.5a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"##;
-const PR_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="4.5" cy="3.75" r="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="4.5" cy="12.25" r="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="11.5" cy="12.25" r="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 5.25v5.5M11.5 10.75V6.5a2 2 0 0 0-2-2H7.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M8.75 3.25L7.5 4.5l1.25 1.25" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
-const CLOCK_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 5v3.25l2 1.25" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
-const BOOK_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M3 3.5A1.5 1.5 0 0 1 4.5 2H13v10H4.5A1.5 1.5 0 0 0 3 13.5z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M3 13.5A1.5 1.5 0 0 0 4.5 15H13v-3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"##;
-const SEARCH_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.25" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.25 10.25L13.5 13.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>"##;
-const FOLDER_PLUS_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 4.5a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 7.25v3.5M6.25 9h3.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>"##;
+const SEARCH_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.25" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.25 10.25L13.5 13.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>"##;
+const PLUS_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>"##;
 
-/// How many tasks a project shows before "Show more".
-const FOLDED: usize = 5;
+/// The main bot's name.
+pub const MAIN_BOT: &str = "Bubble";
 
-// --- The rail ------------------------------------------------------------------
-
-pub fn rail(app: AppState) -> impl IntoElement {
-    // Tasks marks what waits on the person: a question, or a failure.
-    let waiting = move || {
-        app.tasks.with(|tasks| tasks.iter().any(|t| matches!(t.state, TaskState::NeedsYou | TaskState::Failed)))
-    };
+/// A round button raised off the sidebar.
+fn round_button(markup: &'static str, label: &'static str, id: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {
     view()
-        .w(px(RAIL_WIDTH))
-        .flex_shrink_0()
-        .items_center()
-        .pt(px(2.0))
-        .pb(px(10.0))
-        .gap(px(6.0))
-        .child(rail_button(app, CHAT_ICON, "Home", Route::Home, || false))
-        .child(rail_button(app, TASKS_ICON, "Tasks", Route::Tasks, waiting))
-        .child(view().flex_1())
-        .child(rail_button(app, SETTINGS_ICON, "Settings", Route::Settings, || false))
-}
-
-fn rail_button(
-    app: AppState,
-    svg_markup: &'static str,
-    label: &'static str,
-    route: Route,
-    dot: impl Fn() -> bool + Copy + 'static,
-) -> impl IntoElement {
-    let target = route.clone();
-    let current = computed(move || {
-        let now = app.route.get();
-        now == route || (route == Route::Tasks && matches!(now, Route::Task(_)))
-    });
-    view()
-        .size(px(28.0))
-        .rounded(px(7.0))
+        .size(px(30.0))
+        .rounded_full()
         .items_center()
         .justify_center()
-        .bg(move || if current.get() { item_active() } else { chrome() })
-        .hover(|s| s.bg(item_hover()))
+        .bg(paper())
+        .border(px(LINE))
+        .border_color(hairline())
         .cursor(Cursor::Pointer)
-        .on_press(move || app.route.set(target.clone()))
+        .window_drag(false)
+        .hover(|s| s.bg(tertiary()))
         .label(label)
-        .test_id(&format!("nav-{}", label.to_lowercase()))
-        .child(icon(svg_markup, 17.0).text_color(move || if current.get() { ink() } else { secondary() }))
-        .child(when(dot, || {
-            view().absolute().top(px(3.0)).right(px(3.0)).size(px(6.0)).rounded_full().bg(needs())
-        }))
+        .test_id(id)
+        .on_press(on_press)
+        .child(icon(markup, 15.0).text_color(ink()))
 }
 
-// --- The sidebar ---------------------------------------------------------------
-
-/// One project's tasks, as the sidebar groups them.
-#[derive(Clone, PartialEq)]
-struct Group {
-    /// The project's folder; empty for tasks without one.
-    cwd: String,
-    tasks: Vec<TaskSummary>,
-}
-
-fn groups(app: AppState) -> Vec<Group> {
-    let mut groups: Vec<Group> = Vec::new();
-    let mut tasks = app.tasks.get();
-    tasks.sort_by(|a, b| b.task.updated_at.cmp(&a.task.updated_at));
-    for task in tasks {
-        let cwd = task.task.project_cwd.clone().unwrap_or_default();
-        match groups.iter_mut().find(|g| g.cwd == cwd) {
-            Some(group) => group.tasks.push(task),
-            None => groups.push(Group { cwd, tasks: vec![task] }),
-        }
+/// What a bot's row says under its name: what it is doing when that needs
+/// saying, else the newest thing said.
+fn preview_of(app: AppState, bot: &TaskSummary) -> String {
+    match bot.state {
+        TaskState::NeedsYou => return "Waiting for you".to_owned(),
+        TaskState::Running => return "Working…".to_owned(),
+        TaskState::Queued => return "Waiting for a free slot".to_owned(),
+        _ => {}
     }
-    // Tasks without a project come last.
-    groups.sort_by_key(|g| g.cwd.is_empty());
-    groups
+    let preview = app.previews.with(|p| p.get(&bot.task.id).cloned());
+    match preview {
+        Some(preview) => {
+            let line = plain(&preview.text);
+            if preview.role == MessageRole::User { format!("You: {line}") } else { line }
+        }
+        None => "No messages yet".to_owned(),
+    }
+}
+
+/// A message as one line of plain words: its markdown marks say nothing
+/// in a list.
+fn plain(text: &str) -> String {
+    let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut line = String::with_capacity(words.len());
+    for word in words.split(' ') {
+        // Heading and list marks standing alone.
+        if !word.is_empty() && word.chars().all(|c| matches!(c, '#' | '-' | '*' | '>')) {
+            continue;
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.extend(word.chars().filter(|c| !matches!(c, '`' | '*')));
+    }
+    line
 }
 
 pub fn sidebar(app: AppState) -> impl IntoElement {
-    let unfolded = signal(HashSet::<String>::new());
     let home_current = computed(move || app.route.get() == Route::Home);
+    // The main bot marks what waits on the person anywhere: a question, or a failure.
+    let main_busy = move || app.manager_conversation().busy.get();
     view()
         .w(px(SIDEBAR_WIDTH))
         .flex_shrink_0()
         .bg(side())
+        .border_r(px(LINE))
+        .border_color(hairline())
         .child(
+            // The window's controls sit on the left of this strip.
             view()
-                .h(px(48.0))
-                .px(px(16.0))
+                .h(px(TOP_BAR))
+                .flex_shrink_0()
                 .flex_row()
                 .items_center()
-                .child(text("Bubble").flex_1().text_size(px(TITLE)).font_weight(FontWeight::SEMIBOLD))
-                .child(
-                    view()
-                        .size(px(26.0))
-                        .rounded(px(7.0))
-                        .items_center()
-                        .justify_center()
-                        .cursor(Cursor::Pointer)
-                        .bg(move || if app.route.get() == Route::Search { item_active() } else { side() })
-                        .hover(|s| s.bg(item_hover()))
-                        .label("Search")
-                        .test_id("nav-search")
-                        .on_press(move || app.route.set(Route::Search))
-                        .child(icon(SEARCH_ICON, 15.0).text_color(secondary())),
-                ),
+                .justify_end()
+                .gap(px(8.0))
+                .pr(px(14.0))
+                .window_drag(true)
+                .child(round_button(SEARCH_ICON, "Search", "nav-search", move || app.route.set(Route::Search)))
+                .child(round_button(PLUS_ICON, "New bot", "nav-new-bot", move || app.route.set(Route::NewBot))),
         )
         .child(
             view()
-                .px(px(8.0))
-                .gap(px(1.0))
+                .items_center()
+                .gap(px(6.0))
+                .pt(px(6.0))
+                .pb(px(14.0))
+                .cursor(Cursor::Pointer)
+                .label("Main bot")
+                .test_id("nav-home")
+                .on_press(move || app.route.set(Route::Home))
                 .child(
-                    side_row(move || home_current.get())
-                        .on_press(move || app.route.set(Route::Home))
-                        .child(icon(CHAT_ICON, 15.0).text_color(secondary()))
-                        .child(text("Manager").text_size(px(BODY)).text_color(ink())),
+                    view()
+                        .p(px(4.0))
+                        .rounded_full()
+                        .bg(move || if home_current.get() { item_active() } else { side() })
+                        .child(avatar::main(56.0))
+                        .child(when(main_busy, || {
+                            view().absolute().right(px(6.0)).bottom(px(6.0)).size(px(10.0)).rounded_full().bg(online()).border(px(2.0)).border_color(side())
+                        })),
                 )
-                .child(page_row(app, PR_ICON, "Pull requests", Route::PullRequests))
-                .child(page_row(app, CLOCK_ICON, "Automations", Route::Automations))
-                .child(page_row(app, BOOK_ICON, "Skills", Route::Skills)),
-        )
-        .child(
-            view()
-                .h(px(36.0))
-                .mt(px(14.0))
-                .pl(px(16.0))
-                .pr(px(10.0))
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(text("Projects").text_size(px(BODY)).text_color(muted()))
-                .child(
-                    view()
-                        .size(px(22.0))
-                        .rounded(px(6.0))
-                        .items_center()
-                        .justify_center()
-                        .cursor(Cursor::Pointer)
-                        .hover(|s| s.bg(item_hover()))
-                        // New work starts with the Manager: the picked folder
-                        // goes into its composer.
-                        .on_press(move || {
-                            let picked = pick_paths(nsh_core::file_dialog::OpenDialog::folders().button_label("Use folder"));
-                            spawn(async move {
-                                if let Ok(Some(paths)) = picked.await {
-                                    if let Some(path) = paths.into_iter().next() {
-                                        app.manager_draft.set(Some(format!("In {}: ", path.display())));
-                                        app.route.set(Route::Home);
-                                    }
-                                }
-                            });
-                        })
-                        .label("Task in a new project")
-                        .child(icon(FOLDER_PLUS_ICON, 15.0).text_color(muted())),
-                ),
+                .child(text(MAIN_BOT).text_size(px(SMALL)).text_color(ink())),
         )
         .child(
             scroll().flex_1().child(
-                view().px(px(8.0)).pb(px(12.0)).gap(px(10.0)).child(each(
-                    move || groups(app),
-                    |group: &Group| group.cwd.clone(),
-                    move |group, _| project_group(app, group, unfolded),
-                )),
+                view()
+                    .px(px(10.0))
+                    .pb(px(10.0))
+                    .gap(px(2.0))
+                    .child(each(move || app.bots(), |bot: &TaskSummary| bot.task.id.clone(), move |bot, _| bot_row(app, bot)))
+                    .child(when(move || app.bots().is_empty(), || {
+                        text("No bots yet. Make one with +, or ask Bubble for one.")
+                            .px(px(10.0))
+                            .pt(px(10.0))
+                            .text_size(px(SMALL))
+                            .text_color(muted())
+                    })),
+            ),
+        )
+        .child(
+            view().px(px(14.0)).pb(px(14.0)).pt(px(8.0)).child(
+                view()
+                    .h(px(34.0))
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(8.0))
+                    .rounded_full()
+                    .bg(move || if app.route.get() == Route::Settings { tertiary() } else { paper() })
+                    .border(px(LINE))
+                    .border_color(hairline())
+                    .cursor(Cursor::Pointer)
+                    .hover(|s| s.bg(tertiary()))
+                    .label("Settings")
+                    .test_id("nav-settings")
+                    .on_press(move || app.route.set(Route::Settings))
+                    .child(icon(SETTINGS_ICON, 15.0).text_color(secondary()))
+                    .child(text("Settings").text_size(px(BODY)).text_color(ink())),
             ),
         )
 }
 
-fn project_group(app: AppState, group: ReadSignal<Group>, unfolded: Signal<HashSet<String>>) -> impl IntoElement {
-    let name = move || {
-        let cwd = group.get().cwd;
-        if cwd.is_empty() { "No project".to_owned() } else { project_name(&cwd) }
+fn bot_row(app: AppState, bot: ReadSignal<TaskSummary>) -> impl IntoElement {
+    let id = bot.get_untracked().task.id;
+    let current = {
+        let id = id.clone();
+        computed(move || matches!(app.route.get(), Route::Task(open) if open == id))
     };
-    let is_open = move || unfolded.with(|set| set.contains(&group.get().cwd));
-    let shown = move || {
-        let all = group.get().tasks;
-        if is_open() { all } else { all.into_iter().take(FOLDED).collect() }
+    let unread = {
+        let id = id.clone();
+        move || !current.get() && app.unread(&id)
     };
-    let hidden = move || group.get().tasks.len().saturating_sub(FOLDED);
+    let needs_you = move || matches!(bot.get().state, TaskState::NeedsYou | TaskState::Failed);
+    let open = id.clone();
     view()
-        .gap(px(1.0))
-        .child(
-            view()
-                .h(px(30.0))
-                .px(px(8.0))
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(icon(FOLDER_ICON, 15.0).text_color(secondary()))
-                .child(text(name).flex_1().text_size(px(BODY)).text_color(ink()).number_of_lines(1)),
-        )
-        .child(each(
-            shown,
-            |task: &TaskSummary| task.task.id.clone(),
-            move |task, _| {
-                let current = computed(move || matches!(app.route.get(), Route::Task(id) if id == task.get().task.id));
-                let in_motion = move || {
-                    matches!(
-                        task.get().state,
-                        TaskState::NeedsYou | TaskState::Running | TaskState::Queued | TaskState::Failed
-                    )
-                };
-                side_row(move || current.get())
-                    .test_id(&format!("side-{}", task.get_untracked().task.title))
-                    .pl(px(31.0))
-                    .on_press(move || app.route.set(Route::Task(task.get_untracked().task.id)))
-                    .child(
-                        text(move || task.get().task.title)
-                            .flex_1()
-                            .text_size(px(BODY))
-                            .text_color(move || if current.get() { ink() } else { secondary() })
-                            .number_of_lines(1),
-                    )
-                    .child(when(in_motion, move || state_icon(move || task.get().state, 12.0)))
-            },
-        ))
-        .child(when(move || hidden() > 0, move || {
-            text(move || if is_open() { "Show less".to_owned() } else { "Show more".to_owned() })
-                .pl(px(39.0))
-                .py(px(5.0))
-                .text_size(px(BODY))
-                .text_color(muted())
-                .cursor(Cursor::Pointer)
-                .on_press(move || {
-                    let cwd = group.get_untracked().cwd;
-                    unfolded.update(|set| {
-                        if !set.remove(&cwd) {
-                            set.insert(cwd);
-                        }
-                    });
-                })
-        }))
-}
-
-/// A sidebar row that opens a page.
-fn page_row(app: AppState, markup: &'static str, label: &'static str, route: Route) -> View {
-    let target = route.clone();
-    let current = computed(move || app.route.get() == route);
-    side_row(move || current.get())
-        .test_id(&format!("nav-{}", label.to_lowercase().replace(' ', "-")))
-        .on_press(move || app.route.set(target.clone()))
-        .child(icon(markup, 15.0).text_color(secondary()))
-        .child(text(label).text_size(px(BODY)).text_color(ink()))
-}
-
-/// A sidebar row: a soft fill while it is where the window is.
-fn side_row(is_current: impl Fn() -> bool + Copy + 'static) -> View {
-    view()
-        .h(px(30.0))
-        .px(px(8.0))
+        .h(px(58.0))
+        .px(px(10.0))
         .flex_row()
         .items_center()
-        .gap(px(8.0))
-        .rounded(px(7.0))
+        .gap(px(10.0))
+        .rounded(px(12.0))
         .cursor(Cursor::Pointer)
-        .bg(move || if is_current() { item_active() } else { side() })
+        .bg(move || if current.get() { item_active() } else { side() })
         .hover(|s| s.bg(item_hover()))
+        .test_id(&format!("side-{}", bot.get_untracked().task.title))
+        .on_press(move || {
+            app.mark_seen(&open);
+            app.route.set(Route::Task(open.clone()));
+        })
+        .child(avatar::bot(&id, 38.0))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .gap(px(2.0))
+                .child(
+                    text(move || bot.get().task.title)
+                        .text_size(px(BODY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(ink())
+                        .number_of_lines(1),
+                )
+                .child(
+                    text(move || preview_of(app, &bot.get()))
+                        .text_size(px(SMALL))
+                        .text_color(move || if needs_you() { needs() } else { muted() })
+                        .number_of_lines(1),
+                ),
+        )
+        .child(when(unread, || view().size(px(8.0)).rounded_full().bg(online()).flex_shrink_0()))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_preview_is_plain_words() {
+        assert_eq!(super::plain("## Done\n\n- Added `a.ts` and **b.ts**"), "Done Added a.ts and b.ts");
+        assert_eq!(super::plain("  spaced   out  "), "spaced out");
+    }
 }

@@ -68,8 +68,7 @@ fn changes_show_and_a_worktree_is_applied() {
     app.set_viewport(nsh_core::element::size(nsh_core::element::px(1400.0), nsh_core::element::px(820.0))).unwrap();
     let long = Duration::from_secs(10);
 
-    app.wait_for_within("id:nav-tasks", long).unwrap();
-    app.press("id:nav-tasks").unwrap();
+    app.wait_for_within("id:nav-home", long).unwrap();
     app.press("id:side-Review task").unwrap();
     app.press("Changes").unwrap();
     if let Err(e) = app.wait_for_within("label:Ivy's worktree", long) {

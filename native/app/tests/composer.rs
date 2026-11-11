@@ -113,12 +113,11 @@ fn the_composer_mentions_files_takes_pictures_and_remembers() {
     app.set_viewport(nsh_core::element::size(nsh_core::element::px(1280.0), nsh_core::element::px(820.0))).unwrap();
     let long = Duration::from_secs(10);
 
-    app.wait_for_within("id:nav-tasks", long).unwrap();
-    app.press("id:nav-tasks").unwrap();
+    app.wait_for_within("id:nav-home", long).unwrap();
     app.press("id:side-Composer task").unwrap();
 
     // An @ mention is completed from the project's files and sent with them.
-    app.type_text("text:Message this task", "explain @src/li").unwrap();
+    app.type_text("id:composer", "explain @src/li").unwrap();
     if let Err(e) = app.wait_for_within("label:Mention src/lib.rs", long) {
         panic!("{e}\nTEXTS: {:?}", app.screen().texts());
     }
@@ -132,9 +131,9 @@ fn the_composer_mentions_files_takes_pictures_and_remembers() {
     let png = vec![0x89, b'P', b'N', b'G', 13, 10, 26, 10, 0, 0, 0, 0];
     let mut paste = PasteEvent::default();
     paste.files.push(PastedFile::new("shot.png", "image/png", png));
-    app.paste("text:Message this task", &paste).unwrap();
+    app.paste("id:composer", &paste).unwrap();
     app.wait_for("label:Image 1").unwrap();
-    app.type_text("text:Message this task", "what is this").unwrap();
+    app.type_text("id:composer", "what is this").unwrap();
     app.submit("text:what is this").unwrap();
     app.wait_for_within("1 image", long).unwrap();
     app.wait_for_within("label:Send", long).unwrap();
@@ -142,7 +141,7 @@ fn the_composer_mentions_files_takes_pictures_and_remembers() {
     assert!(!app.shows("label:Image 1"), "sent pictures leave the composer");
 
     // Up brings back the last message, then the one before.
-    app.type_text("text:Message this task", "x").unwrap();
+    app.type_text("id:composer", "x").unwrap();
     app.press_key("backspace").unwrap();
     app.press_key("up").unwrap();
     composer_shows(&mut app, "what is this");
@@ -160,7 +159,7 @@ fn the_composer_mentions_files_takes_pictures_and_remembers() {
     app.press("label:Effort").unwrap();
     app.press("label:high").unwrap();
     app.wait_for("text:/^high$/").unwrap();
-    app.type_text("text:Message this task", "once more").unwrap();
+    app.type_text("id:composer", "once more").unwrap();
     app.submit("text:once more").unwrap();
     app.wait_for_within("label:Send", long).unwrap();
     // The agent writes this provider's requests over several lines.

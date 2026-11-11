@@ -536,7 +536,7 @@ pub fn shorten(text: &str, project: Option<&str>) -> String {
 /// What a running turn does now, and whether it waits on the person.
 pub fn activity(lines: &[Line], turn: &str, status: TurnStatus, project: Option<&str>) -> (String, bool) {
     if status == TurnStatus::Queued {
-        return ("Queued until another task finishes".into(), false);
+        return ("Queued until another bot finishes".into(), false);
     }
     let mine: Vec<&Line> = lines.iter().filter(|l| l.turn_id.as_deref() == Some(turn) && l.id != turn).collect();
     let waiting = status == TurnStatus::NeedsInput

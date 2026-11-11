@@ -132,11 +132,10 @@ fn tasks_delegate_to_subagents_and_workflows() {
     let long = Duration::from_secs(15);
     app.wait_for("What should we work on?").unwrap();
 
-    app.press("id:nav-tasks").unwrap();
     app.press("id:side-Investigate").unwrap();
 
     // A child is shown at its dispatch anchor and collected.
-    app.type_text("text:Message this task", "Delegate please").unwrap();
+    app.type_text("id:composer", "Delegate please").unwrap();
     app.submit("text:Delegate please").unwrap();
     app.wait_for_within("text:Child said: The answer is 42.", long).unwrap();
     app.wait_for("text:Subagents").unwrap();
@@ -146,7 +145,7 @@ fn tasks_delegate_to_subagents_and_workflows() {
     app.wait_for("text:Started a subagent: Find the answer").unwrap();
 
     // A workflow fans out to two children and returns their answers.
-    app.type_text("text:Message this task", "Run a workflow").unwrap();
+    app.type_text("id:composer", "Run a workflow").unwrap();
     app.submit("text:Run a workflow").unwrap();
     app.wait_for_within(r#"text:Workflow gave [ "Checked alpha", "Checked beta" ]"#, long).unwrap();
     app.wait_for("text:alpha").unwrap();
