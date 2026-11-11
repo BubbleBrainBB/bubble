@@ -38,6 +38,9 @@ fn model_server(seen: &Path) -> String {
             if system.contains("- notes-helper: Keeps notes tidy") && system.contains("mcp__echo__echo") {
                 std::fs::write(&seen, "").ok();
             }
+            if system.contains("gave this task full access") {
+                std::fs::write(seen.with_extension("full"), "").ok();
+            }
             let last = request["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or_default();
             let result = last["content"].as_str().unwrap_or_default().to_owned();
             let events = if last["role"] != "tool" {
@@ -86,6 +89,17 @@ for line in sys.stdin:
         sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": reply}) + "\n"); sys.stdout.flush()
 "#;
 
+/// Waits until `selector` matches `count` times, failing if a question
+/// shows up meanwhile.
+fn wait_for_count(app: &mut Headless, selector: &str, count: usize, within: Duration) {
+    let deadline = std::time::Instant::now() + within;
+    while app.screen().count(selector).unwrap() < count {
+        assert!(std::time::Instant::now() < deadline, "{selector} never reached {count}");
+        assert_eq!(app.screen().count("text:Allow once").unwrap(), 0, "full access asked anyway");
+        app.wait(Duration::from_millis(50)).unwrap();
+    }
+}
+
 #[test]
 fn tasks_use_mcp_tools_and_settings_show_what_is_there() {
     let root = std::env::temp_dir().join(format!("bubble-native-tools-{}", std::process::id()));
@@ -120,6 +134,11 @@ fn tasks_use_mcp_tools_and_settings_show_what_is_there() {
         std::env::set_var("BUBBLE_NO_SHELL_ENV", "1");
     }
 
+    // New work starts with the Manager; this test starts from a task already made.
+    bubble_store::Store::open(home.join("native/bubble.db"))
+        .unwrap()
+        .create_task(bubble_store::NewTask { title: "Echo", project_cwd: Some(project.to_str().unwrap()), origin: bubble_store::Origin::User })
+        .unwrap();
     let mut app = Headless::start(EngineConfig::new(Root::of::<bubble_app::App>())).unwrap();
     app.set_viewport(nsh_core::element::size(nsh_core::element::px(1280.0), nsh_core::element::px(1400.0)))
         .unwrap();
@@ -137,20 +156,45 @@ fn tasks_use_mcp_tools_and_settings_show_what_is_there() {
 
     // A task loads the tool, asks before calling it, and gets its answer.
     app.press("id:nav-tasks").unwrap();
-    app.press("text:New task").unwrap();
-    app.type_text("text:What needs doing?", "Echo").unwrap();
-    app.on_pick_paths(vec![project.clone()]).unwrap();
-    app.press("Choose a project folder").unwrap();
-    app.wait_for("demo").unwrap();
-    app.press("Create").unwrap();
+    app.press("id:side-Echo").unwrap();
     app.type_text("text:Message this task", "Echo hi").unwrap();
     app.submit("text:Echo hi").unwrap();
-    app.wait_for_within("text:Loaded tools", long).unwrap();
+    // The calls so far fold into one row; the question stays out, and the
+    // group holding the waiting call opens by itself.
+    app.wait_for_within("text:Waiting for your approval", long).unwrap();
     app.wait_for_within("Use echo from the echo MCP server", long).unwrap();
+    app.press("label:Show work").unwrap();
+    app.wait_for("text:Loaded tools").unwrap();
     app.press("Allow once").unwrap();
     app.wait_for_within("text:The server said: echo: hi", long).unwrap();
+    // Done, the turn's work folds under "Worked for"; opened, it is all there.
+    app.wait_for("text:/^Worked for /").unwrap();
+    app.press("label:Worked").unwrap();
+    // The group opened itself only while its call waited; it opens again.
+    app.press("text:Called 2 tools").unwrap();
     app.wait_for("text:Used echo from echo").unwrap();
     assert!(seen.exists(), "the skill list and the deferred tool reached the system prompt");
+
+    // A command waits for a yes; turning on full access answers it.
+    app.type_text("id:composer", "Echo again").unwrap();
+    app.submit("id:composer").unwrap();
+    app.wait_for_within("text:Allow once", long).unwrap();
+    app.press("label:Access").unwrap();
+    app.press("label:Full access").unwrap();
+    app.wait_for("text:Full access").unwrap();
+    wait_for_count(&mut app, "text:The server said: echo: hi", 2, long);
+
+    // With full access the next message goes ahead without asking, and
+    // the agent is told so.
+    app.type_text("id:composer", "Echo once more").unwrap();
+    app.submit("id:composer").unwrap();
+    wait_for_count(&mut app, "text:The server said: echo: hi", 3, long);
+    assert!(seen.with_extension("full").exists(), "the agent was told it has full access");
+
+    // Back to asking first.
+    app.press("label:Access").unwrap();
+    app.press("label:Ask first").unwrap();
+    app.wait_for("text:Ask first").unwrap();
 
     std::fs::remove_dir_all(&root).ok();
 }

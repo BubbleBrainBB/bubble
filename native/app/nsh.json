@@ -5,5 +5,5 @@
   "build": 1,
   "rust": ".",
   "root": "App",
-  "appearance": "light"
+  "appearance": "system"
 }

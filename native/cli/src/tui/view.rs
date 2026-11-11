@@ -113,7 +113,7 @@ fn welcome(tui: Tui) -> impl IntoElement {
                 .child(muted(move || info().map(|i| format!("{} · {}", i.model, i.thinking.as_str())).unwrap_or_else(|| "Starting…".into())))
                 .child(muted(move || info().map(|i| home_relative(&i.cwd)).unwrap_or_default()))
                 .child(view().h(row(1.0)))
-                .child(muted("/help for commands · Tab switches Build/Plan · Esc stops")),
+                .child(muted("/help for commands · Tab cycles Build/Plan/Bypass · Esc stops")),
         )
 }
 
@@ -751,7 +751,7 @@ pub fn screen(tui: Tui) -> impl IntoElement {
         let list = tui.draft.with_untracked(|d| suggestions(tui, d));
         match list.get(at.get_untracked()) {
             Some(s) => tui.draft.set(s.complete.clone()),
-            None => tui.toggle_plan(),
+            None => tui.cycle_mode(),
         }
     });
     on_key_with("ctrl+o", KeyOptions { when: When::Always, repeat: false }, move |_| tui.expanded.update(|e| *e = !*e));

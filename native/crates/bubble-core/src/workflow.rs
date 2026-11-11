@@ -378,9 +378,11 @@ pub async fn execute(children: &Arc<Children>, call: &ToolCall) -> ToolOutput {
     let dispatch: Dispatch = {
         let children = children.clone();
         let members = members.clone();
+        let parent_call_id = call.id.clone();
         Arc::new(move |spec: AgentSpec| {
             let children = children.clone();
             let members = members.clone();
+            let parent_call_id = parent_call_id.clone();
             Box::pin(async move {
                 let opts = &spec.opts;
                 let text = |key: &str| opts[key].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
@@ -390,6 +392,7 @@ pub async fn execute(children: &Arc<Children>, call: &ToolCall) -> ToolOutput {
                 };
                 let schema = opts.get("schema").filter(|s| !s.is_null()).cloned();
                 let snapshot = children.spawn(&spec.prompt, SpawnOptions {
+                    parent_call_id: Some(parent_call_id),
                     profile: text("agentType").unwrap_or_else(|| "default".into()),
                     description: text("label"),
                     model: text("model"),

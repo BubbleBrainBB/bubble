@@ -1,5 +1,5 @@
 //! The icon rail on the window chrome, and the sidebar inside the card:
-//! the Manager, New Task, and every project with its tasks.
+//! the Manager, the pages, and every project with its tasks.
 
 use std::collections::HashSet;
 
@@ -12,11 +12,13 @@ use crate::ui::{icon, project_name, state_icon};
 
 // Icons draw in `currentColor`, the text color of the element they sit in.
 pub const CHAT_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M3 3.5h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7l-3 2.5v-2.5H3a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M5 6.5h6M5 8.75h4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>"##;
-const INBOX_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2.5 9.5l1.8-6h7.4l1.8 6v3a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M2.5 9.5h3l1 1.5h3l1-1.5h3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"##;
 const TASKS_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 8.1l1.6 1.6 3.4-3.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const SETTINGS_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.6 3.6l1.05 1.05M11.35 11.35l1.05 1.05M3.6 12.4l1.05-1.05M11.35 4.65l1.05-1.05" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>"##;
-const COMPOSE_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M9.5 2.5H4a1.5 1.5 0 0 0-1.5 1.5v8A1.5 1.5 0 0 0 4 13.5h8a1.5 1.5 0 0 0 1.5-1.5V6.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M12 2l2 2-5.5 5.5H6.5v-2z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"##;
 pub const FOLDER_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 4.5a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"##;
+const PR_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="4.5" cy="3.75" r="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="4.5" cy="12.25" r="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="11.5" cy="12.25" r="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 5.25v5.5M11.5 10.75V6.5a2 2 0 0 0-2-2H7.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M8.75 3.25L7.5 4.5l1.25 1.25" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
+const CLOCK_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 5v3.25l2 1.25" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
+const BOOK_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M3 3.5A1.5 1.5 0 0 1 4.5 2H13v10H4.5A1.5 1.5 0 0 0 3 13.5z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M3 13.5A1.5 1.5 0 0 0 4.5 15H13v-3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"##;
+const SEARCH_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.25" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.25 10.25L13.5 13.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>"##;
 const FOLDER_PLUS_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 4.5a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 7.25v3.5M6.25 9h3.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>"##;
 
 /// How many tasks a project shows before "Show more".
@@ -25,13 +27,9 @@ const FOLDED: usize = 5;
 // --- The rail ------------------------------------------------------------------
 
 pub fn rail(app: AppState) -> impl IntoElement {
-    let inbox_count = move || {
-        app.tasks.with(|tasks| {
-            tasks
-                .iter()
-                .filter(|t| matches!(t.state, TaskState::NeedsYou | TaskState::Failed | TaskState::Review))
-                .count()
-        })
+    // Tasks marks what waits on the person: a question, or a failure.
+    let waiting = move || {
+        app.tasks.with(|tasks| tasks.iter().any(|t| matches!(t.state, TaskState::NeedsYou | TaskState::Failed)))
     };
     view()
         .w(px(RAIL_WIDTH))
@@ -41,8 +39,7 @@ pub fn rail(app: AppState) -> impl IntoElement {
         .pb(px(10.0))
         .gap(px(6.0))
         .child(rail_button(app, CHAT_ICON, "Home", Route::Home, || false))
-        .child(rail_button(app, INBOX_ICON, "Inbox", Route::Inbox, move || inbox_count() > 0))
-        .child(rail_button(app, TASKS_ICON, "Tasks", Route::Tasks, || false))
+        .child(rail_button(app, TASKS_ICON, "Tasks", Route::Tasks, waiting))
         .child(view().flex_1())
         .child(rail_button(app, SETTINGS_ICON, "Settings", Route::Settings, || false))
 }
@@ -115,7 +112,21 @@ pub fn sidebar(app: AppState) -> impl IntoElement {
                 .px(px(16.0))
                 .flex_row()
                 .items_center()
-                .child(text("Bubble").text_size(px(TITLE)).font_weight(FontWeight::SEMIBOLD)),
+                .child(text("Bubble").flex_1().text_size(px(TITLE)).font_weight(FontWeight::SEMIBOLD))
+                .child(
+                    view()
+                        .size(px(26.0))
+                        .rounded(px(7.0))
+                        .items_center()
+                        .justify_center()
+                        .cursor(Cursor::Pointer)
+                        .bg(move || if app.route.get() == Route::Search { item_active() } else { side() })
+                        .hover(|s| s.bg(item_hover()))
+                        .label("Search")
+                        .test_id("nav-search")
+                        .on_press(move || app.route.set(Route::Search))
+                        .child(icon(SEARCH_ICON, 15.0).text_color(secondary())),
+                ),
         )
         .child(
             view()
@@ -127,15 +138,9 @@ pub fn sidebar(app: AppState) -> impl IntoElement {
                         .child(icon(CHAT_ICON, 15.0).text_color(secondary()))
                         .child(text("Manager").text_size(px(BODY)).text_color(ink())),
                 )
-                .child(
-                    side_row(|| false)
-                        .on_press(move || {
-                            app.composing_task.set(true);
-                            app.route.set(Route::Tasks);
-                        })
-                        .child(icon(COMPOSE_ICON, 15.0).text_color(secondary()))
-                        .child(text("New Task").text_size(px(BODY)).text_color(ink())),
-                ),
+                .child(page_row(app, PR_ICON, "Pull requests", Route::PullRequests))
+                .child(page_row(app, CLOCK_ICON, "Automations", Route::Automations))
+                .child(page_row(app, BOOK_ICON, "Skills", Route::Skills)),
         )
         .child(
             view()
@@ -155,9 +160,18 @@ pub fn sidebar(app: AppState) -> impl IntoElement {
                         .justify_center()
                         .cursor(Cursor::Pointer)
                         .hover(|s| s.bg(item_hover()))
+                        // New work starts with the Manager: the picked folder
+                        // goes into its composer.
                         .on_press(move || {
-                            app.composing_task.set(true);
-                            app.route.set(Route::Tasks);
+                            let picked = pick_paths(nsh_core::file_dialog::OpenDialog::folders().button_label("Use folder"));
+                            spawn(async move {
+                                if let Ok(Some(paths)) = picked.await {
+                                    if let Some(path) = paths.into_iter().next() {
+                                        app.manager_draft.set(Some(format!("In {}: ", path.display())));
+                                        app.route.set(Route::Home);
+                                    }
+                                }
+                            });
                         })
                         .label("Task in a new project")
                         .child(icon(FOLDER_PLUS_ICON, 15.0).text_color(muted())),
@@ -238,6 +252,17 @@ fn project_group(app: AppState, group: ReadSignal<Group>, unfolded: Signal<HashS
                     });
                 })
         }))
+}
+
+/// A sidebar row that opens a page.
+fn page_row(app: AppState, markup: &'static str, label: &'static str, route: Route) -> View {
+    let target = route.clone();
+    let current = computed(move || app.route.get() == route);
+    side_row(move || current.get())
+        .test_id(&format!("nav-{}", label.to_lowercase().replace(' ', "-")))
+        .on_press(move || app.route.set(target.clone()))
+        .child(icon(markup, 15.0).text_color(secondary()))
+        .child(text(label).text_size(px(BODY)).text_color(ink()))
 }
 
 /// A sidebar row: a soft fill while it is where the window is.

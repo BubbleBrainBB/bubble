@@ -444,6 +444,19 @@ impl Gh {
         Ok(out.trim().to_owned())
     }
 
+    /// The repository's open pull requests (30 at most).
+    pub async fn open_prs(&self, repo: &str) -> Result<Vec<PrSummary>> {
+        let json = self
+            .run(&["pr", "list", "--repo", repo, "--state", "open", "--json", "number,title,url,isDraft,state", "--limit", "30"], None)
+            .await?;
+        Ok(serde_json::from_str(&json)?)
+    }
+
+    /// Squashes and merges a pull request.
+    pub async fn merge_pr(&self, repo: &str, number: u64) -> Result<()> {
+        self.run(&["pr", "merge", &number.to_string(), "--repo", repo, "--squash"], None).await.map(|_| ())
+    }
+
     pub async fn close_issue(&self, repo: &str, number: u64) -> Result<()> {
         self.run(&["issue", "close", &number.to_string(), "--repo", repo], None).await.map(|_| ())
     }
@@ -456,6 +469,18 @@ impl Gh {
         }
         Ok(self.run(&args, Some(cwd)).await?.trim().lines().last().unwrap_or_default().to_owned())
     }
+}
+
+/// A pull request as `gh pr list` gives it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrSummary {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    #[serde(rename = "isDraft", default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub state: String,
 }
 
 /// The GitHub repository a folder's `origin` remote points at.

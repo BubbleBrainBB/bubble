@@ -29,8 +29,11 @@ pub struct Worktree {
     pub changed: Option<bool>,
     /// `git diff --stat` and the new files, when it did.
     pub diff_stat: String,
-    /// It was unchanged and is gone.
+    /// It is gone: it was unchanged, applied or discarded.
     pub removed: bool,
+    /// Its changes were applied to the repository it came from.
+    #[serde(default)]
+    pub applied: bool,
 }
 
 async fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -67,7 +70,7 @@ pub async fn create(cwd: &Path, agent_id: &str) -> Result<Worktree, String> {
         .unwrap_or_default();
     let child_cwd = path.join(relative);
     let _ = std::fs::create_dir_all(&child_cwd);
-    Ok(Worktree { path, root, cwd: child_cwd, changed: None, diff_stat: String::new(), removed: false })
+    Ok(Worktree { path, root, cwd: child_cwd, changed: None, diff_stat: String::new(), removed: false, applied: false })
 }
 
 /// Looks at a finished child's worktree: unchanged ones are removed,
@@ -86,6 +89,80 @@ pub async fn finish(worktree: &mut Worktree) {
         let target = worktree.path.display().to_string();
         worktree.removed = git(&worktree.root, &["worktree", "remove", "--force", &target]).await.is_ok();
     }
+}
+
+/// The worktree's changes, new files included, as a patch against the
+/// commit it came from.
+pub async fn patch(worktree: &Worktree) -> Result<String, String> {
+    git(&worktree.path, &["add", "-A"]).await?;
+    git(&worktree.path, &["diff", "--cached", "--binary", "HEAD"]).await
+}
+
+/// What changed in the repository `dir` is in since its last commit, new
+/// files included, as one patch (paths from the repository's top); the
+/// index is not touched.
+pub async fn working_changes(dir: &Path) -> Result<String, String> {
+    let root = git(dir, &["rev-parse", "--show-toplevel"]).await.map(|out| PathBuf::from(out.trim()))?;
+    let mut patch = match git(&root, &["diff", "HEAD", "--no-color"]).await {
+        Ok(patch) => patch,
+        // No commit yet.
+        Err(_) => git(&root, &["diff", "--no-color"]).await?,
+    };
+    let untracked = git(&root, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
+    for file in untracked.split('\0').filter(|f| !f.is_empty()) {
+        let path = root.join(file);
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        let text = (meta.len() <= 200 * 1024).then(|| std::fs::read_to_string(&path).ok()).flatten();
+        patch.push_str(&format!("diff --git a/{file} b/{file}\nnew file mode 100644\n"));
+        match text {
+            Some(text) if !text.is_empty() => {
+                let lines: Vec<&str> = text.lines().collect();
+                patch.push_str(&format!("--- /dev/null\n+++ b/{file}\n@@ -0,0 +1,{} @@\n", lines.len()));
+                for line in lines {
+                    patch.push('+');
+                    patch.push_str(line);
+                    patch.push('\n');
+                }
+            }
+            Some(_) => {}
+            None => patch.push_str(&format!("Binary files /dev/null and b/{file} differ\n")),
+        }
+    }
+    Ok(patch)
+}
+
+/// Puts the worktree's changes into the repository it came from (as a
+/// plain patch, else merged with the repository's own edits), then removes
+/// it.
+pub async fn apply(worktree: &mut Worktree) -> Result<(), String> {
+    if worktree.removed {
+        return Err("The worktree is gone.".into());
+    }
+    let patch = patch(worktree).await?;
+    if !patch.trim().is_empty() {
+        let file = std::env::temp_dir().join(format!("bubble-apply-{}.patch", crate::time::unique_id()));
+        std::fs::write(&file, &patch).map_err(|e| format!("{}: {e}", file.display()))?;
+        let target = file.display().to_string();
+        let applied = match git(&worktree.root, &["apply", "--whitespace=nowarn", &target]).await {
+            Ok(_) => Ok(()),
+            Err(_) => git(&worktree.root, &["apply", "--3way", "--whitespace=nowarn", &target])
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("The changes do not apply to {}: {e}", worktree.root.display())),
+        };
+        let _ = std::fs::remove_file(&file);
+        applied?;
+    }
+    worktree.applied = true;
+    discard(worktree).await;
+    Ok(())
+}
+
+/// Removes the worktree and what it changed.
+pub async fn discard(worktree: &mut Worktree) {
+    let target = worktree.path.display().to_string();
+    let _ = git(&worktree.root, &["worktree", "remove", "--force", &target]).await;
+    worktree.removed = !worktree.path.exists();
 }
 
 /// `path` with `.` and `..` worked out, without touching the disk.
@@ -199,5 +276,24 @@ mod tests {
         assert!(changed.path.exists(), "kept for review");
         assert_eq!(std::fs::read_to_string(repo.join("app/a.txt")).unwrap(), "one\n", "the parent's tree is untouched");
         assert!(create(&std::env::temp_dir(), "agent_3").await.unwrap_err().contains("git repository"));
+
+        // Applied: the parent's tree gets the edit and the new file; the
+        // worktree is gone.
+        let patch = patch(&changed).await.unwrap();
+        assert!(patch.contains("+two") && patch.contains("new.txt"), "{patch}");
+        apply(&mut changed).await.unwrap();
+        assert!(changed.applied && changed.removed && !changed.path.exists());
+        assert_eq!(std::fs::read_to_string(repo.join("app/a.txt")).unwrap(), "two\n");
+        assert_eq!(std::fs::read_to_string(repo.join("new.txt")).unwrap(), "x");
+
+        let changes = working_changes(&repo.join("app")).await.unwrap();
+        assert!(changes.contains("+two") && changes.contains("+++ b/new.txt\n@@ -0,0 +1,1 @@\n+x"), "{changes}");
+
+        // Discarded: nothing reaches the parent.
+        let mut thrown = create(&repo, "agent_4").await.unwrap();
+        std::fs::write(thrown.path.join("other.txt"), "y").unwrap();
+        discard(&mut thrown).await;
+        assert!(thrown.removed && !thrown.applied && !repo.join("other.txt").exists());
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }

@@ -118,6 +118,11 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
     // starts any thread that reads the environment.
     unsafe { std::env::set_var("BUBBLE_HOME", &home) };
 
+    // New work starts with the Manager; this test starts from a task already made.
+    bubble_store::Store::open(home.join("native/bubble.db"))
+        .unwrap()
+        .create_task(bubble_store::NewTask { title: "Second task", project_cwd: Some(project.to_str().unwrap()), origin: bubble_store::Origin::User })
+        .unwrap();
     let mut app = Headless::start(EngineConfig::new(Root::of::<bubble_app::App>())).unwrap();
     app.set_viewport(nsh_core::element::size(nsh_core::element::px(1280.0), nsh_core::element::px(820.0)))
         .unwrap();
@@ -149,10 +154,7 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
 
     // A second task, started by the person, waits for the free slot.
     app.press("id:nav-tasks").unwrap();
-    app.press("text:New task").unwrap();
-    app.type_text("text:What needs doing?", "Second task").unwrap();
-    // The form starts on the latest project.
-    app.press("Create").unwrap();
+    app.press("id:side-Second task").unwrap();
     app.type_text("text:Message this task", "Write the file").unwrap();
     app.submit("text:Write the file").unwrap();
     app.wait_for("Queued until another task finishes").unwrap();
@@ -180,7 +182,8 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
     app.press("Allow once").unwrap();
     let started = std::time::Instant::now();
     app.press("label:Stop").unwrap();
-    app.wait_for_within("Stopped", long).unwrap();
+    app.wait_for_within("text:/^You stopped/", long).unwrap();
+    // A stopped turn's work stays open: the lone command is its own row.
     app.wait_for("text:Ran sleep 20").unwrap();
     assert!(started.elapsed() < Duration::from_secs(10), "stopping does not wait for the command");
     app.wait_for("label:Send").unwrap();

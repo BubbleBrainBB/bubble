@@ -107,7 +107,40 @@ pub struct Image {
     pub data: String,
 }
 
+/// Larger images are refused (in base64, as the providers count).
+const MAX_IMAGE_BASE64: usize = 5 * 1024 * 1024;
+
 impl Image {
+    /// An image of `bytes`, refused when the providers would.
+    pub fn from_bytes(bytes: &[u8], media_type: &str) -> Result<Image, String> {
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        if data.len() > MAX_IMAGE_BASE64 {
+            return Err(format!("the image is {:.1} MB; images up to about 3.7 MB are sent", bytes.len() as f64 / 1e6));
+        }
+        Ok(Image { media_type: media_type.to_owned(), data })
+    }
+
+    /// The media type of an image file's extension (`png`, `JPG`, ...).
+    pub fn media_type_of(extension: &str) -> Option<&'static str> {
+        Some(match extension.to_ascii_lowercase().as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            _ => return None,
+        })
+    }
+
+    /// The image file at `path`.
+    pub fn read(path: &std::path::Path) -> Result<Image, String> {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        let kind = Image::media_type_of(ext).ok_or_else(|| format!("{} is not an image", path.display()))?;
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Image::from_bytes(&bytes, kind)
+    }
+
     pub fn data_url(&self) -> String {
         format!("data:{};base64,{}", self.media_type, self.data)
     }

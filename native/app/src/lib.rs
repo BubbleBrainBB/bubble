@@ -2,12 +2,18 @@
 //! strip and an icon rail on the window chrome, and one raised card holding
 //! the sidebar and the screen the route shows.
 
+mod automations;
+mod changes;
 mod github;
 mod manager;
 mod pages;
 mod palette;
+mod prs;
 mod sidebar;
 mod state;
+mod trace;
+mod transcript;
+mod triage;
 mod ui;
 
 use nsh_core::element::desktop::{set_title_bar, title_bar};
@@ -27,6 +33,7 @@ fn native(registry: &mut Registry) {
 pub fn App() -> impl IntoElement {
     let app = AppState::load();
     provide_context(app);
+    set_color_scheme(app.appearance.get_untracked());
     set_title_bar(nsh_core::desktop::TitleBarStyle::Hidden, Some(px(TOP_BAR)));
     view()
         .flex_1()
@@ -86,9 +93,12 @@ pub fn App() -> impl IntoElement {
                                     let route = app.route.get();
                                     untracked(move || match route {
                                         Route::Home => pages::home(app).into_element(),
-                                        Route::Inbox => pages::inbox(app).into_element(),
                                         Route::Tasks => pages::tasks(app).into_element(),
                                         Route::Task(id) => pages::task(app, id).into_element(),
+                                        Route::PullRequests => prs::page(app).into_element(),
+                                        Route::Automations => automations::page(app).into_element(),
+                                        Route::Skills => pages::skills(app).into_element(),
+                                        Route::Search => pages::search(app).into_element(),
                                         Route::Settings => pages::settings(app).into_element(),
                                     })
                                 })),

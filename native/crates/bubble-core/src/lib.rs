@@ -16,6 +16,7 @@ pub mod login;
 pub mod mcp;
 pub mod mcp_oauth;
 pub mod memory;
+pub mod mentions;
 pub mod model;
 pub mod prompt;
 pub mod provider;

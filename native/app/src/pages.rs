@@ -1,8 +1,9 @@
-//! The screens: Home (the Manager), Inbox, Tasks, a task, Settings; and
+//! The screens: Home (the Manager), Tasks, a task, Settings; and
 //! what each puts in the window's top strip.
 
 use bubble_store::{Lifecycle, RunRole, TaskState, TaskSummary};
-use nsh_core::file_dialog::OpenDialog;
+use std::rc::Rc;
+
 use nsh_core::prelude::*;
 
 use crate::palette::*;
@@ -24,20 +25,19 @@ pub fn title_bar(app: AppState, route: Route) -> AnyElement {
             .child(icon(CHAT_ICON, 15.0).text_color(secondary()))
             .child(strip_title("Manager"))
             .into_element(),
-        Route::Inbox => row.child(strip_title("Inbox")).into_element(),
+        Route::PullRequests => row.child(strip_title("Pull requests")).into_element(),
+        Route::Automations => row.child(strip_title("Automations")).into_element(),
+        Route::Skills => row.child(strip_title("Skills")).into_element(),
+        Route::Search => row.child(strip_title("Search")).into_element(),
         Route::Settings => row.child(strip_title("Settings")).into_element(),
-        Route::Tasks => row
-            .child(strip_title("Tasks").flex_1())
-            .child(when(move || !app.composing_task.get(), move || {
-                primary_button("New task", move || app.composing_task.set(true))
-            }))
-            .into_element(),
+        Route::Tasks => row.child(strip_title("Tasks").flex_1()).into_element(),
         Route::Task(id) => {
             let summary_id = id.clone();
             let summary = move || app.tasks.with(|tasks| tasks.iter().find(|t| t.task.id == summary_id).cloned());
             let for_title = summary.clone();
             let for_done = summary.clone();
-            let chips = crate::github::link_chips(app, &id);
+            let chips_id = id.clone();
+            let menu_id = id.clone();
             let start_id = id.clone();
             let can_start = {
                 let id = id.clone();
@@ -60,8 +60,9 @@ pub fn title_bar(app: AppState, route: Route) -> AnyElement {
                     })
                     .flex_1(),
                 )
-                .child(
-                    chips
+                .child(dynamic(move || {
+                    app.task_revision.get();
+                    crate::github::link_chips(app, &chips_id)
                         .into_iter()
                         .map(|(label, url)| {
                             view()
@@ -82,8 +83,8 @@ pub fn title_bar(app: AppState, route: Route) -> AnyElement {
                                 })
                                 .child(text(label).text_size(px(SMALL)).text_color(secondary()))
                         })
-                        .collect::<Vec<_>>(),
-                )
+                        .collect::<Vec<_>>()
+                }))
                 .child(when(can_start, move || {
                     let id = start_id.clone();
                     primary_button("Start", move || crate::github::start_task(app, &id))
@@ -99,16 +100,168 @@ pub fn title_bar(app: AppState, route: Route) -> AnyElement {
                         button("Mark done", move || app.set_lifecycle(&id, Lifecycle::Done)).into_element()
                     }
                 }))
+                .child(dynamic(move || {
+                    let label = if app.changes_open.get() { "Hide changes" } else { "Changes" };
+                    button(label, move || app.changes_open.update(|o| *o = !*o))
+                }))
+                .child(task_menu(app, menu_id))
                 .into_element()
         }
     }
+}
+
+const MORE_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.2" fill="currentColor"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="12.5" cy="8" r="1.2" fill="currentColor"/></svg>"##;
+
+fn menu_row(label: impl Into<SharedString>) -> impl IntoElement {
+    view()
+        .h(px(30.0))
+        .px(px(10.0))
+        .justify_center()
+        .rounded(px(6.0))
+        .child(text(label.into()).text_size(px(BODY)).text_color(ink()).number_of_lines(1))
+}
+
+fn menu_item_of(label: impl Into<SharedString>, on_select: impl Fn() + 'static) -> impl IntoElement {
+    let label = label.into();
+    nsh_base::menu_item()
+        .accessibility_label(label.clone())
+        .rounded(px(6.0))
+        .cursor(Cursor::Pointer)
+        .hover(|s| s.bg(tertiary()))
+        .on_select(move || on_select())
+        .child(menu_row(label))
+}
+
+/// The task's other actions: run it again on another model, link an issue
+/// or PR, cancel it.
+fn task_menu(app: AppState, task_id: String) -> impl IntoElement {
+    nsh_base::menu()
+        .placement(Placement::Bottom)
+        .align(Align::End)
+        .offset(px(6.0))
+        .popup_style(|s| {
+            s.bg(pane()).border(px(LINE)).border_color(border()).rounded(px(10.0)).p(px(4.0)).min_w(px(220.0)).shadow_lg()
+        })
+        .trigger(
+            view()
+                .size(px(28.0))
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .window_drag(false)
+                .cursor(Cursor::Pointer)
+                .hover(|s| s.bg(tertiary()))
+                .label("Task actions")
+                .child(icon(MORE_ICON, 16.0).text_color(secondary())),
+        )
+        .child(dynamic(move || {
+            let conversation = app.task_conversation(&task_id);
+            let lifecycle = app.tasks.with_untracked(|t| t.iter().find(|t| t.task.id == task_id).map(|t| t.task.lifecycle));
+            let mut items: Vec<AnyElement> = Vec::new();
+            if !conversation.busy.get() {
+                let models = app.models.get_untracked();
+                let id = task_id.clone();
+                items.push(
+                    nsh_base::submenu()
+                        .trigger(
+                            view()
+                                .rounded(px(6.0))
+                                .cursor(Cursor::Pointer)
+                                .hover(|s| s.bg(tertiary()))
+                                .child(menu_row("Run again on")),
+                        )
+                        .children(
+                            models
+                                .into_iter()
+                                .map(|model| {
+                                    let id = id.clone();
+                                    let chosen = model.clone();
+                                    menu_item_of(model, move || {
+                                        let conversation = app.task_conversation(&id);
+                                        if let Err(message) = conversation.rerun(app, chosen.clone()) {
+                                            log::warn!("rerun {id}: {message}");
+                                        }
+                                    })
+                                    .into_element()
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .into_element(),
+                );
+            }
+            items.push(menu_item_of("Link an issue or PR", move || app.linking.set(true)).into_element());
+            if !matches!(lifecycle, Some(Lifecycle::Done | Lifecycle::Canceled)) {
+                items.push(nsh_base::menu_separator().h(px(LINE)).my(px(4.0)).bg(hairline()).into_element());
+                let id = task_id.clone();
+                items.push(menu_item_of("Cancel task", move || app.cancel_task(&id)).into_element());
+            }
+            items
+        }))
+}
+
+/// "Link an issue or PR": what to link, typed or pasted.
+fn link_bar(app: AppState, task_id: String) -> impl IntoElement {
+    let draft = signal(String::new());
+    let problem = signal(None::<String>);
+    let busy = signal(false);
+    let submit = Rc::new(move || {
+        if busy.get_untracked() {
+            return;
+        }
+        busy.set(true);
+        crate::github::link_task(app, &task_id, &draft.get_untracked(), move |error| {
+            busy.set(false);
+            match error {
+                Some(message) => problem.set(Some(message)),
+                None => {
+                    problem.set(None);
+                    app.linking.set(false);
+                }
+            }
+        });
+    });
+    let on_submit = submit.clone();
+    view()
+        .w_full()
+        .max_w(px(READING_WIDTH - 48.0))
+        .mx(auto())
+        .mt(px(12.0))
+        .gap(px(6.0))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    nsh_base::input()
+                        .value(draft)
+                        .placeholder("#12, owner/repo#12 or a GitHub link".to_owned())
+                        .placeholder_color(move || color(muted()))
+                        .auto_focus(true)
+                        .flex_1()
+                        .h(px(32.0))
+                        .px(px(10.0))
+                        .rounded(px(8.0))
+                        .border(px(LINE))
+                        .border_color(border())
+                        .bg(pane())
+                        .text_size(px(BODY))
+                        .text_color(ink())
+                        .on_change(move |value: &str| draft.set(value.to_owned()))
+                        .on_submit(move |_: &str| on_submit()),
+                )
+                .child(primary_button("Link", move || submit()))
+                .child(button("Cancel", move || app.linking.set(false))),
+        )
+        .child(dynamic(move || {
+            problem.get().map(|message| text(message).text_size(px(SMALL)).text_color(failed()))
+        }))
 }
 
 // --- Home --------------------------------------------------------------------
 
 pub fn home(app: AppState) -> impl IntoElement {
     let conversation = app.manager_conversation();
-    let model = move || app.model_label(RunRole::Manager);
     view()
         .flex_1()
         .child(conversation_view(
@@ -117,7 +270,88 @@ pub fn home(app: AppState) -> impl IntoElement {
             "What should we work on?",
             "Tell Manager what needs doing.",
         ))
-        .child(composer(app, conversation, "Message Manager", model))
+        .child(away_row(app))
+        .child(composer(app, conversation, "Message Manager", ComposerFor::Manager))
+}
+
+/// What a GitHub event became, in a few words.
+fn outcome(disposition: &str) -> &'static str {
+    match disposition {
+        "attached" => "went to its task",
+        "pending" => "on its way to a task",
+        "created" => "new task to start",
+        "untriaged" => "being sorted",
+        "ignored" => "needed nothing",
+        _ => "recorded",
+    }
+}
+
+/// "While you were away": what GitHub brought since the person last wrote
+/// to the Manager, and what became of it; it opens to the list.
+fn away_row(app: AppState) -> impl IntoElement {
+    let open = signal(false);
+    let summary = move || {
+        let events = app.away.get();
+        let count = |d: &[&str]| events.iter().filter(|e| d.contains(&e.disposition.as_str())).count();
+        let parts: Vec<String> = [
+            (count(&["attached", "pending"]), "went to tasks"),
+            (count(&["created"]), "new tasks to start"),
+            (count(&["untriaged"]), "being sorted"),
+            (count(&["ignored"]), "needed nothing"),
+            (count(&["noted"]), "recorded"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect();
+        let things = if events.len() == 1 { "1 thing".to_owned() } else { format!("{} things", events.len()) };
+        format!("While you were away, GitHub brought {things}: {}", parts.join(", "))
+    };
+    when(move || !app.away.with(Vec::is_empty), move || {
+        view()
+            .w_full()
+            .max_w(px(READING_WIDTH - 48.0))
+            .mx(auto())
+            .px(px(24.0))
+            .pt(px(8.0))
+            .gap(px(6.0))
+            .child(
+                text(summary)
+                    .text_size(px(SMALL))
+                    .text_color(secondary())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move || open.update(|o| *o = !*o))
+                    .label("While you were away"),
+            )
+            .child(when(move || open.get(), move || {
+                view().gap(px(4.0)).child(each(
+                    move || app.away.get(),
+                    |event: &bubble_store::Event| event.id.clone(),
+                    move |event, _| away_item(app, event),
+                ))
+            }))
+    })
+}
+
+fn away_item(app: AppState, event: ReadSignal<bubble_store::Event>) -> impl IntoElement {
+    let line = move || {
+        let e = event.get();
+        let title = serde_json::from_str::<serde_json::Value>(&e.payload)
+            .ok()
+            .and_then(|p| p["title"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| e.payload.lines().next().unwrap_or_default().chars().take(80).collect());
+        format!("{} #{} {}: {} ({})", e.repo.unwrap_or_default(), e.number.unwrap_or_default(), e.kind.replace('_', " "), title, outcome(&e.disposition))
+    };
+    text(line)
+        .text_size(px(SMALL))
+        .text_color(muted())
+        .number_of_lines(1u32)
+        .cursor(Cursor::Pointer)
+        .on_press(move || {
+            if let Some(task) = event.get_untracked().task_id {
+                app.route.set(Route::Task(task));
+            }
+        })
 }
 
 // --- Task lists ----------------------------------------------------------------
@@ -154,6 +388,9 @@ fn task_row(app: AppState, task: ReadSignal<TaskSummary>) -> View {
         .child(text(move || age(task.get().task.updated_at)).min_w(px(28.0)).text_size(px(SMALL)).text_color(muted()))
 }
 
+/// How many tasks a group of the Tasks page shows before "Show all".
+const FOLD_AT: usize = 20;
+
 fn grouped(app: AppState, groups: &'static [(&'static str, &'static [TaskState])], empty: &'static str) -> impl IntoElement {
     let any = move || app.tasks.with(|tasks| tasks.iter().any(|t| groups.iter().any(|(_, s)| s.contains(&t.state))));
     scroll().flex_1().child(
@@ -181,6 +418,11 @@ fn grouped(app: AppState, groups: &'static [(&'static str, &'static [TaskState])
                             })
                         };
                         let count = move || members().len();
+                        let unfolded = signal(false);
+                        let shown = move || {
+                            let all = members();
+                            if unfolded.get() || all.len() <= FOLD_AT { all } else { all.into_iter().take(FOLD_AT).collect() }
+                        };
                         when(move || count() > 0, move || {
                             view()
                                 .child(
@@ -194,7 +436,18 @@ fn grouped(app: AppState, groups: &'static [(&'static str, &'static [TaskState])
                                         .child(text(*label).text_size(px(SMALL)).text_color(muted()))
                                         .child(text(move || count().to_string()).text_size(px(SMALL)).text_color(muted())),
                                 )
-                                .child(each(members, |t: &TaskSummary| t.task.id.clone(), move |task, _| task_row(app, task)))
+                                .child(each(shown, |t: &TaskSummary| t.task.id.clone(), move |task, _| task_row(app, task)))
+                                .child(when(move || count() > FOLD_AT, move || {
+                                    text(move || {
+                                        if unfolded.get() { "Show fewer".to_owned() } else { format!("Show all {}", count()) }
+                                    })
+                                    .px(px(12.0))
+                                    .py(px(8.0))
+                                    .text_size(px(BODY))
+                                    .text_color(muted())
+                                    .cursor(Cursor::Pointer)
+                                    .on_press(move || unfolded.update(|u| *u = !*u))
+                                }))
                         })
                     })
                     .collect::<Vec<_>>(),
@@ -202,131 +455,246 @@ fn grouped(app: AppState, groups: &'static [(&'static str, &'static [TaskState])
     )
 }
 
-pub fn inbox(app: AppState) -> impl IntoElement {
-    const GROUPS: &[(&str, &[TaskState])] = &[
-        ("Needs you", &[TaskState::NeedsYou]),
-        ("Failed", &[TaskState::Failed]),
-        ("Ready for review", &[TaskState::Review]),
-        ("To start", &[TaskState::NotStarted]),
-    ];
-    view().flex_1().child(grouped(app, GROUPS, "Nothing needs you right now."))
-}
-
 pub fn tasks(app: AppState) -> impl IntoElement {
     const GROUPS: &[(&str, &[TaskState])] = &[
+        // What waits on the person comes first.
         ("Needs you", &[TaskState::NeedsYou]),
-        ("Running", &[TaskState::Running, TaskState::Queued]),
         ("Failed", &[TaskState::Failed]),
+        ("Running", &[TaskState::Running, TaskState::Queued]),
         ("Ready for review", &[TaskState::Review]),
         ("To start", &[TaskState::NotStarted, TaskState::Waiting]),
         ("Done", &[TaskState::Done, TaskState::Canceled]),
     ];
-    view()
-        .flex_1()
-        .child(when(move || app.composing_task.get(), move || new_task_form(app, app.composing_task)))
-        .child(grouped(app, GROUPS, "No tasks yet. Start one with New task."))
-}
-
-fn new_task_form(app: AppState, composing: Signal<bool>) -> impl IntoElement {
-    let title = signal(String::new());
-    let project = signal(app.projects().into_iter().next());
-    let create = move || {
-        let title_text = title.get_untracked();
-        if title_text.trim().is_empty() {
-            return;
-        }
-        if let Some(id) = app.create_task(&title_text, project.get_untracked().as_deref()) {
-            composing.set(false);
-            app.route.set(Route::Task(id));
-        }
-    };
-    let choose_folder = move || {
-        let picked = pick_paths(OpenDialog::folders().button_label("Use folder"));
-        spawn(async move {
-            match picked.await {
-                Ok(Some(paths)) => {
-                    if let Some(path) = paths.into_iter().next() {
-                        project.set(Some(path.to_string_lossy().into_owned()));
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => log::warn!("no folder dialog: {error}"),
-            }
-        });
-    };
-    view()
-        .w_full()
-        .max_w(px(READING_WIDTH + 80.0))
-        .mx(auto())
-        .px(px(20.0))
-        .pt(px(20.0))
-        .child(
-            view()
-                .gap(px(10.0))
-                .bg(pane())
-                .border(px(LINE))
-                .border_color(border())
-                .rounded(px(16.0))
-                .shadow_md()
-                .shadow_color(rgba(0x0F17_2A10))
-                .p(px(14.0))
-                .child(
-                    nsh_base::input()
-                        .value(title)
-                        .placeholder("What needs doing?".to_owned())
-                        .placeholder_color(muted())
-                        .auto_focus(true)
-                        .px(px(4.0))
-                        .text_size(px(TITLE))
-                        .text_color(ink())
-                        .on_change(move |value: &str| title.set(value.to_owned()))
-                        .on_submit(move |_: &str| create()),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(
-                            view()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .cursor(Cursor::Pointer)
-                                .on_press(choose_folder)
-                                .child(icon(FOLDER_ICON, 14.0).text_color(secondary()))
-                                .child(
-                                    text(move || match project.get() {
-                                        Some(path) => project_name(&path),
-                                        None => "Choose a project folder".to_owned(),
-                                    })
-                                    .text_size(px(BODY))
-                                    .text_color(secondary())
-                                    .number_of_lines(1),
-                                ),
-                        )
-                        .child(button("Cancel", move || composing.set(false)))
-                        .child(primary_button("Create", create)),
-                ),
-        )
+    view().flex_1().child(grouped(app, GROUPS, "No tasks yet. Tell the Manager what needs doing."))
 }
 
 // --- A task --------------------------------------------------------------------
 
 pub fn task(app: AppState, task_id: String) -> impl IntoElement {
     let conversation = app.task_conversation(&task_id);
-    let model = move || app.model_label(RunRole::Task);
+    let link_id = task_id.clone();
+    app.linking.set(false);
+    let panel_id = task_id.clone();
     view()
         .flex_1()
-        .child(conversation_view(
-            app,
-            conversation,
-            "What should the agent do?",
-            "Describe what the agent should do, then send.",
-        ))
-        .child(composer(app, conversation, "Message this task", model))
+        .flex_row()
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(when(move || app.linking.get(), move || link_bar(app, link_id.clone())))
+                .child(conversation_view(
+                    app,
+                    conversation,
+                    "What should the agent do?",
+                    "Describe what the agent should do, then send.",
+                ))
+                .child(composer(app, conversation, "Message this task", ComposerFor::Task(task_id))),
+        )
+        .child(when(move || app.changes_open.get(), move || crate::changes::panel(app, panel_id.clone())))
+}
+
+// --- Skills ------------------------------------------------------------------
+
+pub fn skills(app: AppState) -> impl IntoElement {
+    let query = signal(String::new());
+    let shown = move || {
+        let q = query.get().to_lowercase();
+        app.skill_list.with(|list| {
+            list.iter()
+                .filter(|s| q.is_empty() || s.name.to_lowercase().contains(&q) || s.description.to_lowercase().contains(&q))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    };
+    scroll().flex_1().child(
+        view()
+            .w_full()
+            .max_w(px(READING_WIDTH + 80.0))
+            .mx(auto())
+            .px(px(20.0))
+            .pt(px(16.0))
+            .pb(px(24.0))
+            .gap(px(8.0))
+            .child(search_field("Search skills", query, "skills-search"))
+            .child(
+                text(move || {
+                    let s = app.skills.get();
+                    format!("{} skills, from {}. Tasks load the one a request needs.", app.skill_list.with(Vec::len), s.folders.join(", "))
+                })
+                .px(px(12.0))
+                .text_size(px(SMALL))
+                .text_color(muted()),
+            )
+            .child(each(shown, |s: &crate::state::SkillRow| s.name.clone(), move |skill, _| {
+                let open = signal(false);
+                view()
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .gap(px(4.0))
+                    .border_b(px(LINE))
+                    .border_color(hairline())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move || open.update(|o| *o = !*o))
+                    .label(move || format!("Skill {}", skill.get().name))
+                    .child(
+                        view()
+                            .flex_row()
+                            .gap(px(8.0))
+                            .child(text(move || skill.get().name).text_size(px(BODY)).text_color(ink()))
+                            .child(
+                                text(move || {
+                                    let s = skill.get();
+                                    if s.manual_only { format!("{}, only when asked by name", s.source) } else { s.source.to_owned() }
+                                })
+                                .text_size(px(SMALL))
+                                .text_color(muted()),
+                            ),
+                    )
+                    .child(
+                        text(move || skill.get().description)
+                            .text_size(px(SMALL))
+                            .text_color(secondary())
+                            .number_of_lines(move || if open.get() { 0_u32 } else { 2_u32 }),
+                    )
+                    .child(when(move || open.get(), move || {
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(text(move || skill.get().folder).flex_1().text_size(px(SMALL)).text_color(muted()).number_of_lines(1))
+                            .child(button("Open folder", move || {
+                                let url = format!("file://{}", skill.get_untracked().folder);
+                                spawn(async move {
+                                    let _ = open_url(url).await;
+                                });
+                            }))
+                    }))
+            })),
+    )
+}
+
+/// A one-line search input.
+fn search_field(placeholder: &'static str, query: Signal<String>, id: &'static str) -> impl IntoElement {
+    nsh_base::input()
+        .value(query)
+        .placeholder(placeholder.to_owned())
+        .placeholder_color(move || color(muted()))
+        .auto_focus(true)
+        .h(px(34.0))
+        .px(px(12.0))
+        .rounded(px(8.0))
+        .border(px(LINE))
+        .border_color(border())
+        .bg(pane())
+        .text_size(px(BODY))
+        .text_color(ink())
+        .test_id(id)
+        .on_change(move |v: &str| query.set(v.to_owned()))
+}
+
+// --- Search ------------------------------------------------------------------
+
+/// Around the first place `query` is in `text`, on one line.
+fn snippet(text: &str, query: &str) -> String {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = flat.to_lowercase();
+    let Some(at) = lower.find(&query.to_lowercase()) else { return flat.chars().take(120).collect() };
+    let chars: Vec<(usize, char)> = flat.char_indices().collect();
+    let index = chars.iter().position(|(i, _)| *i >= at).unwrap_or(0);
+    let start = index.saturating_sub(50);
+    let end = (index + query.chars().count() + 70).min(chars.len());
+    let piece: String = chars[start..end].iter().map(|(_, c)| c).collect();
+    format!("{}{}{}", if start > 0 { "…" } else { "" }, piece, if end < chars.len() { "…" } else { "" })
+}
+
+pub fn search(app: AppState) -> impl IntoElement {
+    let query = signal(String::new());
+    let tasks_found = move || {
+        let q = query.get().trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        app.tasks.with(|tasks| {
+            tasks
+                .iter()
+                .filter(|t| {
+                    t.task.title.to_lowercase().contains(&q)
+                        || t.task.project_cwd.as_deref().is_some_and(|p| project_name(p).to_lowercase().contains(&q))
+                })
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    };
+    let messages_found = move || {
+        let q = query.get().trim().to_owned();
+        if q.chars().count() < 2 {
+            return Vec::new();
+        }
+        let found = app.with_store(|s| s.search_messages(&q, 30)).unwrap_or_default();
+        app.tasks.with_untracked(|tasks| {
+            found
+                .into_iter()
+                .filter_map(|(task_id, text, at)| {
+                    let title = tasks.iter().find(|t| t.task.id == task_id)?.task.title.clone();
+                    Some((task_id, title, snippet(&text, &q), at))
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    scroll().flex_1().child(
+        view()
+            .w_full()
+            .max_w(px(READING_WIDTH + 80.0))
+            .mx(auto())
+            .px(px(20.0))
+            .pt(px(16.0))
+            .pb(px(24.0))
+            .gap(px(8.0))
+            .child(search_field("Search tasks and conversations", query, "search"))
+            .child(when(move || !tasks_found().is_empty(), move || {
+                view()
+                    .child(text("Tasks").px(px(12.0)).pt(px(12.0)).pb(px(4.0)).text_size(px(SMALL)).text_color(muted()))
+                    .child(each(tasks_found, |t: &TaskSummary| t.task.id.clone(), move |task, _| task_row(app, task)))
+            }))
+            .child(dynamic(move || {
+                let found = messages_found();
+                (!found.is_empty()).then(|| {
+                    view()
+                        .child(text("In conversations").px(px(12.0)).pt(px(12.0)).pb(px(4.0)).text_size(px(SMALL)).text_color(muted()))
+                        .children(
+                            found
+                                .into_iter()
+                                .map(|(task_id, title, piece, at)| {
+                                    view()
+                                        .px(px(12.0))
+                                        .py(px(8.0))
+                                        .gap(px(2.0))
+                                        .rounded(px(8.0))
+                                        .cursor(Cursor::Pointer)
+                                        .hover(|s| s.bg(item_hover()))
+                                        .label(format!("Found in {title}"))
+                                        .on_press(move || app.route.set(Route::Task(task_id.clone())))
+                                        .child(
+                                            view()
+                                                .flex_row()
+                                                .gap(px(8.0))
+                                                .child(text(title).flex_1().text_size(px(BODY)).text_color(ink()).number_of_lines(1))
+                                                .child(text(age(at)).text_size(px(SMALL)).text_color(muted())),
+                                        )
+                                        .child(text(piece).text_size(px(SMALL)).text_color(secondary()).number_of_lines(2))
+                                        .into_element()
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                })
+            }))
+            .child(when(
+                move || query.with(|q| q.trim().chars().count() >= 2) && tasks_found().is_empty() && messages_found().is_empty(),
+                move || view().pt(px(60.0)).items_center().child(text("Nothing found.").text_size(px(BODY)).text_color(muted())),
+            )),
+    )
 }
 
 // --- Settings ------------------------------------------------------------------
@@ -384,6 +752,7 @@ pub fn settings(app: AppState) -> impl IntoElement {
                     ),
             )
             .child(reasoning_settings(app))
+            .child(appearance_settings(app))
             .child(account_settings(app))
             .child(tool_settings(app))
             .child(github_settings(app))
@@ -391,6 +760,44 @@ pub fn settings(app: AppState) -> impl IntoElement {
                 text(move || app.problem.get().unwrap_or_default()).text_size(px(SMALL)).text_color(failed())
             })),
     )
+}
+
+/// Light, dark, or as the system is.
+fn appearance_settings(app: AppState) -> impl IntoElement {
+    use nsh_core::platform::Appearance;
+    let options = [("As the system", Appearance::System), ("Light", Appearance::Light), ("Dark", Appearance::Dark)];
+    view()
+        .gap(px(8.0))
+        .child(
+            view()
+                .gap(px(2.0))
+                .child(text("Appearance").text_size(px(BODY)).text_color(ink()))
+                .child(text("Follows the system unless you choose").text_size(px(SMALL)).text_color(muted())),
+        )
+        .child(
+            view().flex_row().gap(px(8.0)).children(
+                options
+                    .into_iter()
+                    .map(|(label, appearance)| {
+                        let chosen = move || app.appearance.get() == appearance;
+                        view()
+                            .h(px(30.0))
+                            .px(px(12.0))
+                            .justify_center()
+                            .rounded(px(8.0))
+                            .border(px(LINE))
+                            .border_color(border())
+                            .bg(move || if chosen() { tertiary() } else { pane() })
+                            .cursor(Cursor::Pointer)
+                            .hover(|s| s.bg(tertiary()))
+                            .on_press(move || app.set_appearance(appearance))
+                            .label(format!("Appearance {label}"))
+                            .child(text(label).text_size(px(BODY)).text_color(move || if chosen() { ink() } else { secondary() }))
+                            .into_element()
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        )
 }
 
 /// How hard models think, for every model; each takes the nearest level it

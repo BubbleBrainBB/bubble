@@ -239,12 +239,17 @@ fn first_line(text: &str) -> String {
 /// Runs `call` in `cwd`. Failures become error output for the model rather
 /// than errors of the run.
 pub async fn execute(call: &ToolCall, cwd: &Path) -> ToolOutput {
+    execute_live(call, cwd, &|_| {}).await
+}
+
+/// As [`execute`], handing a command's output to `live` as it comes.
+pub async fn execute_live(call: &ToolCall, cwd: &Path, live: &(dyn Fn(String) + Sync)) -> ToolOutput {
     let args = call.arguments_json();
     let result = match call.name.as_str() {
         "read" => read(&args, cwd),
         "write" => write(&args, cwd),
         "edit" => edit(&args, cwd),
-        "bash" => bash(&args, cwd).await,
+        "bash" => bash(&args, cwd, live).await,
         "grep" => grep(&args, cwd),
         "ls" => ls(&args, cwd),
         other => Err(anyhow!("there is no tool called {other}")),
@@ -318,7 +323,8 @@ fn login_shell() -> String {
     std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".to_owned())
 }
 
-async fn bash(args: &Value, cwd: &Path) -> Result<ToolOutput> {
+async fn bash(args: &Value, cwd: &Path, live: &(dyn Fn(String) + Sync)) -> Result<ToolOutput> {
+    use tokio::io::AsyncReadExt;
     let command = str_arg(args, "command")?;
     let timeout = args["timeout_seconds"]
         .as_u64()
@@ -331,10 +337,37 @@ async fn bash(args: &Value, cwd: &Path) -> Result<ToolOutput> {
         .arg(command)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     crate::detach_async(&mut child);
-    let output = match tokio::time::timeout(timeout, child.output()).await {
-        Ok(output) => output.with_context(|| format!("starting {}", login_shell()))?,
+    let mut child = child.spawn().with_context(|| format!("starting {}", login_shell()))?;
+    let (Some(mut out), Some(mut err)) = (child.stdout.take(), child.stderr.take()) else {
+        bail!("the command's output could not be read");
+    };
+    // Both streams as they come (for the live view), and each kept whole
+    // for the result, stdout before stderr as before.
+    let run = async {
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let (mut a, mut b) = ([0u8; 4096], [0u8; 4096]);
+        let (mut out_done, mut err_done) = (false, false);
+        while !(out_done && err_done) {
+            tokio::select! {
+                n = out.read(&mut a), if !out_done => match n {
+                    Ok(0) | Err(_) => out_done = true,
+                    Ok(n) => { stdout.extend_from_slice(&a[..n]); live(String::from_utf8_lossy(&a[..n]).into_owned()); }
+                },
+                n = err.read(&mut b), if !err_done => match n {
+                    Ok(0) | Err(_) => err_done = true,
+                    Ok(n) => { stderr.extend_from_slice(&b[..n]); live(String::from_utf8_lossy(&b[..n]).into_owned()); }
+                },
+            }
+        }
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>(std::process::Output { status, stdout, stderr })
+    };
+    let output = match tokio::time::timeout(timeout, run).await {
+        Ok(output) => output.with_context(|| format!("running {}", login_shell()))?,
         Err(_) => return Ok(ToolOutput::error(format!("The command ran longer than {}s and was stopped.", timeout.as_secs()))),
     };
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -468,6 +501,18 @@ mod tests {
         let out = execute(&call("write", json!({"path": "docs/new/notes.md", "content": "hello"})), &dir).await;
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(std::fs::read_to_string(dir.join("docs/new/notes.md")).unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn bash_hands_over_its_output_as_it_comes_and_keeps_the_result_shape() {
+        let dir = std::env::temp_dir();
+        let call = ToolCall { id: "x".into(), name: "bash".into(), arguments: r#"{"command":"printf one; sleep 0.2; printf two >&2"}"#.into() };
+        let seen = std::sync::Mutex::new(Vec::<String>::new());
+        let output = execute_live(&call, &dir, &|chunk| seen.lock().unwrap().push(chunk)).await;
+        let seen = seen.into_inner().unwrap();
+        assert!(seen.len() >= 2, "{seen:?}");
+        assert_eq!(seen.concat(), "onetwo");
+        assert_eq!(output.content, "one\ntwo");
     }
 
     #[tokio::test]

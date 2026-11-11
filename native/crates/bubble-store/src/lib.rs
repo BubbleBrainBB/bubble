@@ -17,7 +17,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 
 /// The schema version this build writes (`PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {
@@ -69,6 +69,8 @@ pub enum Origin {
     Github,
     /// A session of the command-line agent.
     Cli,
+    /// Started on a schedule.
+    Automation,
 }
 
 impl Origin {
@@ -78,6 +80,7 @@ impl Origin {
             Origin::User => "user",
             Origin::Github => "github",
             Origin::Cli => "cli",
+            Origin::Automation => "automation",
         }
     }
 
@@ -87,6 +90,7 @@ impl Origin {
             "user" => Origin::User,
             "github" => Origin::Github,
             "cli" => Origin::Cli,
+            "automation" => Origin::Automation,
             other => bail!("unknown task origin {other:?}"),
         })
     }
@@ -332,7 +336,8 @@ pub struct Event {
     pub payload: String,
     pub task_id: Option<String>,
     /// `pending` (waiting to reach its task), `attached`, `created`,
-    /// `ignored`.
+    /// `ignored`, `untriaged` (waiting for the triage session) or `noted`
+    /// (recorded only).
     pub disposition: String,
     pub created_at: i64,
 }
@@ -613,7 +618,17 @@ impl Store {
 
     /// Appends a message with its structured `content` (JSON).
     pub fn append_message_with(&self, run_id: &str, role: MessageRole, text: &str, content: Option<&str>) -> Result<Message> {
-        let conn = self.conn();
+        self.append_message_and_transcript(run_id, role, text, content, None)
+    }
+
+    /// Commits the model message and its desktop presentation together, so
+    /// a crash between completion and checkpoint cannot erase the reply.
+    pub fn append_message_and_transcript(
+        &self, run_id: &str, role: MessageRole, text: &str, content: Option<&str>,
+        transcript: Option<(&str, &str)>,
+    ) -> Result<Message> {
+        let mut connection = self.conn();
+        let conn = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let seq: i64 = conn.query_row(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE run_id = ?1",
             [run_id],
@@ -640,6 +655,14 @@ impl Store {
                 message.created_at
             ],
         )?;
+        if let Some((turn_id, content)) = transcript {
+            conn.execute(
+                "INSERT INTO turn_transcripts (run_id, turn_id, content) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (run_id, turn_id) DO UPDATE SET content = excluded.content",
+                params![run_id, turn_id, content],
+            )?;
+        }
+        conn.commit()?;
         Ok(message)
     }
 
@@ -658,6 +681,25 @@ impl Store {
             .query_map([run_id], message_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(messages)
+    }
+
+    /// A desktop turn's presentation checkpoint. Model history stays in
+    /// `messages`; this keeps stable item identities, timing and terminal
+    /// states that cannot be reconstructed from model messages alone.
+    pub fn save_turn_transcript(&self, run_id: &str, turn_id: &str, content: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO turn_transcripts (run_id, turn_id, content) VALUES (?1, ?2, ?3)
+             ON CONFLICT (run_id, turn_id) DO UPDATE SET content = excluded.content",
+            params![run_id, turn_id, content],
+        )?;
+        Ok(())
+    }
+
+    pub fn turn_transcripts(&self, run_id: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare("SELECT turn_id, content FROM turn_transcripts WHERE run_id = ?1 ORDER BY rowid")?;
+        Ok(statement.query_map([run_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     // --- Links ---------------------------------------------------------------
@@ -700,6 +742,35 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?)
+    }
+
+    /// Every link of `kind` (`github_pr`, `github_issue`), newest first.
+    pub fn links_of_kind(&self, kind: &str) -> Result<Vec<Link>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare("SELECT * FROM task_links WHERE kind = ?1 ORDER BY rowid DESC")?;
+        let links = statement.query_map([kind], link_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(links)
+    }
+
+    /// Tasks' messages (the person's and the agents') that contain `query`,
+    /// newest first: the task, the message's text and when it was written.
+    pub fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<(String, String, i64)>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pattern = format!("%{}%", query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        let conn = self.conn();
+        let mut statement = conn.prepare(
+            "SELECT r.task_id, m.text, m.created_at FROM messages m JOIN runs r ON r.id = m.run_id
+             WHERE r.task_id IS NOT NULL AND m.role IN ('user', 'assistant', 'external', 'system')
+               AND m.text LIKE ?1 ESCAPE '\\'
+             ORDER BY m.created_at DESC LIMIT ?2",
+        )?;
+        let found = statement
+            .query_map(params![pattern, limit as i64], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(found)
     }
 
     /// Links whose task is still open: the ones to keep an eye on.
@@ -773,6 +844,31 @@ impl Store {
             conn.prepare("SELECT * FROM events WHERE disposition = 'pending' AND task_id IS NOT NULL ORDER BY created_at, rowid")?;
         let events = statement.query_map([], event_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(events)
+    }
+
+    /// Events no rule placed, waiting for the triage session.
+    pub fn untriaged_events(&self) -> Result<Vec<Event>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare("SELECT * FROM events WHERE disposition = 'untriaged' ORDER BY created_at, rowid")?;
+        let events = statement.query_map([], event_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(events)
+    }
+
+    /// Events recorded after `since` (ms), oldest first.
+    pub fn events_since(&self, since: i64) -> Result<Vec<Event>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare("SELECT * FROM events WHERE created_at > ?1 ORDER BY created_at, rowid")?;
+        let events = statement.query_map([since], event_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(events)
+    }
+
+    pub fn get_event(&self, id: &str) -> Result<Option<Event>> {
+        Ok(self.conn().query_row("SELECT * FROM events WHERE id = ?1", [id], event_from_row).optional()?)
+    }
+
+    pub fn set_event_payload(&self, id: &str, payload: &str) -> Result<()> {
+        self.conn().execute("UPDATE events SET payload = ?2 WHERE id = ?1", params![id, payload])?;
+        Ok(())
     }
 
     pub fn events_for_task(&self, task_id: &str) -> Result<Vec<Event>> {
@@ -1135,6 +1231,19 @@ fn migrate(conn: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    if version < 4 {
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE turn_transcripts (
+               run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+               turn_id TEXT NOT NULL,
+               content TEXT NOT NULL,
+               PRIMARY KEY (run_id, turn_id)
+             );
+             PRAGMA user_version = 4;
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -1302,6 +1411,26 @@ mod tests {
     }
 
     #[test]
+    fn transcript_checkpoints_and_messages_commit_and_reopen_together() {
+        let dir = std::env::temp_dir().join(format!("bubble-transcript-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("state.sqlite");
+        let (run_id, anchor) = {
+            let store = Store::open(&path).unwrap();
+            let run = store.manager_run(None).unwrap();
+            let prompt = store.append_message(&run.id, MessageRole::User, "hello").unwrap();
+            store.save_turn_transcript(&run.id, &prompt.id, "queued").unwrap();
+            store.append_message_and_transcript(&run.id, MessageRole::Assistant, "reply", None, Some((&prompt.id, "completed"))).unwrap();
+            (run.id, prompt.id)
+        };
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.messages(&run_id).unwrap().last().unwrap().text, "reply");
+        assert_eq!(store.turn_transcripts(&run_id).unwrap(), [(anchor, "completed".into())]);
+        assert!(store.append_message_and_transcript("missing-run", MessageRole::Assistant, "lost", None, Some(("bad", "bad"))).is_err());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn interrupted_runs_are_marked_failed() {
         let store = Store::open_in_memory().unwrap();
         let t = task(&store, "Long job");
@@ -1466,5 +1595,22 @@ mod discard_tests {
         assert!(store.get_task(&empty.id).unwrap().is_none());
         assert!(!store.discard_if_empty(&used.id).unwrap());
         assert_eq!(store.cli_tasks("/p", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn messages_are_found_by_their_text() {
+        let store = Store::open_in_memory().unwrap();
+        let task = store.create_task(NewTask { title: "Fix it", project_cwd: None, origin: Origin::User }).unwrap();
+        let run = store
+            .create_run(NewRun { task_id: Some(&task.id), role: RunRole::Task, model: None, cwd: None, status: RunStatus::Idle })
+            .unwrap();
+        store.append_message(&run.id, MessageRole::User, "The parser drops 100% of tabs").unwrap();
+        store.append_message(&run.id, MessageRole::Tool, "parser output").unwrap();
+        let found = store.search_messages("PARSER", 10).unwrap();
+        assert_eq!(found.len(), 1, "tool results are not searched; case does not matter");
+        assert_eq!(found[0].0, task.id);
+        assert_eq!(store.search_messages("100%", 10).unwrap().len(), 1);
+        assert!(store.search_messages("1000%", 10).unwrap().is_empty(), "% is literal");
+        assert!(store.search_messages("  ", 10).unwrap().is_empty());
     }
 }

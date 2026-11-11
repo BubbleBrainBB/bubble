@@ -1,4 +1,5 @@
-//! The composer's helpers, as the TypeScript TUI has them: the prompts
+//! A composer's helpers (the TUI's and the app's), as the TypeScript TUI
+//! has them: the prompts
 //! typed before (`~/.bubble/input-history.jsonl`, shared with it) and
 //! `@file` mentions (completed from the project's files, their contents
 //! sent along).
@@ -6,7 +7,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use bubble_core::bubble_home;
+use crate::bubble_home;
 use serde_json::{Value, json};
 
 const HISTORY_LIMIT: usize = 1000;
@@ -38,7 +39,7 @@ pub fn history(cwd: &str) -> Vec<String> {
 
 /// Keeps `text` for the next time.
 pub fn remember(text: &str, cwd: &str) {
-    let entry = json!({ "text": text, "createdAt": bubble_core::time::now_utc().iso, "cwd": cwd });
+    let entry = json!({ "text": text, "createdAt": crate::time::now_utc().iso, "cwd": cwd });
     let path = history_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);

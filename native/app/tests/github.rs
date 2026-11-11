@@ -127,6 +127,11 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
         std::env::set_var("BUBBLE_GH_POLL_MS", "300");
     }
 
+    // New work starts with the Manager; this test starts from a task already made.
+    bubble_store::Store::open(home.join("native/bubble.db"))
+        .unwrap()
+        .create_task(bubble_store::NewTask { title: "Set up", project_cwd: Some(project.to_str().unwrap()), origin: bubble_store::Origin::User })
+        .unwrap();
     let mut app = Headless::start(EngineConfig::new(Root::of::<bubble_app::App>())).unwrap();
     app.set_viewport(nsh_core::element::size(nsh_core::element::px(1280.0), nsh_core::element::px(820.0)))
         .unwrap();
@@ -136,12 +141,7 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
     // app's first render can come late on a cold start.)
     app.wait_for_within("id:nav-tasks", long).unwrap();
     app.press("id:nav-tasks").unwrap();
-    app.press("text:New task").unwrap();
-    app.type_text("text:What needs doing?", "Set up").unwrap();
-    app.on_pick_paths(vec![project.clone()]).unwrap();
-    app.press("Choose a project folder").unwrap();
-    app.wait_for("demo").unwrap();
-    app.press("Create").unwrap();
+    app.press("id:side-Set up").unwrap();
 
     // Settings: the repository is found and set to prepare.
     app.press("id:nav-settings").unwrap();
@@ -151,7 +151,7 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
     app.wait_for("text:/^Agents work on new issues and reviews/").unwrap();
 
     // The assignment becomes a task waiting to start, linked to the issue.
-    app.press("id:nav-inbox").unwrap();
+    app.press("id:nav-tasks").unwrap();
     app.wait_for_within("#7 Login breaks", long).unwrap();
     app.press("id:side-#7 Login breaks").unwrap();
     app.wait_for("Issue #7").unwrap();

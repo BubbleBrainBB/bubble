@@ -38,6 +38,23 @@ pub const TASK_MODEL: &str = "task_model";
 pub const MAX_RUNS: &str = "max_concurrent_runs";
 pub const DEFAULT_MAX_RUNS: u32 = 4;
 pub const THINKING: &str = "thinking_level";
+/// "system", "light" or "dark".
+pub const APPEARANCE: &str = "appearance";
+/// A task's own model and effort, over the Settings ones.
+fn task_model_key(task_id: &str) -> String {
+    format!("task_model:{task_id}")
+}
+fn task_thinking_key(task_id: &str) -> String {
+    format!("task_thinking:{task_id}")
+}
+/// "full" when the task's runs the person starts need no approvals.
+fn task_access_key(task_id: &str) -> String {
+    format!("task_access:{task_id}")
+}
+/// Why a run began, when the person chose it (a rerun).
+fn run_cause_key(run_id: &str) -> String {
+    format!("run_cause:{run_id}")
+}
 /// Set while memory has extractions phase 2 has not consolidated.
 const MEMORY_PENDING: &str = "memory_phase2_pending";
 
@@ -64,54 +81,26 @@ pub struct SkillsSummary {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Route {
     Home,
-    Inbox,
     Tasks,
     Task(String),
+    PullRequests,
+    Automations,
+    Skills,
+    Search,
     Settings,
 }
 
-/// Where a tool call stands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToolStatus {
-    Running,
-    Done,
-    Failed,
-    Denied,
-}
+pub use crate::transcript::{Line, LineKind, ToolStatus, TurnStatus};
+use crate::transcript;
 
-/// What a conversation line is.
+/// A skill as the Skills page lists it.
 #[derive(Clone, Debug, PartialEq)]
-pub enum LineKind {
-    Message(MessageRole),
-    /// A tool the agent called: which, how it went, what it gave back.
-    Tool { name: String, status: ToolStatus, output: String },
-    /// The agent waits for a yes: `decided` once the person answered.
-    Approval { summary: String, detail: String, rememberable: bool, decided: Option<Decision> },
-    /// Where a task's next run begins.
-    RunStart(usize),
-    /// A run that stopped with an error.
-    Failure,
-    /// A quiet note: the person stopped the agent.
-    Notice,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Line {
-    pub id: String,
-    pub kind: LineKind,
-    pub text: String,
-    /// A reply still streaming.
-    pub pending: bool,
-    /// The model's reasoning before the reply.
-    pub reasoning: String,
-    /// When it was written (ms since the epoch).
-    pub at: i64,
-}
-
-impl Line {
-    fn new(id: impl Into<String>, kind: LineKind, text: impl Into<String>) -> Self {
-        Line { id: id.into(), kind, text: text.into(), pending: false, reasoning: String::new(), at: bubble_store::now_ms() }
-    }
+pub struct SkillRow {
+    pub name: String,
+    pub description: String,
+    pub source: &'static str,
+    pub folder: String,
+    pub manual_only: bool,
 }
 
 /// A subscription sign-in as Settings shows it.
@@ -126,7 +115,7 @@ pub struct Account {
 #[derive(Clone, Copy)]
 pub struct AppState {
     store: Stored<Option<Store>>,
-    config: Stored<Config>,
+    pub(crate) config: Stored<Config>,
     /// The app's root, which conversations and running turns belong to.
     root: Owner,
     conversations: Stored<HashMap<String, Conversation>>,
@@ -137,6 +126,8 @@ pub struct AppState {
     repo_cache: Stored<HashMap<String, Option<String>>>,
     /// Bumped when a repository's level changes.
     repo_levels: Signal<u32>,
+    /// Bumped when a task's own model or effort, or its links, change.
+    pub task_revision: Signal<u32>,
     /// Who GitHub knows the person as, or why it cannot be reached.
     pub github_status: Signal<Option<String>>,
     /// The subscriptions signed in to, and what their services offer.
@@ -152,8 +143,23 @@ pub struct AppState {
     pub hook_rules: Signal<Vec<String>>,
     pub route: Signal<Route>,
     pub tasks: Signal<Vec<TaskSummary>>,
+    /// GitHub events since the person last wrote to the Manager (Home's
+    /// "while you were away").
+    pub away: Signal<Vec<bubble_store::Event>>,
     /// The Tasks page's new-task form is open.
-    pub composing_task: Signal<bool>,
+    /// Text to put in the Manager's composer once it shows (a project the
+    /// person picked to start work in).
+    pub manager_draft: Signal<Option<String>>,
+    /// The task page's "link an issue or PR" row is open.
+    pub linking: Signal<bool>,
+    /// The task page's Changes panel is open.
+    pub changes_open: Signal<bool>,
+    /// Light, dark, or as the system is.
+    pub appearance: Signal<nsh_core::platform::Appearance>,
+    /// Prompts that start tasks on a schedule.
+    pub automations: Signal<Vec<crate::automations::Automation>>,
+    /// The person's skills, for the Skills page.
+    pub skill_list: Signal<Vec<SkillRow>>,
     pub manager_model: Signal<Option<String>>,
     pub task_model: Signal<Option<String>>,
     pub max_runs: Signal<u32>,
@@ -210,20 +216,29 @@ impl AppState {
             problem: signal((!problems.is_empty()).then(|| problems.join("\n"))),
             route: signal(Route::Home),
             tasks: signal(Vec::new()),
-            composing_task: signal(false),
+            away: signal(Vec::new()),
+            manager_draft: signal(None),
+            linking: signal(false),
+            changes_open: signal(false),
+            automations: signal(crate::automations::load(setting(crate::automations::KEY).as_deref())),
+            skill_list: signal(Vec::new()),
+            appearance: signal(appearance_of(setting(APPEARANCE).as_deref())),
             conversations: stored(HashMap::new()),
             queue: stored(VecDeque::new()),
             gh: stored(Gh::locate()),
             repo_cache: stored(HashMap::new()),
             repo_levels: signal(0),
+            task_revision: signal(0),
             github_status: signal(None),
             root: Owner::current(),
             store: stored(store),
             config: stored(config),
         };
         state.refresh_tasks();
+        state.refresh_away();
         state.resume_queue();
         github::start(state);
+        crate::automations::start(state);
         state.discover_models();
         state.start_tools();
         state.start_memory();
@@ -413,6 +428,19 @@ impl AppState {
         let roots = Skills::roots(&home, None, &paths);
         let skills = Skills::discover(&roots, &disabled);
         let user_home = dirs_home();
+        let mut rows: Vec<SkillRow> = skills
+            .all()
+            .iter()
+            .map(|skill| SkillRow {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                source: skill.source.label(),
+                folder: skill.root.display().to_string(),
+                manual_only: skill.manual_only,
+            })
+            .collect();
+        rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        self.skill_list.set(rows);
         self.skills.set(SkillsSummary {
             count: skills.visible().count(),
             folders: roots
@@ -603,6 +631,18 @@ impl AppState {
         self.thinking.set(level);
     }
 
+    pub fn set_appearance(&self, appearance: nsh_core::platform::Appearance) {
+        use nsh_core::platform::Appearance;
+        let value = match appearance {
+            Appearance::Light => "light",
+            Appearance::Dark => "dark",
+            _ => "system",
+        };
+        self.with_store(|s| s.set_setting(APPEARANCE, Some(value)));
+        self.appearance.set(appearance);
+        set_color_scheme(appearance);
+    }
+
     pub fn gh(&self) -> Option<Gh> {
         self.gh.get()
     }
@@ -656,6 +696,18 @@ impl AppState {
         })
     }
 
+    /// GitHub's events since the person last wrote to the Manager (the
+    /// last day, before they ever have).
+    pub fn refresh_away(&self) {
+        let events = self.with_store(|s| {
+            let run = s.manager_run(None)?;
+            let last = s.messages(&run.id)?.iter().filter(|m| m.role == MessageRole::User).map(|m| m.created_at).max();
+            let since = last.unwrap_or_else(|| bubble_store::now_ms() - 24 * 3600 * 1000);
+            Ok(s.events_since(since)?.into_iter().filter(|e| e.source == "github").collect::<Vec<_>>())
+        });
+        self.away.set(events.unwrap_or_default());
+    }
+
     pub fn refresh_tasks(&self) {
         if let Some(mut tasks) = self.with_store(|s| s.list_tasks()) {
             // Sessions imported from the TypeScript CLI show only in folders
@@ -689,18 +741,73 @@ impl AppState {
             RunRole::Task => self.task_model.get(),
         };
         let Some(reference) = chosen.or_else(|| self.default_model()) else { return "No model".into() };
-        let level = self.thinking.get();
-        match reference.split_once(':') {
-            Some((provider, model)) => {
-                let effective = bubble_core::model::effective_level(provider, model, level);
-                if *bubble_core::model::info(provider, model).levels == [ThinkingLevel::Off] {
-                    reference
-                } else {
-                    format!("{reference}  {}", effective.as_str())
-                }
+        label_of(&reference, self.thinking.get())
+    }
+
+    /// The model a task runs on: its own, else the Settings one.
+    pub fn task_model_of(&self, task_id: &str) -> Option<String> {
+        self.task_revision.get();
+        self.with_store(|s| s.setting(&task_model_key(task_id))).flatten().or_else(|| self.model_for(RunRole::Task))
+    }
+
+    /// The task's own model, when it has one.
+    pub fn task_model_override(&self, task_id: &str) -> Option<String> {
+        self.task_revision.get();
+        self.with_store(|s| s.setting(&task_model_key(task_id))).flatten()
+    }
+
+    /// How hard a task's model thinks: its own level, else Settings'.
+    pub fn task_thinking_of(&self, task_id: &str) -> ThinkingLevel {
+        self.task_revision.get();
+        self.with_store(|s| s.setting(&task_thinking_key(task_id)))
+            .flatten()
+            .and_then(|v| ThinkingLevel::parse(&v))
+            .unwrap_or_else(|| self.thinking.get())
+    }
+
+    pub fn set_task_model(&self, task_id: &str, model: Option<String>) {
+        self.with_store(|s| s.set_setting(&task_model_key(task_id), model.as_deref()));
+        self.task_revision.update(|v| *v += 1);
+    }
+
+    pub fn set_task_thinking(&self, task_id: &str, level: Option<ThinkingLevel>) {
+        self.with_store(|s| s.set_setting(&task_thinking_key(task_id), level.map(|l| l.as_str())));
+        self.task_revision.update(|v| *v += 1);
+    }
+
+    /// Whether the task's runs the person starts go ahead without asking.
+    pub fn task_full_access(&self, task_id: &str) -> bool {
+        self.task_revision.get();
+        self.with_store(|s| s.setting(&task_access_key(task_id))).flatten().as_deref() == Some("full")
+    }
+
+    pub fn set_task_full_access(&self, task_id: &str, full: bool) {
+        self.with_store(|s| s.set_setting(&task_access_key(task_id), full.then_some("full")));
+        self.task_revision.update(|v| *v += 1);
+        if full {
+            if let Some(conversation) = self.conversations.with(|map| map.get(task_id).copied()) {
+                conversation.allow_waiting(*self);
             }
-            None => reference,
         }
+    }
+
+    /// The levels a model can think at.
+    pub fn levels_of(&self, reference: &str) -> Vec<ThinkingLevel> {
+        match reference.split_once(':') {
+            Some((provider, model)) => bubble_core::model::info(provider, model).levels.to_vec(),
+            None => vec![ThinkingLevel::Off],
+        }
+    }
+
+    /// Stops a task's agent and its subagents and marks it canceled.
+    pub fn cancel_task(&self, task_id: &str) {
+        let conversation = self.task_conversation(task_id);
+        conversation.stop(*self);
+        // A queued one is out of the queue now; a running one stops.
+        if conversation.busy.get_untracked() {
+            conversation.stop(*self);
+        }
+        self.set_lifecycle(task_id, Lifecycle::Canceled);
     }
 
     pub fn set_model_setting(&self, role: RunRole, model: Option<String>) {
@@ -777,8 +884,14 @@ impl AppState {
             unlocked: stored(Arc::new(Mutex::new(HashSet::new()))),
             children: stored(children),
             subagents: signal(Vec::new()),
+            restored_children: stored(HashSet::new()),
             approvals: stored(HashMap::new()),
             pending: stored(String::new()),
+            active_turn: stored(String::new()),
+            active_run: stored(String::new()),
+            checkpoint_at: stored(0),
+            opened: signal(HashSet::new()),
+            following: signal(true),
             abort: stored(None),
             on_change: stored(None),
         });
@@ -786,12 +899,21 @@ impl AppState {
         // The children's progress, shown under the conversation.
         let children = conversation.children.get();
         // Children kept from before show at once.
-        conversation.subagents.set(children.snapshots());
+        let snapshots = children.snapshots();
+        conversation.lines.update(|lines| transcript::restore_child_anchors(lines, &snapshots));
+        conversation.restored_children.replace(snapshots.iter().map(|c| c.id.clone()).collect());
+        conversation.subagents.set(snapshots);
         let mut changes = children.subscribe();
+        let app = *self;
         self.root.run(|| {
             spawn(async move {
                 while changes.changed().await.is_ok() {
-                    conversation.subagents.set(children.snapshots());
+                    let snapshots = children.snapshots();
+                    let restored = conversation.restored_children.get();
+                    let new = snapshots.iter().filter(|c| !restored.contains(&c.id)).cloned().collect::<Vec<_>>();
+                    conversation.lines.update(|lines| transcript::anchor_children(lines, &new));
+                    conversation.subagents.set(snapshots);
+                    conversation.checkpoint(app, true);
                 }
             });
         });
@@ -836,6 +958,30 @@ impl AppState {
     }
 }
 
+fn appearance_of(value: Option<&str>) -> nsh_core::platform::Appearance {
+    use nsh_core::platform::Appearance;
+    match value {
+        Some("light") => Appearance::Light,
+        Some("dark") => Appearance::Dark,
+        _ => Appearance::System,
+    }
+}
+
+/// A model and the level it thinks at, as the composer shows them.
+fn label_of(reference: &str, level: ThinkingLevel) -> String {
+    match reference.split_once(':') {
+        Some((provider, model)) => {
+            let effective = bubble_core::model::effective_level(provider, model, level);
+            if *bubble_core::model::info(provider, model).levels == [ThinkingLevel::Off] {
+                reference.to_owned()
+            } else {
+                format!("{reference}  {}", effective.as_str())
+            }
+        }
+        None => reference.to_owned(),
+    }
+}
+
 fn projects_of(mut tasks: Vec<TaskSummary>) -> Vec<String> {
     tasks.sort_by(|a, b| b.task.updated_at.cmp(&a.task.updated_at));
     let mut projects: Vec<String> = Vec::new();
@@ -865,10 +1011,17 @@ pub struct Conversation {
     /// Subagents the task's agent started; they outlive its turns.
     children: Stored<Arc<Children>>,
     pub subagents: Signal<Vec<delegate::Snapshot>>,
+    restored_children: Stored<HashSet<String>>,
+    /// Disclosure choices belong to the conversation, including across page changes.
+    pub opened: Signal<HashSet<String>>,
+    pub following: Signal<bool>,
     /// Questions the agent waits on, by their line's id.
     approvals: Stored<HashMap<String, oneshot::Sender<Decision>>>,
     /// The line the next reply streams into.
     pending: Stored<String>,
+    active_turn: Stored<String>,
+    active_run: Stored<String>,
+    checkpoint_at: Stored<i64>,
     /// Cancels the running turn.
     abort: Stored<Option<tokio::task::AbortHandle>>,
     /// Called after the lines change, to keep the newest in view.
@@ -876,6 +1029,11 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    /// The subagents the task's agent started.
+    pub fn children(&self) -> Arc<Children> {
+        self.children.get()
+    }
+
     pub fn on_change(&self, f: impl Fn() + 'static) {
         self.on_change.replace(Some(Rc::new(f)));
     }
@@ -898,13 +1056,46 @@ impl Conversation {
         self.lines.update(|lines| lines.retain(|l| l.id != id));
     }
 
-    fn push(&self, line: Line) {
+    fn push(&self, mut line: Line) {
+        let turn = self.active_turn.get();
+        if !turn.is_empty() && line.turn_id.is_none() && !matches!(line.kind, LineKind::Message(MessageRole::User | MessageRole::System | MessageRole::External) | LineKind::RunStart(_)) {
+            line.turn_id = Some(turn);
+        }
         self.lines.update(|lines| lines.push(line));
     }
 
-    fn push_pending(&self, id: String) {
+    fn begin_model(&self, step: &mut usize) -> String {
+        *step += 1;
+        let turn = self.active_turn.get();
+        self.lines.update(|lines| { transcript::begin_model(lines, &turn, *step); });
+        let id = format!("{turn}:model-{}", *step);
         self.pending.replace(id.clone());
-        self.push(Line { pending: true, ..Line::new(id, LineKind::Message(MessageRole::Assistant), "") });
+        id
+    }
+
+    fn transcript_checkpoint(&self) -> Option<(String, String)> {
+        let turn = self.active_turn.get();
+        if turn.is_empty() { return None; }
+        let items = self.lines.with_untracked(|lines| lines.iter()
+            .filter(|l| l.turn_id.as_deref() == Some(&turn)).cloned().collect::<Vec<_>>());
+        serde_json::to_string(&items).ok().map(|content| (turn.strip_prefix("turn-").unwrap_or(&turn).to_owned(), content))
+    }
+
+    fn checkpoint(&self, app: AppState, force: bool) {
+        let run = self.active_run.get();
+        if run.is_empty() { return; }
+        let now = bubble_store::now_ms();
+        if !force && now - self.checkpoint_at.get() < 500 { return; }
+        if let Some((anchor, content)) = self.transcript_checkpoint() {
+            if app.with_store(|s| s.save_turn_transcript(&run, &anchor, &content)).is_some() {
+                self.checkpoint_at.replace(now);
+            }
+        }
+    }
+
+    fn turn_status(&self, status: TurnStatus) {
+        let turn = self.active_turn.get();
+        self.lines.update(|lines| transcript::set_turn_status(lines, &turn, status));
     }
 
     /// Shows a question after the tool line of `call_id`, marks the run as
@@ -916,7 +1107,10 @@ impl Conversation {
     }
 
     fn ask_with(&self, app: AppState, run_id: &str, call_id: &str, permission: Permission, respond: oneshot::Sender<Decision>) {
-        let id = format!("approval-{call_id}");
+        let turn = self.active_turn.get();
+        let tool_id = self.lines.with_untracked(|lines| lines.iter().rev().find(|l| l.turn_id.as_deref() == Some(&turn) && l.call_id.as_deref() == Some(call_id)).map(|l| l.id.clone()))
+            .unwrap_or_else(|| format!("{turn}:tool-{call_id}"));
+        let id = format!("{tool_id}:approval");
         self.approvals.with(|map| map.insert(id.clone(), respond));
         let line = Line::new(
             id,
@@ -928,11 +1122,16 @@ impl Conversation {
             },
             "",
         );
-        let tool_id = format!("tool-{call_id}");
+        let line = line.in_turn(&turn);
         self.lines.update(|lines| {
+            if let Some(tool) = transcript::tool_mut(lines, &turn, call_id) {
+                if let LineKind::Tool { status, .. } = &mut tool.kind { *status = ToolStatus::NeedsInput; }
+            }
             let at = lines.iter().position(|l| l.id == tool_id).map(|i| i + 1).unwrap_or(lines.len());
             lines.insert(at, line);
         });
+        self.turn_status(TurnStatus::NeedsInput);
+        self.checkpoint(app, true);
         app.with_store(|s| s.set_run_status(run_id, RunStatus::NeedsInput, None));
         app.refresh_tasks();
         self.changed();
@@ -947,12 +1146,20 @@ impl Conversation {
                 *decided = Some(decision);
             }
         });
+        if let Some(tool_id) = id.strip_suffix(":approval") {
+            self.update_line(tool_id, |line| {
+                if let LineKind::Tool { status, .. } = &mut line.kind { *status = ToolStatus::Running; }
+            });
+        }
         if self.approvals.with(|map| map.is_empty()) {
+            self.turn_status(TurnStatus::Working);
             if let Some(run) = self.current_run(app) {
                 app.with_store(|s| s.set_run_status(&run.id, RunStatus::Running, None));
                 app.refresh_tasks();
             }
         }
+        self.checkpoint(app, true);
+        self.changed();
     }
 
     fn current_run(&self, app: AppState) -> Option<Run> {
@@ -978,7 +1185,10 @@ impl Conversation {
             self.remove_line(&pending);
             self.queued.set(false);
             self.busy.set(false);
+            let turn = self.active_turn.get();
+            self.lines.update(|lines| transcript::finish(lines, &turn, TurnStatus::Stopped, bubble_store::now_ms()));
             self.push(Line::new(format!("stopped-{}", bubble_store::now_ms()), LineKind::Notice, "Taken out of the queue"));
+            self.checkpoint(app, true);
             app.refresh_tasks();
             self.changed();
             return;
@@ -991,7 +1201,15 @@ impl Conversation {
 
     /// Sends what the person wrote: runs the turn now, or queues it.
     pub fn send(&self, app: AppState, text: String) {
-        if let Err(message) = self.post(app, text, MessageRole::User) {
+        self.send_with(app, text, None, Vec::new());
+    }
+
+    /// Sends what the person wrote, with the files it mentions (`expanded`:
+    /// the text the model reads) and pictures.
+    pub fn send_with(&self, app: AppState, text: String, expanded: Option<String>, images: Vec<bubble_core::Image>) {
+        let content = (expanded.is_some() || !images.is_empty())
+            .then(|| ChatMessage::user_with_images(expanded.unwrap_or_else(|| text.trim().to_owned()), images));
+        if let Err(message) = self.post_to(app, text, MessageRole::User, None, content) {
             self.fail_now(&message);
         }
     }
@@ -1000,16 +1218,58 @@ impl Conversation {
     /// Manager) and starts the turn, or queues it when the limit is
     /// reached. `Ok(true)`: started; `Ok(false)`: queued.
     pub fn post(&self, app: AppState, text: String, role: MessageRole) -> Result<bool, String> {
+        self.post_to(app, text, role, None, None)
+    }
+
+    /// Runs the task again from its first message, in a new run on
+    /// `model` (which becomes the task's own).
+    pub fn rerun(&self, app: AppState, model: String) -> Result<bool, String> {
+        let Some(task_id) = self.task_id.get() else { return Err("Only a task can be rerun.".into()) };
+        if self.busy.get_untracked() {
+            return Err("Stop the agent before running the task again.".into());
+        }
+        let first = app
+            .with_store(|s| {
+                let runs = s.runs_for_task(&task_id)?;
+                let Some(run) = runs.first() else { return Ok(None) };
+                Ok(s.messages(&run.id)?
+                    .into_iter()
+                    .find(|m| matches!(m.role, MessageRole::User | MessageRole::External | MessageRole::System)))
+            })
+            .flatten()
+            .ok_or_else(|| "The task has nothing to run again yet.".to_owned())?;
+        app.set_task_model(&task_id, Some(model.clone()));
+        let content = first.content.as_deref().and_then(|c| serde_json::from_str::<ChatMessage>(c).ok());
+        self.post_to(app, first.text, first.role, Some(format!("rerun on {model}")), content)
+    }
+
+    /// `post`; with `fresh`, in a new run begun for that reason; `content`:
+    /// what the model reads, when it is more than the text.
+    fn post_to(
+        &self,
+        app: AppState,
+        text: String,
+        role: MessageRole,
+        fresh: Option<String>,
+        content: Option<ChatMessage>,
+    ) -> Result<bool, String> {
         let text = text.trim().to_owned();
-        if text.is_empty() {
+        let images = match &content {
+            Some(ChatMessage::User { images, .. }) => images.len(),
+            _ => 0,
+        };
+        if text.is_empty() && images == 0 {
             return Err("The message is empty.".into());
         }
         if self.busy.get_untracked() {
             return Err("The agent is still on its previous turn; send this when it finishes.".into());
         }
         let task_id = self.task_id.get();
-        let run_role = if task_id.is_some() { RunRole::Task } else { RunRole::Manager };
-        let model_reference = app.model_for(run_role).ok_or_else(|| {
+        let model_reference = match &task_id {
+            Some(id) => app.task_model_of(id),
+            None => app.model_for(RunRole::Manager),
+        };
+        let model_reference = model_reference.ok_or_else(|| {
             "No model is set. Choose one in Settings, or set a default model in ~/.bubble/config.json.".to_owned()
         })?;
         app.config.with(|c| c.resolve(&model_reference)).map_err(|e| format!("{e:#}"))?;
@@ -1023,7 +1283,8 @@ impl Conversation {
                 Some(task_id) => {
                     let task = s.get_task(task_id)?.ok_or_else(|| anyhow!("the task is gone"))?;
                     let runs = s.runs_for_task(task_id)?;
-                    let reusable = runs.last().filter(|r| r.status != RunStatus::Failed).cloned();
+                    let reusable =
+                        runs.last().filter(|r| r.status != RunStatus::Failed && fresh.is_none()).cloned();
                     let (run, index) = match reusable {
                         Some(run) => (run, None),
                         None => {
@@ -1034,6 +1295,9 @@ impl Conversation {
                                 cwd: task.project_cwd.as_deref(),
                                 status: RunStatus::Queued,
                             })?;
+                            if let Some(cause) = &fresh {
+                                s.set_setting(&run_cause_key(&run.id), Some(cause))?;
+                            }
                             (run, Some(runs.len() + 1))
                         }
                     };
@@ -1045,19 +1309,30 @@ impl Conversation {
             }
         });
         let (run, new_run_index) = prepared.ok_or_else(|| "The message could not be saved.".to_owned())?;
-        let content = serde_json::to_string(&ChatMessage::user(text.clone())).ok();
+        let content = serde_json::to_string(&content.unwrap_or_else(|| ChatMessage::user(text.clone()))).ok();
         let saved = app
             .with_store(|s| s.append_message_with(&run.id, role, &text, content.as_deref()))
             .ok_or_else(|| "The message could not be saved.".to_owned())?;
 
         if let Some(index) = new_run_index.filter(|&i| i > 1) {
-            self.push(Line::new(format!("{}-start", run.id), LineKind::RunStart(index), ""));
+            let cause = fresh.clone().unwrap_or_else(|| cause_of(role).to_owned());
+            let label = run_label(&cause, run.model.as_deref());
+            self.push(Line::new(format!("{}-start", run.id), LineKind::RunStart(index), label));
         }
-        self.push(Line::new(saved.id.clone(), LineKind::Message(role), text));
+        self.push(Line { images, at: saved.created_at, ..Line::new(saved.id.clone(), LineKind::Message(role), text) });
+        let turn = format!("turn-{}", saved.id);
+        self.active_turn.replace(turn.clone());
+        self.active_run.replace(run.id.clone());
+        self.pending.replace(String::new());
+        self.lines.update(|lines| transcript::begin_turn(lines, &turn, saved.created_at, if start_now { TurnStatus::Working } else { TurnStatus::Queued }));
+        self.checkpoint(app, true);
         self.changed();
+        if task_id.is_none() {
+            // The person is back: what happened is no longer "while away".
+            app.refresh_away();
+        }
         let pending = format!("pending-{}", saved.id);
         if start_now {
-            self.push_pending(pending);
             self.start_turn(app);
             Ok(true)
         } else {
@@ -1067,14 +1342,14 @@ impl Conversation {
     }
 
     /// Marks the conversation as waiting for a slot.
-    fn wait_in_queue(&self, app: AppState, pending: &str) {
+    fn wait_in_queue(&self, app: AppState, _pending: &str) {
         let Some(task_id) = self.task_id.get() else { return };
         if let Some(run) = self.current_run(app) {
             app.with_store(|s| s.set_run_status(&run.id, RunStatus::Queued, None));
         }
-        if !self.lines.with_untracked(|lines| lines.iter().any(|l| l.pending)) {
-            self.push_pending(pending.to_owned());
-        }
+        self.restore_turn_anchor(app);
+        self.turn_status(TurnStatus::Queued);
+        self.checkpoint(app, true);
         self.busy.set(true);
         self.queued.set(true);
         app.queue.with(|q| {
@@ -1086,14 +1361,34 @@ impl Conversation {
         self.changed();
     }
 
+    fn restore_turn_anchor(&self, app: AppState) {
+        if !self.active_turn.get().is_empty() { return; }
+        let Some(run) = self.current_run(app) else { return };
+        let opener = self.lines.with_untracked(|lines| lines.iter().rev().find(|l| matches!(l.kind,
+            LineKind::Message(MessageRole::User | MessageRole::System | MessageRole::External))).cloned());
+        let Some(opener) = opener else { return };
+        let turn = format!("turn-{}", opener.id);
+        self.active_turn.replace(turn.clone());
+        self.active_run.replace(run.id);
+        if !self.lines.with_untracked(|lines| lines.iter().any(|l| l.id == turn)) {
+            self.lines.update(|lines| transcript::begin_turn(lines, &turn, opener.at, TurnStatus::Queued));
+        }
+    }
+
     /// Runs the agent's turn on the run's history (the newest message is
     /// already stored).
     fn start_turn(&self, app: AppState) {
         let task_id = self.task_id.get();
         let Some(run) = self.current_run(app) else { return };
-        let role = if task_id.is_some() { RunRole::Task } else { RunRole::Manager };
-        let model = app
-            .model_for(role)
+        let reference = match &task_id {
+            Some(id) => app.task_model_of(id),
+            None => app.model_for(RunRole::Manager),
+        };
+        let thinking = match &task_id {
+            Some(id) => app.task_thinking_of(id),
+            None => app.thinking.get_untracked(),
+        };
+        let model = reference
             .ok_or_else(|| anyhow!("no model is set"))
             .and_then(|reference| app.config.with(|c| c.resolve(&reference)));
         let model = match model {
@@ -1104,7 +1399,11 @@ impl Conversation {
                 let pending = self.pending.get();
                 self.remove_line(&pending);
                 app.with_store(|s| s.set_run_status(&run.id, RunStatus::Failed, Some(&format!("{error:#}"))));
+                self.restore_turn_anchor(app);
+                let turn = self.active_turn.get();
+                self.lines.update(|lines| transcript::finish(lines, &turn, TurnStatus::Failed, bubble_store::now_ms()));
                 self.fail_now(&format!("{error:#}"));
+                self.checkpoint(app, true);
                 app.refresh_tasks();
                 return;
             }
@@ -1117,16 +1416,18 @@ impl Conversation {
                 let project = task.and_then(|t| t.project_cwd);
                 let cwd = project.as_deref().map(PathBuf::from).filter(|p| p.is_dir());
                 let tools = if cwd.is_some() { github::task_tools(app, project.as_deref()) } else { Vec::new() };
-                (with_instructions(task_prompt(&title, project.as_deref(), cwd.is_some()), cwd.as_deref()), cwd, tools)
+                let full = app.task_full_access(id) && self.driven_by_person(app, &run.id);
+                let prompt = task_prompt(&title, project.as_deref(), cwd.is_some(), full);
+                (with_instructions(prompt, cwd.as_deref()), cwd, tools)
             }
         };
         let history = app.with_store(|s| Ok(history_of(&s.messages(&run.id)?))).unwrap_or_default();
         app.with_store(|s| s.set_run_status(&run.id, RunStatus::Running, None));
         self.queued.set(false);
         self.busy.set(true);
-        if !self.lines.with_untracked(|lines| lines.iter().any(|l| l.pending)) {
-            self.push_pending(format!("pending-{}-{}", run.id, bubble_store::now_ms()));
-        }
+        self.restore_turn_anchor(app);
+        self.turn_status(TurnStatus::Working);
+        self.checkpoint(app, true);
         app.refresh_tasks();
         self.changed();
 
@@ -1138,7 +1439,7 @@ impl Conversation {
             grants: self.grants.get(),
             host_tools,
             max_tokens: MAX_TOKENS,
-            thinking: app.thinking.get_untracked(),
+            thinking,
             toolbox: None,
             unlocked: self.unlocked.get(),
             hooks: None,
@@ -1191,37 +1492,22 @@ impl Conversation {
                     Err(error) => Err(anyhow!("the turn stopped: {error}")),
                 };
                 let pending = conversation.pending.get();
-                // What streamed before a stop is kept.
-                let partial = conversation
-                    .lines
-                    .with_untracked(|lines| lines.iter().find(|l| l.id == pending).map(|l| l.text.clone()))
-                    .unwrap_or_default();
-                if stopped && !partial.trim().is_empty() {
-                    let message = ChatMessage::assistant(partial.clone());
-                    let saved = app.with_store(|s| {
-                        s.append_message_with(&run_id, MessageRole::Assistant, &partial, serde_json::to_string(&message).ok().as_deref())
-                    });
-                    if let Some(saved) = saved {
-                        conversation.update_line(&pending, |line| {
-                            line.id = saved.id;
-                            line.pending = false;
-                        });
-                    }
-                } else {
-                    conversation.remove_line(&pending);
-                }
+                let partial_message = if stopped || result.is_err() {
+                    let (partial, reasoning) = conversation.lines.with_untracked(|lines| (
+                        lines.iter().find(|l| l.id == pending).map(|l| l.text.clone()).unwrap_or_default(),
+                        lines.iter().find(|l| l.id == format!("{pending}:reasoning")).map(|l| l.reasoning.clone()).unwrap_or_default(),
+                    ));
+                    (!partial.is_empty() || !reasoning.is_empty()).then(|| ChatMessage::Assistant {
+                        text: partial, reasoning, tool_calls: Vec::new(), state: serde_json::Value::Null,
+                    })
+                } else { None };
+                let ending = if stopped { TurnStatus::Stopped } else if result.is_err() { TurnStatus::Failed } else { TurnStatus::Completed };
+                let turn = conversation.active_turn.get();
+                conversation.lines.update(|lines| transcript::finish(lines, &turn, ending, bubble_store::now_ms()));
                 match result {
                     _ if stopped => {
                         app.with_store(|s| s.set_run_status(&run_id, RunStatus::Idle, None));
-                        conversation.lines.update(|lines| {
-                            for line in lines.iter_mut() {
-                                if let LineKind::Tool { status: status @ ToolStatus::Running, output, .. } = &mut line.kind {
-                                    *status = ToolStatus::Failed;
-                                    *output = "Stopped before it finished.".into();
-                                }
-                            }
-                        });
-                        conversation.push(Line::new(format!("stopped-{}", bubble_store::now_ms()), LineKind::Notice, "Stopped"));
+
                     }
                     Ok(()) => {
                         app.with_store(|s| s.set_run_status(&run_id, RunStatus::Idle, None));
@@ -1236,6 +1522,15 @@ impl Conversation {
                         ));
                     }
                 }
+                if let Some(message @ ChatMessage::Assistant { .. }) = partial_message {
+                    let ChatMessage::Assistant { text, .. } = &message else { unreachable!() };
+                    let checkpoint = conversation.transcript_checkpoint();
+                    app.with_store(|s| s.append_message_and_transcript(&run_id, MessageRole::Assistant, text,
+                        serde_json::to_string(&message).ok().as_deref(), checkpoint.as_ref().map(|(a, c)| (a.as_str(), c.as_str()))));
+                } else {
+                    conversation.checkpoint(app, true);
+                }
+                conversation.pending.replace(String::new());
                 conversation.approvals.with(|map| map.clear());
                 conversation.busy.set(false);
                 app.refresh_tasks();
@@ -1248,14 +1543,22 @@ impl Conversation {
     /// Shows and keeps what the turn reports.
     fn apply(&self, app: AppState, run_id: &str, event: AgentEvent, step: &mut usize) {
         match event {
+            AgentEvent::ModelStarted => {
+                self.begin_model(step);
+                self.checkpoint(app, true);
+                self.changed();
+            }
             AgentEvent::Text(piece) => {
                 let pending = self.pending.get();
-                self.update_line(&pending, |line| line.text.push_str(&piece));
+                let turn = self.active_turn.get();
+                self.lines.update(|lines| transcript::text(lines, &turn, &pending, &piece));
+                self.checkpoint(app, false);
                 self.changed();
             }
             AgentEvent::Reasoning(piece) => {
                 let pending = self.pending.get();
-                self.update_line(&pending, |line| line.reasoning.push_str(&piece));
+                self.lines.update(|lines| transcript::reasoning(lines, &pending, &piece));
+                self.checkpoint(app, false);
                 self.changed();
             }
             AgentEvent::Compacted(history) => {
@@ -1269,46 +1572,39 @@ impl Conversation {
                 });
                 // Shown before the reply in progress.
                 let pending = self.pending.get();
-                let note = Line::new(format!("checkpoint-{}", bubble_store::now_ms()), LineKind::Notice, CHECKPOINT_NOTE);
+                let note = Line::new(format!("checkpoint-{}", bubble_store::now_ms()), LineKind::Notice, CHECKPOINT_NOTE).in_turn(&self.active_turn.get());
                 self.lines.update(|lines| {
-                    let at = lines.iter().position(|l| l.id == pending).unwrap_or(lines.len());
+                    let at = lines.iter().position(|l| l.id == format!("{pending}:reasoning")).unwrap_or(lines.len());
                     lines.insert(at, note);
                 });
                 self.changed();
             }
             AgentEvent::Assistant(message) => {
-                let ChatMessage::Assistant { text, tool_calls, reasoning, .. } = &message else { return };
-                let saved = app.with_store(|s| {
-                    s.append_message_with(run_id, MessageRole::Assistant, text, serde_json::to_string(&message).ok().as_deref())
+                let ChatMessage::Assistant { text, .. } = &message else { return };
+                let pending = if self.pending.get().is_empty() { self.begin_model(step) } else { self.pending.get() };
+                let turn = self.active_turn.get();
+                self.lines.update(|lines| {
+                    transcript::assistant(lines, &turn, &pending, &message);
+                    let restored = self.restored_children.get();
+                    let children = self.children.get().snapshots().into_iter().filter(|c| !restored.contains(&c.id)).collect::<Vec<_>>();
+                    transcript::anchor_children(lines, &children);
                 });
-                let finished = self.pending.get();
-                if text.trim().is_empty() && reasoning.trim().is_empty() {
-                    self.remove_line(&finished);
-                } else {
-                    let id = saved.map(|m| m.id).unwrap_or_else(|| finished.clone());
-                    let text = text.clone();
-                    let reasoning = reasoning.clone();
-                    self.update_line(&finished, move |line| {
-                        line.id = id;
-                        line.pending = false;
-                        line.text = text;
-                        line.reasoning = reasoning;
-                    });
-                }
-                for call in tool_calls {
-                    self.push(Line::new(
-                        format!("tool-{}", call.id),
-                        LineKind::Tool { name: call.name.clone(), status: ToolStatus::Running, output: String::new() },
-                        bubble_core::tools::describe(call),
-                    ));
-                }
-                if !tool_calls.is_empty() {
-                    *step += 1;
-                    self.push_pending(format!("{finished}-{step}"));
-                }
+                let checkpoint = self.transcript_checkpoint();
+                app.with_store(|s| s.append_message_and_transcript(run_id, MessageRole::Assistant, text,
+                    serde_json::to_string(&message).ok().as_deref(), checkpoint.as_ref().map(|(a, c)| (a.as_str(), c.as_str()))));
+                self.pending.replace(String::new());
                 self.changed();
             }
-            AgentEvent::ToolStarted { .. } => {}
+            AgentEvent::ToolStarted { call, .. } => {
+                let turn = self.active_turn.get();
+                self.lines.update(|lines| {
+                    if let Some(line) = transcript::tool_mut(lines, &turn, &call.id) {
+                        if let LineKind::Tool { status, .. } = &mut line.kind { *status = ToolStatus::Running; }
+                    }
+                });
+                self.checkpoint(app, true);
+                self.changed();
+            }
             AgentEvent::HostCall { call, respond } => {
                 if github::is_task_tool(&call.name) {
                     github::handle_call(app, *self, run_id, self.task_id.get(), call, respond);
@@ -1317,7 +1613,22 @@ impl Conversation {
                 }
             }
             AgentEvent::ApprovalNeeded { call, permission, respond } => {
-                self.ask_with(app, run_id, &call.id, permission, respond);
+                // Full access, read at each call so switching it applies to
+                // the next one; only while the person drives the run.
+                let full = self
+                    .task_id
+                    .get()
+                    .is_some_and(|id| app.task_full_access(&id) && self.driven_by_person(app, run_id));
+                if full {
+                    let _ = respond.send(Decision::AllowOnce);
+                } else {
+                    self.ask_with(app, run_id, &call.id, permission, respond);
+                }
+            }
+            AgentEvent::ToolOutputDelta { call_id, chunk } => {
+                let turn = self.active_turn.get();
+                self.lines.update(|lines| transcript::live_output(lines, &turn, &call_id, &chunk));
+                self.changed();
             }
             AgentEvent::ToolFinished { call_id, output, denied } => {
                 let status = if denied {
@@ -1327,11 +1638,21 @@ impl Conversation {
                 } else {
                     ToolStatus::Done
                 };
-                self.update_line(&format!("tool-{call_id}"), move |line| {
-                    if let LineKind::Tool { name, .. } = &line.kind {
-                        line.kind = LineKind::Tool { name: name.clone(), status, output: output.content };
+                let turn = self.active_turn.get();
+                let snapshots = self.children.get().snapshots();
+                let restored = self.restored_children.get();
+                let new = snapshots.iter().filter(|c| !restored.contains(&c.id)).cloned().collect::<Vec<_>>();
+                self.lines.update(|lines| {
+                    transcript::anchor_children(lines, &new);
+                    if let Some(line) = transcript::tool_mut(lines, &turn, &call_id) {
+                        if let LineKind::Tool { name, .. } = &line.kind {
+                            line.kind = LineKind::Tool { name: name.clone(), status, output: output.content };
+                        }
+                        line.live.clear();
                     }
                 });
+                self.subagents.set(snapshots);
+                self.checkpoint(app, true);
                 self.changed();
             }
             AgentEvent::ToolResults(message) => {
@@ -1340,6 +1661,25 @@ impl Conversation {
                 });
             }
             AgentEvent::Usage(_) => {}
+        }
+    }
+
+    /// Whether the person (not GitHub or the Manager) sent the run's latest
+    /// message, the one the agent is working on now.
+    fn driven_by_person(&self, app: AppState, run_id: &str) -> bool {
+        app.with_store(|s| s.messages(run_id)).is_some_and(|messages| person_spoke_last(&messages))
+    }
+
+    /// Full access was turned on: the questions waiting in a run the
+    /// person is driving are allowed.
+    fn allow_waiting(&self, app: AppState) {
+        let Some(run) = self.current_run(app) else { return };
+        if !self.driven_by_person(app, &run.id) {
+            return;
+        }
+        let waiting: Vec<String> = self.approvals.with(|map| map.keys().cloned().collect());
+        for id in waiting {
+            self.decide(app, &id, Decision::AllowOnce);
         }
     }
 
@@ -1359,11 +1699,18 @@ fn with_instructions(prompt: String, cwd: Option<&std::path::Path>) -> String {
     }
 }
 
-fn task_prompt(title: &str, project: Option<&str>, has_tools: bool) -> String {
+fn task_prompt(title: &str, project: Option<&str>, has_tools: bool, full: bool) -> String {
     let place = match (project, has_tools) {
         (Some(path), true) => format!(
             "You work in the project folder {path}. Use the tools to read, search, change files and run commands there; \
-             relative paths start in that folder. Changes and commands wait for the person's yes."
+             relative paths start in that folder. {}",
+            if full {
+                "The person gave this task full access: changes and commands go ahead without asking. \
+                 Say what a risky step will do before you take it, prefer reversible steps, and never push, \
+                 delete or expose credentials just because nothing asks."
+            } else {
+                "Changes and commands wait for the person's yes."
+            }
         ),
         (Some(path), false) => format!("The project folder {path} cannot be found, so you have no tools; say what you would do."),
         (None, _) => "The task has no project folder, so you have no tools; say what you would do and what you need.".to_owned(),
@@ -1385,11 +1732,57 @@ fn history_of(messages: &[Message]) -> Vec<ChatMessage> {
 
 /// The lines of `runs`, oldest first: messages, the tools each reply
 /// called, where each later run begins and why a failed one stopped.
+/// Who began a run, by its first message.
+/// Whether the latest message that set the agent going (not its own
+/// replies or tool results) came from the person.
+fn person_spoke_last(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, MessageRole::User | MessageRole::System | MessageRole::External))
+        .is_some_and(|m| m.role == MessageRole::User)
+}
+
+fn cause_of(role: MessageRole) -> &'static str {
+    match role {
+        MessageRole::External => "started by GitHub",
+        MessageRole::System => "started by the Manager",
+        _ => "started by you",
+    }
+}
+
+/// What a run's divider says after "Run N".
+fn run_label(cause: &str, model: Option<&str>) -> String {
+    match model {
+        Some(model) if !cause.contains(model) => format!("{cause}, on {model}"),
+        _ => cause.to_owned(),
+    }
+}
+
+/// Renames earlier lines that hold these ids, so a reused tool-call id
+/// starts fresh lines.
+fn retire(lines: &mut [Line], tool: &str, approval: &str) {
+    let count = lines.len();
+    for (index, line) in lines.iter_mut().enumerate() {
+        if line.id == tool || line.id == approval {
+            line.id = format!("{}~{index}of{count}", line.id);
+        }
+    }
+}
+
 fn lines_of(store: &Store, runs: &[Run]) -> anyhow::Result<Vec<Line>> {
     let mut lines: Vec<Line> = Vec::new();
     for (index, run) in runs.iter().enumerate() {
         if index > 0 {
-            lines.push(Line { at: run.created_at, ..Line::new(format!("{}-start", run.id), LineKind::RunStart(index + 1), "") });
+            let cause = match store.setting(&run_cause_key(&run.id))? {
+                Some(cause) => cause,
+                None => {
+                    let first = store.messages(&run.id)?.into_iter().map(|m| m.role).next();
+                    cause_of(first.unwrap_or(MessageRole::User)).to_owned()
+                }
+            };
+            let label = run_label(&cause, run.model.as_deref());
+            lines.push(Line { at: run.created_at, ..Line::new(format!("{}-start", run.id), LineKind::RunStart(index + 1), label) });
         }
         for message in store.messages(&run.id)? {
             if message.role == MessageRole::Checkpoint {
@@ -1407,15 +1800,19 @@ fn lines_of(store: &Store, runs: &[Run]) -> anyhow::Result<Vec<Line>> {
                         });
                     }
                     for call in &tool_calls {
-                        lines.push(Line::new(
-                            format!("tool-{}", call.id),
-                            LineKind::Tool {
-                                name: call.name.clone(),
-                                status: ToolStatus::Failed,
-                                output: "Interrupted before it ran.".into(),
-                            },
-                            bubble_core::tools::describe(call),
-                        ));
+                        retire(&mut lines, &format!("tool-{}", call.id), &format!("approval-{}", call.id));
+                        lines.push(Line {
+                            at: message.created_at,
+                            ..Line::new(
+                                format!("tool-{}", call.id),
+                                LineKind::Tool {
+                                    name: call.name.clone(),
+                                    status: ToolStatus::Failed,
+                                    output: "Interrupted before it ran.".into(),
+                                },
+                                bubble_core::tools::describe(call),
+                            )
+                        });
                     }
                 }
                 Some(ChatMessage::Tool { results }) => {
@@ -1434,10 +1831,15 @@ fn lines_of(store: &Store, runs: &[Run]) -> anyhow::Result<Vec<Line>> {
                         }
                     }
                 }
-                _ => {
-                    if message.role != MessageRole::Tool && !message.text.trim().is_empty() {
+                other => {
+                    let images = match &other {
+                        Some(ChatMessage::User { images, .. }) => images.len(),
+                        _ => 0,
+                    };
+                    if message.role != MessageRole::Tool && (!message.text.trim().is_empty() || images > 0) {
                         lines.push(Line {
                             at: message.created_at,
+                            images,
                             ..Line::new(message.id.clone(), LineKind::Message(message.role), message.text.clone())
                         });
                     }
@@ -1449,6 +1851,7 @@ fn lines_of(store: &Store, runs: &[Run]) -> anyhow::Result<Vec<Line>> {
             lines.push(Line { at: run.updated_at, ..Line::new(format!("{}-error", run.id), LineKind::Failure, reason) });
         }
     }
+    for run in runs { transcript::overlay(&mut lines, store.turn_transcripts(&run.id)?); }
     Ok(lines)
 }
 
@@ -1456,6 +1859,43 @@ fn lines_of(store: &Store, runs: &[Run]) -> anyhow::Result<Vec<Line>> {
 mod tests {
     use super::*;
     use bubble_core::ToolCall;
+
+    #[test]
+    fn completed_stopped_and_failed_transcripts_restore_the_same_order_state_and_duration() {
+        use crate::transcript::Phase;
+        let store = Store::open_in_memory().unwrap();
+        let run = store.manager_run(None).unwrap();
+        for status in [TurnStatus::Completed, TurnStatus::Stopped, TurnStatus::Failed] {
+            let prompt = store.append_message(&run.id, MessageRole::User, "Inspect this").unwrap();
+            let turn = format!("turn-{}", prompt.id);
+            let mut lines = vec![Line { at: prompt.created_at, ..Line::new(&prompt.id, LineKind::Message(MessageRole::User), &prompt.text) }];
+            transcript::begin_turn(&mut lines, &turn, prompt.created_at, TurnStatus::Working);
+            let id = transcript::begin_model(&mut lines, &turn, 1);
+            let commentary = ChatMessage::Assistant { text: "I will inspect it.".into(), reasoning: "**Inspecting**".into(),
+                tool_calls: vec![ToolCall { id: "reused".into(), name: "read".into(), arguments: "{\"path\":\"a\"}".into() }],
+                state: serde_json::Value::Null };
+            transcript::assistant(&mut lines, &turn, &id, &commentary);
+            store.append_message_with(&run.id, MessageRole::Assistant, "I will inspect it.", Some(&serde_json::to_string(&commentary).unwrap())).unwrap();
+            if let LineKind::Tool { status, .. } = &mut transcript::tool_mut(&mut lines, &turn, "reused").unwrap().kind { *status = ToolStatus::Done; }
+            let id = transcript::begin_model(&mut lines, &turn, 2);
+            transcript::reasoning(&mut lines, &id, "**Summarizing**");
+            transcript::text(&mut lines, &turn, &id, "Here is the result");
+            if status == TurnStatus::Completed { lines.iter_mut().find(|l| l.id == id).unwrap().phase = Phase::Final; }
+            transcript::finish(&mut lines, &turn, status, prompt.created_at + 17_500);
+            let saved = serde_json::to_string(&lines[1..]).unwrap();
+            store.save_turn_transcript(&run.id, &prompt.id, &saved).unwrap();
+            let restored = lines_of(&store, std::slice::from_ref(&run)).unwrap();
+            let start = restored.iter().position(|l| l.id == prompt.id).unwrap();
+            assert_eq!(&restored[start..], &lines, "{status:?}");
+            assert_eq!(crate::trace::layout(&restored[start..], false), crate::trace::layout(&lines, false));
+        }
+        // Later CLI history without presentation metadata remains intact.
+        let prompt = store.append_message(&run.id, MessageRole::User, "From CLI").unwrap();
+        store.append_message(&run.id, MessageRole::Assistant, "CLI reply").unwrap();
+        let restored = lines_of(&store, &[run]).unwrap();
+        assert!(restored.iter().any(|l| l.id == prompt.id));
+        assert_eq!(restored.last().unwrap().text, "CLI reply");
+    }
 
     fn message(role: MessageRole, content: Option<ChatMessage>) -> Message {
         Message {
@@ -1467,6 +1907,18 @@ mod tests {
             content: content.map(|c| serde_json::to_string(&c).unwrap()),
             created_at: 0,
         }
+    }
+
+    #[test]
+    fn full_access_follows_who_spoke_last() {
+        use MessageRole::*;
+        let run = |roles: &[MessageRole]| roles.iter().map(|r| message(*r, None)).collect::<Vec<_>>();
+        // The Manager started the run; the person's reply puts them in charge.
+        assert!(!person_spoke_last(&run(&[System, Assistant, Tool])));
+        assert!(person_spoke_last(&run(&[System, Assistant, User, Assistant, Tool])));
+        // GitHub speaking after the person hands the run back to asking.
+        assert!(!person_spoke_last(&run(&[User, Assistant, External, Assistant])));
+        assert!(!person_spoke_last(&[]));
     }
 
     #[test]

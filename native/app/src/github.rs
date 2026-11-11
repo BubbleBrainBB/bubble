@@ -126,6 +126,8 @@ async fn tick(app: AppState, gh: &Gh) {
     discover(app, gh, &watched).await;
     follow_links(app, gh, &watched).await;
     deliver_pending(app);
+    crate::triage::maybe_run(app);
+    app.refresh_away();
 }
 
 fn level_of(repos: &[&Repo], repo: &str) -> Option<Level> {
@@ -239,13 +241,17 @@ async fn discover(app: AppState, gh: &Gh, repos: &[&Repo]) {
 fn handle_notification(app: AppState, repo: &Repo, level: Level, n: &Notification) {
     let linked = app.with_store(|s| s.task_for_link(n.kind.as_str(), &n.repo, n.number as i64)).flatten();
     let starts_work = matches!(n.reason.as_str(), "assign" | "review_requested");
+    // Mentions, comments and state changes no rule places go to triage.
+    let triaged = matches!(n.reason.as_str(), "mention" | "team_mention" | "author" | "comment" | "state_change");
     let disposition = match (&linked, starts_work, level) {
         (Some(_), _, _) => "attached",
         (None, true, Level::Prepare | Level::Act) => "created",
+        (None, false, Level::Prepare | Level::Act) if triaged => "untriaged",
+        (None, _, Level::Observe) => "noted",
         _ => "ignored",
     };
     let brief = brief_for(n);
-    let payload = json!({ "reason": n.reason, "title": n.title, "brief": brief }).to_string();
+    let payload = json!({ "reason": n.reason, "title": n.title, "brief": brief, "kind": n.kind.as_str() }).to_string();
     let recorded = app.with_store(|s| {
         s.record_event(NewEvent {
             source: SOURCE,
@@ -298,7 +304,7 @@ fn brief_for(n: &Notification) -> String {
 }
 
 /// Brings waiting events to their tasks, when the task can take them.
-fn deliver_pending(app: AppState) {
+pub(crate) fn deliver_pending(app: AppState) {
     let pending = app.with_store(|s| s.pending_events()).unwrap_or_default();
     for event in pending {
         deliver(app, &event);
@@ -481,4 +487,86 @@ pub fn link_chips(app: AppState, task_id: &str) -> Vec<(String, String)> {
             Some((label, format!("https://github.com/{}/{path}/{}", link.repo, link.number)))
         })
         .collect()
+}
+
+/// What the person typed to link a task: a GitHub link, `owner/repo#12`,
+/// or `#12` / `12` in the task's project's repository. The kind is `None`
+/// when only GitHub can tell (an issue or a PR).
+pub fn parse_link(input: &str, project_repo: Option<&str>) -> Option<(Option<Kind>, String, u64)> {
+    let input = input.trim().trim_end_matches('/');
+    if let Some(rest) = input.strip_prefix("https://github.com/").or_else(|| input.strip_prefix("github.com/")) {
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() >= 4 {
+            let kind = match parts[2] {
+                "issues" => Kind::Issue,
+                "pull" => Kind::PullRequest,
+                _ => return None,
+            };
+            let number = parts[3].split(['#', '?']).next()?.parse().ok()?;
+            return Some((Some(kind), format!("{}/{}", parts[0], parts[1]), number));
+        }
+        return None;
+    }
+    let (repo, number) = match input.split_once('#') {
+        Some(("", number)) => (project_repo?.to_owned(), number),
+        Some((repo, number)) if repo.matches('/').count() == 1 => (repo.to_owned(), number),
+        Some(_) => return None,
+        None => (project_repo?.to_owned(), input),
+    };
+    Some((None, repo, number.trim().parse().ok()?))
+}
+
+/// Links a task to the issue or PR the person typed, asking GitHub which
+/// it is when the text does not say. `done` gets the error, if any.
+pub fn link_task(app: AppState, task_id: &str, input: &str, done: impl FnOnce(Option<String>) + 'static) {
+    let project = app.with_store(|s| s.get_task(task_id)).flatten().and_then(|t| t.project_cwd);
+    let project_repo = project.as_deref().and_then(|p| app.repo_of(p));
+    let Some((kind, repo, number)) = parse_link(input, project_repo.as_deref()) else {
+        let hint = if project_repo.is_some() { "#12, owner/repo#12 or a GitHub link" } else { "owner/repo#12 or a GitHub link" };
+        return done(Some(format!("Write {hint}.")));
+    };
+    let task_id = task_id.to_owned();
+    let gh = app.gh();
+    spawn(async move {
+        let kind = match (kind, gh) {
+            (Some(kind), _) => Ok(kind),
+            (None, Some(gh)) => {
+                let path = format!("repos/{repo}/issues/{number}");
+                match background(async move { gh.run(&["api", &path, "--jq", ".pull_request.url // \"\""], None).await }).await {
+                    Ok(Ok(out)) => Ok(if out.trim().is_empty() { Kind::Issue } else { Kind::PullRequest }),
+                    Ok(Err(error)) => Err(format!("GitHub could not find {repo}#{number}: {error:#}")),
+                    Err(_) => return,
+                }
+            }
+            (None, None) => Err("Install gh, or paste the issue's or PR's link.".to_owned()),
+        };
+        let kind = match kind {
+            Ok(kind) => kind,
+            Err(message) => return done(Some(message)),
+        };
+        if app.with_store(|s| s.link(&task_id, kind.as_str(), &repo, number as i64)).is_none() {
+            return done(Some("The link could not be saved.".into()));
+        }
+        app.task_revision.update(|v| *v += 1);
+        done(None);
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn links_are_read_from_what_the_person_types() {
+        assert_eq!(
+            parse_link("https://github.com/acme/demo/pull/4/files", None),
+            Some((Some(Kind::PullRequest), "acme/demo".into(), 4))
+        );
+        assert_eq!(parse_link("github.com/acme/demo/issues/7#x", None), Some((Some(Kind::Issue), "acme/demo".into(), 7)));
+        assert_eq!(parse_link("acme/demo#12", None), Some((None, "acme/demo".into(), 12)));
+        assert_eq!(parse_link("#12", Some("acme/demo")), Some((None, "acme/demo".into(), 12)));
+        assert_eq!(parse_link("12", Some("acme/demo")), Some((None, "acme/demo".into(), 12)));
+        assert_eq!(parse_link("#12", None), None);
+        assert_eq!(parse_link("https://github.com/acme/demo/tree/main", None), None);
+    }
 }

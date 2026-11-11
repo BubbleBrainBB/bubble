@@ -2,7 +2,7 @@
 //! by `bubble-term`, its agent a [`runner`] task on the runtime.
 
 pub mod diff;
-pub mod files;
+pub use bubble_core::mentions as files;
 pub mod images;
 pub mod runner;
 pub mod state;
@@ -232,6 +232,14 @@ mod tests {
         assert_eq!(draft(&term), "");
         let history = std::fs::read_to_string(home.join("input-history.jsonl")).unwrap();
         assert!(history.contains("\"make notes\"") && !history.contains("/model"), "{history}");
+
+        // Tab on an empty draft cycles Build, Plan, Bypass and back.
+        term.key("tab");
+        wait(&mut term, "⏸ plan");
+        term.key("tab");
+        wait(&mut term, "⚠ bypass");
+        term.key("tab");
+        wait(&mut term, "build  mock:other-model");
 
         term.type_text("/context");
         term.key("enter");

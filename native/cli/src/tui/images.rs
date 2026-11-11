@@ -7,23 +7,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use base64::Engine as _;
 use bubble_core::Image;
 use regex::Regex;
-
-/// Larger images are refused (in base64, as the providers count).
-const MAX_BASE64: usize = 5 * 1024 * 1024;
-
-fn media_type(extension: &str) -> Option<&'static str> {
-    Some(match extension.to_ascii_lowercase().as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        _ => return None,
-    })
-}
 
 fn extension(media_type: &str) -> &'static str {
     match media_type {
@@ -36,11 +21,7 @@ fn extension(media_type: &str) -> &'static str {
 }
 
 fn image(bytes: &[u8], media_type: &str) -> Result<Image, String> {
-    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-    if data.len() > MAX_BASE64 {
-        return Err(format!("the image is {:.1} MB; images up to about 3.7 MB are sent", bytes.len() as f64 / 1e6));
-    }
-    Ok(Image { media_type: media_type.to_owned(), data })
+    Image::from_bytes(bytes, media_type)
 }
 
 /// The image at `raw` (`~/…`, shell-escaped spaces allowed).
@@ -50,10 +31,7 @@ pub fn read_file(raw: &str) -> Result<Image, String> {
         Some(rest) => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(rest),
         None => PathBuf::from(&unescaped),
     };
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-    let kind = media_type(ext).ok_or_else(|| format!("{} is not an image", path.display()))?;
-    let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    image(&bytes, kind)
+    Image::read(&path)
 }
 
 /// The image on the clipboard, if there is one.

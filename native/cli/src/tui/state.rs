@@ -84,7 +84,7 @@ pub struct Picker {
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/model", "Switch model: /model <provider:model>, or pick one"),
     ("/effort", "Reasoning effort: /effort <level>, or pick one"),
-    ("/plan", "Toggle plan mode (Tab also switches Build/Plan)"),
+    ("/plan", "Toggle plan mode (Tab cycles Build, Plan and Bypass)"),
     ("/session", "Browse this folder's sessions and resume one"),
     ("/compact", "Summarize the older conversation now; text after it says what to keep"),
     ("/context", "Show what fills the model's context"),
@@ -101,7 +101,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
 
 pub const HELP: &str = "Keys: Enter sends · Shift+Enter, Alt+Enter or Ctrl+J adds a line · Up/Down recall earlier prompts · \
 @ completes a file (its contents go with the prompt) · Ctrl+V pastes an image (or paste an image's path) · Esc stops the agent · Ctrl+C stops, clears, then exits · \
-Tab completes or switches Build/Plan · Ctrl+O shows full tool output · PgUp/PgDn scroll · y/a/n answer a question";
+Tab completes or cycles Build/Plan/Bypass · Ctrl+O shows full tool output · PgUp/PgDn scroll · y/a/n answer a question";
 
 #[derive(Clone, Copy)]
 pub struct Tui {
@@ -429,6 +429,18 @@ impl Tui {
     pub fn toggle_plan(&self) {
         let Some(info) = self.info.get_untracked() else { return };
         let mode = if info.mode == Mode::Plan { Mode::Build } else { Mode::Plan };
+        self.send(Command::Mode(mode));
+    }
+
+    /// Tab: Build, then Plan, then Bypass (every tool call allowed), then
+    /// Build again.
+    pub fn cycle_mode(&self) {
+        let Some(info) = self.info.get_untracked() else { return };
+        let mode = match info.mode {
+            Mode::Build => Mode::Plan,
+            Mode::Plan => Mode::Bypass,
+            Mode::Bypass => Mode::Build,
+        };
         self.send(Command::Mode(mode));
     }
 

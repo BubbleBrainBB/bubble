@@ -399,6 +399,7 @@ dependencies = [
  "nsh-platform-macos",
  "nsh-platform-windows",
  "nsh-testing",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -428,6 +429,7 @@ name = "bubble-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "dirs",
  "futures-util",
  "getrandom 0.2.17",

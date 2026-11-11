@@ -16,6 +16,7 @@ futures-util.workspace = true
 log.workspace = true
 dirs.workspace = true
 ignore = "0.4"
+base64 = "0.22"
 regex = "1"
 sha2 = "0.10"
 rquickjs = "0.14"

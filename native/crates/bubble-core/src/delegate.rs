@@ -383,6 +383,9 @@ impl Status {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub id: String,
+    /// The tool invocation that dispatched this child, for transcript anchoring.
+    #[serde(default)]
+    pub parent_call_id: Option<String>,
     pub nickname: String,
     pub profile: String,
     pub task: String,
@@ -590,6 +593,7 @@ struct Saved {
 /// Options for one new child.
 #[derive(Clone, Debug, Default)]
 pub struct SpawnOptions {
+    pub parent_call_id: Option<String>,
     pub profile: String,
     pub description: Option<String>,
     pub model: Option<String>,
@@ -801,6 +805,7 @@ impl Children {
         history.push(ChatMessage::user(task));
         let snapshot = Snapshot {
             id: id.clone(),
+            parent_call_id: options.parent_call_id.clone(),
             nickname,
             profile: profile.name.clone(),
             task: message.to_owned(),
@@ -1016,6 +1021,36 @@ impl Children {
                 })
                 .await;
         }
+    }
+
+    /// A finished write child's kept changes, as a patch.
+    pub async fn worktree_patch(&self, id: &str) -> Result<String, String> {
+        let worktree = self.kept_worktree(id)?;
+        worktree::patch(&worktree).await
+    }
+
+    /// Applies a finished write child's kept changes to the repository.
+    pub async fn apply_worktree(&self, id: &str) -> Result<(), String> {
+        let mut worktree = self.kept_worktree(id)?;
+        let result = worktree::apply(&mut worktree).await;
+        self.update(id, |r| r.snapshot.worktree = Some(worktree));
+        result
+    }
+
+    /// Throws away a finished write child's kept changes.
+    pub async fn discard_worktree(&self, id: &str) -> Result<(), String> {
+        let mut worktree = self.kept_worktree(id)?;
+        worktree::discard(&mut worktree).await;
+        self.update(id, |r| r.snapshot.worktree = Some(worktree));
+        Ok(())
+    }
+
+    fn kept_worktree(&self, id: &str) -> Result<Worktree, String> {
+        let snapshot = self.snapshot(id).ok_or_else(|| format!("There is no subagent {id}."))?;
+        if !snapshot.status.is_final() {
+            return Err("The subagent is still working.".into());
+        }
+        snapshot.worktree.filter(|w| !w.removed && w.changed == Some(true)).ok_or_else(|| "The subagent kept no changes.".into())
     }
 
     /// Looks at a finished write child's worktree: removed when unchanged,
@@ -1320,6 +1355,7 @@ impl Children {
                     history[start..].to_vec()
                 });
                 let options = SpawnOptions {
+                    parent_call_id: Some(call.id.clone()),
                     profile: text("agent_type").or_else(|| text("agent")).unwrap_or_else(|| "default".into()),
                     description: text("description"),
                     model: text("model"),

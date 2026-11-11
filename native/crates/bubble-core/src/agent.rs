@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
@@ -19,9 +19,6 @@ use crate::model::{self, Level};
 use crate::provider::{ChatMessage, ChatRequest, StreamEvent, ToolCall, ToolResult, ToolSpec, require_reply, stream_chat};
 use crate::toolbox::Toolbox;
 use crate::tools::{self, Permission, ToolOutput};
-
-/// How many model calls one turn may make.
-const MAX_STEPS: usize = 50;
 
 /// A person's answer to "may I?".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +36,8 @@ pub enum Decision {
 /// What a turn reports as it goes.
 #[derive(Debug)]
 pub enum AgentEvent {
+    /// One model request actually starts, after preparation and tool work.
+    ModelStarted,
     Text(String),
     Reasoning(String),
     /// A model reply is complete; keep it.
@@ -46,6 +45,8 @@ pub enum AgentEvent {
     ToolStarted { call: ToolCall, description: String },
     /// The turn waits on `respond`.
     ApprovalNeeded { call: ToolCall, permission: Permission, respond: oneshot::Sender<Decision> },
+    /// What a running command printed since the last delta.
+    ToolOutputDelta { call_id: String, chunk: String },
     ToolFinished { call_id: String, output: ToolOutput, denied: bool },
     /// A step's tool results are complete; keep them.
     ToolResults(ChatMessage),
@@ -196,7 +197,10 @@ async fn turn_steps(client: &reqwest::Client, turn: Turn, events: &mpsc::Unbound
     let in_box = |name: &str| toolbox.as_ref().is_some_and(|b| b.owns(name));
     let delegates = |name: &str| children.is_some() && (Children::owns(name) || name == crate::workflow::TOOL);
     let offered = |name: &str| allowed.as_ref().is_none_or(|a| a.contains(name));
-    for _ in 0..MAX_STEPS {
+    // No cap on model calls (as in the TypeScript agent): a turn ends when
+    // the model stops calling tools or the person stops it; compaction
+    // keeps the history in the window.
+    loop {
         // Loading a deferred tool adds it for the next call.
         let mut tools = if cwd.is_some() { tools::specs() } else { Vec::new() };
         if let Some(toolbox) = &toolbox {
@@ -235,6 +239,7 @@ async fn turn_steps(client: &reqwest::Client, turn: Turn, events: &mpsc::Unbound
         .await;
         let request =
             ChatRequest { system: system.clone(), messages: history.clone(), tools: tools.clone(), max_tokens, thinking };
+        let _ = events.send(AgentEvent::ModelStarted);
         let stream_events = events.clone();
         let outcome = stream_chat(client, &model, &request, move |event| {
             let _ = stream_events.send(match event {
@@ -387,7 +392,12 @@ async fn turn_steps(client: &reqwest::Client, turn: Turn, events: &mpsc::Unbound
                 }
                 match (&toolbox, project) {
                     (Some(toolbox), _) if boxed => toolbox.execute(&call, &unlocked).await,
-                    (_, Some(project)) => tools::execute(&call, project).await,
+                    (_, Some(project)) => {
+                        let live = |chunk: String| {
+                            let _ = events.send(AgentEvent::ToolOutputDelta { call_id: call.id.clone(), chunk });
+                        };
+                        tools::execute_live(&call, project, &live).await
+                    }
                     _ => ToolOutput { content: format!("There is no tool called {}.", call.name), is_error: true },
                 }
             };
@@ -415,7 +425,6 @@ async fn turn_steps(client: &reqwest::Client, turn: Turn, events: &mpsc::Unbound
         history.push(message.clone());
         let _ = events.send(AgentEvent::ToolResults(message));
     }
-    bail!("stopped after {MAX_STEPS} model calls in one turn")
 }
 
 #[cfg(test)]
@@ -497,6 +506,18 @@ mod tests {
         assert_eq!(finished.len(), 1);
         assert!(finished[0].0.contains("draft") && !finished[0].1);
         assert!(matches!(events.last(), Some(AgentEvent::Assistant(ChatMessage::Assistant { text, .. })) if text == "It says draft."));
+    }
+
+    #[tokio::test]
+    async fn long_turns_run_past_fifty_model_calls() {
+        // The TypeScript agent had no cap; a long task must not stop at 50.
+        let mut bodies: Vec<String> = (0..60).map(|i| openai_tool_call(&format!("c{i}"), "read", "{\"path\":\"notes.txt\"}")).collect();
+        bodies.push(openai_text("Read it sixty times."));
+        let (result, events, _) = run(bodies, Decision::Deny, Arc::new(Mutex::new(HashSet::new()))).await;
+        result.unwrap();
+        let reads = events.iter().filter(|e| matches!(e, AgentEvent::ToolFinished { .. })).count();
+        assert_eq!(reads, 60);
+        assert!(matches!(events.last(), Some(AgentEvent::Assistant(ChatMessage::Assistant { text, .. })) if text == "Read it sixty times."));
     }
 
     #[tokio::test]

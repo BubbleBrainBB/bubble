@@ -189,6 +189,22 @@ native/
   - `bubble update [--check]`：同 TS：查 npm 的 latest，按二进制真实路径判断安装方式（npm / bun / pnpm / yarn 用对应命令全局安装；Homebrew 和源码构建给出提示），`--check` 只报告。
   - 测试 166 个全过。
 
+- 2026-11-09：第 10 批完成（未提交）：桌面应用补齐。用户选了三组：Manager 设计收尾、输入框与审阅、外观与页面（发布打包不做）。
+  - Manager：Home 输入框上方的"离开期间"行（上次给 Manager 发言后 GitHub 来的事，按去向计数，点开逐条，点一条进任务）。规则没放下的通知（@提及、评论、状态变化，且仓库为准备/执行级）记为 `untriaged`，安静 30 秒后由隐藏的分诊回合（Manager 的模型、低思考、不提问）用 `attach_event` / `create_task_from_event` / `ignore_event` 逐条决定；没决定的记为 `noted`，不再问。
+  - 任务页：顶栏 `···` 菜单：用另一个模型重跑（新 Run，从第一条消息起，该模型成为任务自己的模型）、关联 Issue/PR（`#12`、`owner/repo#12` 或链接；不说种类时问 GitHub）、取消任务（停掉代理和子代理）。Run 分隔线写明起因：你发起 / GitHub / Manager / 用某模型重跑，及所用模型；重启后从库里还原。
+  - 输入框：`@文件` 补全（项目文件，Tab 或点选，发送时附上内容，同 TUI；补全逻辑移到 `bubble_core::mentions` 共用）、粘贴或附加图片（缩略图、可删，消息里显示"1 image"；`Image::from_bytes` / `read` 移进 core）、上下键翻本对话发过的话、每个任务自己的模型和思考强度（Manager 的即 Settings 的）。
+  - Changes 面板：项目自上次提交以来的改动（含新文件，不碰 index），以及 implementer 子代理保留的 worktree，一键 Apply（先普通 `git apply`，不行再 `--3way`）或 Discard，用 NSH 的 DiffView 显示。
+  - 深色模式：调色板全部换成 `AdaptiveColor`（样式随外观自动切换），图标改 `currentColor`；Settings 里选 跟随系统 / 浅色 / 深色，存库，启动时生效；`nsh.json` 改为 system。
+  - 侧栏新页：Pull requests（已关联的 + 受监视仓库的开放 PR，状态与检查；给没有任务的 PR 建任务；合并只在这里、要再点一次确认，squash）、Automations（按每天/每周/每隔几分钟启动任务的提示词，开关、立即运行、删除，30 秒检查一次）、Skills（列表与搜索）、搜索（任务标题、项目名和对话内容）。Tasks 页的分组超过 20 条折叠。
+  - 测试：新增无头测试 triage、task_menu、composer、changes、appearance、pages，及 worktree 应用/丢弃、消息搜索、日程计算的单元测试；整个工作区全过。
+  - 未做：真机截图检查（屏幕锁着，窗口拿不到画面）；自动化不能编辑（删了重建）；PR 页不显示未关联 PR 的检查状态；分诊没有每日上限；无头测试里换页后输入框会带着上一页的字（测试框架按节点 id 记文字，真机待查）。
+
+- 2026-11-09：第 10 批之后的修补（未提交）：
+  - 权限：TUI 的 Tab 恢复 Build → Plan → Bypass 三档循环（同 TS）；桌面任务输入框加 "Ask first / Full access"，按任务保存；只在最新一条消息是人发的时候放行（GitHub、Manager 交来的工作照常询问），打开时会放行正在等待的审批卡片。
+  - 核心：去掉每轮 50 次模型调用的硬上限（TS 版没有，交给压缩兜底），新增测试跑 60 次调用。
+  - 工作轨迹 UI（照本机 Codex 26.1103 的实现，`/Applications/ChatGPT.app`，bundle id com.openai.codex）：连续工具调用折成一行摘要（"Edited files, read files, ran commands"，失败数标红）；运行中显示进行时（"Running …"/推理标题/"Thinking"）；推理不再单独成行，只在展开的组里以 "Thought" 出现；一轮以回复结束时，之前的工作折到 "Worked for 1m 20s" 下面；失败或被停的轮不折；Manager 的任务卡片不折。路径显示为相对项目、家目录用 `~`。逻辑在 `app/src/trace.rs`（纯函数，带测试）。
+  - 修了两个旧 bug：模型复用 tool call id 时审批卡片插到旧行后面（现在旧行改名让位）；重载时工具行时间丢失。
+
 ## 修订记录
 
 - v1（2026-11-08）：初稿。

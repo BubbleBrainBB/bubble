@@ -111,6 +111,11 @@ fn tasks_delegate_to_subagents_and_workflows() {
         std::env::set_var("BUBBLE_MEMORY_AUTO", "0");
     }
 
+    // New work starts with the Manager; this test starts from a task already made.
+    bubble_store::Store::open(home.join("native/bubble.db"))
+        .unwrap()
+        .create_task(bubble_store::NewTask { title: "Investigate", project_cwd: Some(project.to_str().unwrap()), origin: bubble_store::Origin::User })
+        .unwrap();
     let mut app = Headless::start(EngineConfig::new(Root::of::<bubble_app::App>())).unwrap();
     app.set_viewport(nsh_core::element::size(nsh_core::element::px(1280.0), nsh_core::element::px(1400.0)))
         .unwrap();
@@ -118,20 +123,16 @@ fn tasks_delegate_to_subagents_and_workflows() {
     app.wait_for("What should we work on?").unwrap();
 
     app.press("id:nav-tasks").unwrap();
-    app.press("text:New task").unwrap();
-    app.type_text("text:What needs doing?", "Investigate").unwrap();
-    app.on_pick_paths(vec![project.clone()]).unwrap();
-    app.press("Choose a project folder").unwrap();
-    app.wait_for("demo").unwrap();
-    app.press("Create").unwrap();
+    app.press("id:side-Investigate").unwrap();
 
-    // A child is started, shown under the conversation, and collected.
+    // A child is shown at its dispatch anchor and collected.
     app.type_text("text:Message this task", "Delegate please").unwrap();
     app.submit("text:Delegate please").unwrap();
     app.wait_for_within("text:Child said: The answer is 42.", long).unwrap();
     app.wait_for("text:Subagents").unwrap();
     app.wait_for("text:explorer").unwrap();
     app.wait_for("text:completed").unwrap();
+    // The child and its dispatch remain visible when ordinary work folds.
     app.wait_for("text:Started a subagent: Find the answer").unwrap();
 
     // A workflow fans out to two children and returns their answers.
