@@ -1,6 +1,6 @@
 {
   "name": "@bubblebrain-ai/bubble",
-  "version": "0.0.62",
+  "version": "0.0.64",
   "description": "A terminal coding agent",
   "type": "module",
   "engines": {
