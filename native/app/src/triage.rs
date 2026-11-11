@@ -8,11 +8,12 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
-use bubble_core::{AgentEvent, ChatMessage, Decision, ToolCall, ToolOutput, ToolSpec, Turn, http_client, run_turn};
+use bubble_core::{AgentEvent, Decision, ToolCall, ToolOutput, ToolSpec};
 use bubble_store::{Event, MessageRole, NewTask, Origin, RunRole};
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
 
+use crate::engine::{self, HostTurn, TurnEvent};
 use crate::github::{self, Level};
 use crate::state::AppState;
 
@@ -192,30 +193,41 @@ pub fn maybe_run(app: AppState) {
         return;
     }
     let Some(reference) = app.model_for(RunRole::Triage) else { return };
-    let Ok(model) = app.config.with(|c| c.resolve(&reference)) else { return };
     RUNNING.with(|r| r.set(true));
     let listing: Vec<String> = batch.iter().map(describe).collect();
     let message = format!("Notifications to decide (id | reason in repository #number | title):\n{}", listing.join("\n"));
-    let turn = Turn {
+    // A session of its own that nothing lists, gone when the turn is done.
+    let session = format!("desk-triage-{}", bubble_store::now_ms());
+    let turn = HostTurn {
+        session_id: session.clone(),
+        cwd: crate::state::scratch_folder().to_string_lossy().into_owned(),
+        text: message,
+        pictures: Vec::new(),
+        model: reference,
+        thinking: bubble_core::Level::Low.as_str().to_owned(),
+        append_system_prompt: None,
+        system_prompt: Some(PROMPT.to_owned()),
+        // Only the triage tools: it decides, it does not work.
+        allowed_tools: Some(Vec::new()),
         host_tools: specs(),
-        max_tokens: 4096,
-        thinking: bubble_core::Level::Low,
-        ask: false,
-        ..Turn::new(model, Some(PROMPT.to_owned()), vec![ChatMessage::user(message)])
+        recap: None,
     };
     let batch = Arc::new(batch);
+    let hosts = app.hosts.get();
     spawn(async move {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
         let job = background(async move {
-            let client = http_client()?;
-            run_turn(&client, turn, sender).await
+            let host = hosts.get().await?;
+            let result = engine::run(host.clone(), turn, sender, Arc::new(tokio::sync::Notify::new())).await;
+            let _ = host.delete_session(&session).await;
+            result
         });
         while let Some(event) = receiver.recv().await {
             match event {
-                AgentEvent::HostCall { call, respond } => {
+                TurnEvent::Agent(AgentEvent::HostCall { call, respond }) => {
                     let _ = respond.send(execute(app, &call, &batch));
                 }
-                AgentEvent::ApprovalNeeded { respond, .. } => {
+                TurnEvent::Agent(AgentEvent::ApprovalNeeded { respond, .. }) => {
                     let _ = respond.send(Decision::Deny);
                 }
                 _ => {}

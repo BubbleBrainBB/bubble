@@ -132,10 +132,29 @@ pub struct Account {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Skill {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// "user", "project" or "configured".
+    #[serde(default)]
+    pub source: String,
+    /// The skills folder it was found in.
+    #[serde(default)]
+    pub folder: String,
+    /// Loaded only when the person names it.
+    #[serde(default)]
+    pub manual_only: bool,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// The skills found, and what was wrong with those that could not be read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Skills {
+    pub skills: Vec<Skill>,
+    pub problems: Vec<String>,
 }
 
 /// An MCP server of a folder and how its connection stands.
@@ -424,9 +443,22 @@ impl Host {
         Ok(serde_json::from_value(self.call("models/list", json!({ "refresh": refresh })).await?)?)
     }
 
-    pub async fn skills(&self, cwd: Option<&str>) -> Result<Vec<Skill>> {
+    pub async fn skills(&self, cwd: Option<&str>) -> Result<Skills> {
         let result = self.call("skills/list", json!({ "cwd": cwd })).await?;
-        Ok(serde_json::from_value(result.get("skills").cloned().unwrap_or_default()).unwrap_or_default())
+        let problems = result.get("problems").and_then(Value::as_array).cloned().unwrap_or_default();
+        Ok(Skills {
+            skills: serde_json::from_value(result.get("skills").cloned().unwrap_or_default()).unwrap_or_default(),
+            problems: problems
+                .iter()
+                .map(|problem| {
+                    let message = problem.get("message").and_then(Value::as_str).unwrap_or_default();
+                    match problem.get("file").and_then(Value::as_str) {
+                        Some(file) => format!("{file}: {message}"),
+                        None => message.to_owned(),
+                    }
+                })
+                .collect(),
+        })
     }
 
     pub async fn mcp_servers(&self, cwd: Option<&str>) -> Result<Vec<McpServer>> {

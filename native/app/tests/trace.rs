@@ -15,19 +15,30 @@ fn delta(value: Value) -> String {
     format!("data: {}\n\n", json!({"choices":[{"delta":value}]}))
 }
 
-fn request(stream: &TcpStream) {
+/// Reads a request; whether it asks the model for a reply. The agent also
+/// asks the service which models it has, which this one does not know.
+fn request(stream: &mut TcpStream) -> bool {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut length = 0;
+    let mut first = String::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
             break;
+        }
+        if first.is_empty() {
+            first = line.clone();
         }
         if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
             length = n.trim().parse().unwrap();
         }
     }
     reader.read_exact(&mut vec![0; length]).unwrap();
+    if first.starts_with("POST ") {
+        return true;
+    }
+    stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").ok();
+    false
 }
 
 fn header(stream: &mut TcpStream, length: usize) {
@@ -44,9 +55,14 @@ fn model() -> (String, mpsc::Sender<()>, mpsc::Sender<()>) {
     let (text_tx, text_rx) = mpsc::channel();
     let (end_tx, end_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        for (index, stream) in listener.incoming().enumerate() {
+        let mut replies = 0;
+        for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
-            request(&stream);
+            if !request(&mut stream) {
+                continue;
+            }
+            let index = replies;
+            replies += 1;
             match index {
                 0 => {
                     let events = delta(json!({"reasoning_content":"**Inspecting files**"}))

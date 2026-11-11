@@ -6,6 +6,8 @@
  * files.
  */
 
+import { homedir } from "node:os";
+import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 
@@ -20,6 +22,7 @@ import {
   type SdkSessionHandle,
   type ToolRegistryEntry,
 } from "../sdk/index.js";
+import { SkillRegistry } from "../skills/registry.js";
 import { getAvailableThinkingLevels } from "../variant/variant-resolver.js";
 import { getBubbleHome } from "../bubble-home.js";
 import type { AgentEvent, ThinkingLevel } from "../types.js";
@@ -29,6 +32,8 @@ import {
   type HostInfo,
   type HostModel,
   type HostProvider,
+  type HostSkill,
+  type HostSkillProblem,
   type HostToolSpec,
   type JsonRpcRequest,
   type JsonRpcResponse,
@@ -227,9 +232,7 @@ export class HostServer {
       case "models/list":
         return this.listModels(params.refresh === true);
       case "skills/list":
-        return {
-          skills: this.sdk.listSkills(optionalString(params, "cwd"), stringList(params.skillPaths)),
-        };
+        return this.listSkills(optionalString(params, "cwd"), stringList(params.skillPaths));
       case "mcp/status":
         return { servers: await this.sdk.getMcpStatus(optionalString(params, "cwd")) };
       case "mcp/reconnect":
@@ -457,6 +460,30 @@ export class HostServer {
       defaultModel: this.sdk.userConfig.getDefaultModel() ?? "",
       defaultThinkingLevel: this.sdk.userConfig.getDefaultThinkingLevel() as ThinkingLevel | undefined,
       providers,
+    };
+  }
+
+  /** Every skill found, usable or switched off, and what could not be read. */
+  private listSkills(cwd: string | undefined, skillPaths: string[]): { skills: HostSkill[]; problems: HostSkillProblem[] } {
+    const registry = new SkillRegistry({
+      cwd: cwd ?? homedir(),
+      skillPaths: [...this.sdk.userConfig.getSkillPaths(), ...skillPaths],
+      disabledSkills: this.sdk.userConfig.getDisabledSkills(),
+    });
+    return {
+      skills: registry.all().map((skill) => ({
+        name: skill.meta.name,
+        description: skill.meta.description,
+        source: skill.source,
+        folder: dirname(skill.rootDir),
+        manualOnly: skill.meta.disableModelInvocation,
+        enabled: registry.isEnabled(skill.meta.name),
+      })),
+      // A skill found again in a later folder is the same skill, not a broken one.
+      problems: registry
+        .getDiagnostics()
+        .filter((problem) => !problem.message.startsWith("Duplicate skill name"))
+        .map((problem) => ({ message: problem.message, ...(problem.filePath ? { file: problem.filePath } : {}) })),
     };
   }
 

@@ -1498,10 +1498,7 @@ fn model_pickers(app: AppState, target: ComposerFor) -> impl IntoElement {
         let level = level.clone();
         move || {
             let Some(reference) = current() else { return String::new() };
-            match reference.split_once(':') {
-                Some((provider, model)) => bubble_core::model::effective_level(provider, model, level()).as_str().to_owned(),
-                None => String::new(),
-            }
+            app.effective_level(&reference, level()).as_str().to_owned()
         }
     };
     let thinks = move || levels().iter().any(|l| *l != ThinkingLevel::Off);

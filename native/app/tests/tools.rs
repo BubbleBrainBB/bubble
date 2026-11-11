@@ -35,7 +35,10 @@ fn model_server(seen: &Path) -> String {
             reader.read_exact(&mut body).ok();
             let request: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             let system = request["messages"][0]["content"].as_str().unwrap_or_default().to_owned();
-            if system.contains("- notes-helper: Keeps notes tidy") && system.contains("mcp__echo__echo") {
+            // The skills are in the system prompt; the tools still to be
+            // loaded are announced in a reminder after it.
+            let told = request["messages"].to_string();
+            if system.contains("- notes-helper: Keeps notes tidy") && told.contains("mcp__echo__echo") {
                 std::fs::write(&seen, "").ok();
             }
             if system.contains("gave this task full access") {
@@ -149,8 +152,8 @@ fn tasks_use_mcp_tools_and_settings_show_what_is_there() {
     // Settings: the person's servers, connected or not, and their skills.
     app.press("id:nav-settings").unwrap();
     app.wait_for_within("text:1 tool", long).unwrap();
-    app.wait_for_within("text:/could not start/", long).unwrap();
-    app.wait_for("label:Retry gone").unwrap();
+    // The one that cannot start says so in the agent's words, and can be tried again.
+    app.wait_for_within("label:Retry gone", long).unwrap();
     // Only the test's own folder is certain; the person's may add more.
     app.wait_for("text:/^\\d+ skills? in .*home/skills/").unwrap();
 

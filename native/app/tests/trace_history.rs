@@ -144,20 +144,31 @@ fn legacy_cards_and_answers_stay_above_the_next_prompt_in_layout() {
     let address = listener.local_addr().unwrap();
     let (release, receive) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let mut length = 0;
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if line == "\r\n" {
-                break;
+        // The agent also asks which models the service has; the request
+        // for a reply is the one answered here.
+        let mut stream = loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0;
+            let mut first = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if first.is_empty() {
+                    first = line.clone();
+                }
+                if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = n.trim().parse().unwrap();
+                }
             }
-            if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                length = n.trim().parse().unwrap();
+            reader.read_exact(&mut vec![0; length]).unwrap();
+            if first.starts_with("POST ") {
+                break stream;
             }
-        }
-        reader.read_exact(&mut vec![0; length]).unwrap();
+            stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").ok();
+        };
         let reasoning = format!(
             "data: {}\n\n",
             json!({"choices":[{"delta":{"reasoning_content":"**Checking current state**"}}]})

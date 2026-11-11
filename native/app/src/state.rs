@@ -13,10 +13,8 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use bubble_core::delegate::{self, Children};
 use bubble_core::hooks::Hooks;
-use bubble_core::mcp::{self, Hub};
-use bubble_core::skills::Skills;
 use bubble_core::{
-    AgentEvent, ChatMessage, Config, Decision, Level as ThinkingLevel, Permission, bubble_home, http_client,
+    AgentEvent, ChatMessage, Config, Decision, Level as ThinkingLevel, Permission, bubble_home,
 };
 use bubble_github::Gh;
 use bubble_store::{
@@ -61,6 +59,30 @@ pub struct ServerRow {
     pub scope: &'static str,
     pub status: String,
     pub failed: bool,
+}
+
+/// What the agent said it can run.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Catalog {
+    /// The agent answered; before that nothing is known to be missing.
+    loaded: bool,
+    providers: HashSet<String>,
+    /// "provider:model" to the levels it can think at.
+    levels: HashMap<String, Vec<ThinkingLevel>>,
+}
+
+fn server_row(server: &bubble_host::McpServer) -> ServerRow {
+    let (status, failed) = match &server.state {
+        bubble_host::McpState::Connected { tools, .. } => (format!("{tools} tool{}", if *tools == 1 { "" } else { "s" }), false),
+        bubble_host::McpState::Failed(error) => (error.lines().next().unwrap_or_default().to_owned(), true),
+        bubble_host::McpState::Disabled => ("Turned off".to_owned(), false),
+    };
+    let scope = match server.scope.as_str() {
+        "project" => "project",
+        "local" => "local",
+        _ => "user",
+    };
+    ServerRow { name: server.name.clone(), scope, status, failed }
 }
 
 /// What Settings says about skills.
@@ -131,8 +153,8 @@ pub struct AppState {
     pub accounts: Signal<Vec<Account>>,
     /// Bubble's agent: the host process every turn runs on.
     pub(crate) hosts: Stored<Arc<Hosts>>,
-    /// MCP connections, shared by every task.
-    hub: Stored<Arc<Hub>>,
+    /// The models the agent can run, once it has said.
+    pub catalog: Signal<Arc<Catalog>>,
     pub mcp_servers: Signal<Vec<ServerRow>>,
     pub skills: Signal<SkillsSummary>,
     /// Where persistent memory stands.
@@ -207,7 +229,7 @@ impl AppState {
             ),
             accounts: signal(Vec::new()),
             hosts: stored(Arc::new(Hosts::default())),
-            hub: stored(Arc::new(Hub::new())),
+            catalog: signal(Arc::new(Catalog::default())),
             mcp_servers: signal(Vec::new()),
             skills: signal(SkillsSummary::default()),
             memory_status: signal(String::new()),
@@ -238,8 +260,7 @@ impl AppState {
         state.resume_queue();
         github::start(state);
         crate::automations::start(state);
-        state.discover_models();
-        state.start_tools();
+        state.refresh_catalog();
         state.show_hooks_and_memory();
         state.import_sessions();
         state
@@ -295,168 +316,105 @@ impl AppState {
         });
     }
 
-    fn start_tools(&self) {
-        let app = *self;
-        let home = bubble_home();
-        let (paths, disabled) = self.config.with(|c| (c.skill_paths.clone(), c.skills.disabled.clone()));
-        let roots = Skills::roots(&home, None, &paths);
-        let skills = Skills::discover(&roots, &disabled);
-        let user_home = dirs_home();
-        let mut rows: Vec<SkillRow> = skills
-            .all()
-            .iter()
-            .map(|skill| SkillRow {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-                source: skill.source.label(),
-                folder: skill.root.display().to_string(),
-                manual_only: skill.manual_only,
-            })
-            .collect();
-        rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        self.skill_list.set(rows);
-        self.skills.set(SkillsSummary {
-            count: skills.visible().count(),
-            folders: roots
-                .iter()
-                .filter(|(path, _)| path.is_dir())
-                .map(|(path, _)| match path.strip_prefix(&user_home) {
-                    Ok(rest) => format!("~/{}", rest.display()),
-                    Err(_) => path.display().to_string(),
-                })
-                .collect(),
-            problems: skills.diagnostics.len(),
-            first_problem: skills.diagnostics.first().map(|d| match d.split_once("SKILL.md: ") {
-                Some((path, why)) => format!("{why} in {}", path.trim_end_matches('/').rsplit('/').next().unwrap_or_default()),
-                None => d.clone(),
-            }),
-        });
-        let (configured, diagnostics) = mcp::load_config(&home, None);
-        for diagnostic in diagnostics {
-            log::warn!("mcp: {diagnostic}");
-        }
-        let hub = self.hub.get();
-        hub.servers_for(configured.clone());
+    /// Asks the agent what it offers (models and accounts, skills, MCP
+    /// servers) and shows it. The first call also starts the agent.
+    pub fn refresh_catalog(&self) {
+        self.show_accounts_from_disk();
+        self.load_models(false);
+        self.load_skills();
         self.refresh_servers();
-        spawn(async move {
-            let _ = background(async move {
-                let client = http_client()?;
-                hub.connect(configured, &client).await;
-                Ok::<_, anyhow::Error>(())
-            })
-            .await;
-            app.refresh_servers();
+    }
+
+    /// The agent could not be reached; said where the app's problems show.
+    fn agent_problem(&self, error: &str) {
+        let message = format!("Bubble's agent could not start: {error}");
+        log::warn!("{message}");
+        self.problem.update(|problem| match problem {
+            Some(existing) if existing.contains(&message) => {}
+            Some(existing) => existing.push_str(&format!("\n{message}")),
+            None => *problem = Some(message),
         });
     }
 
-    /// Shows the MCP servers as they stand.
-    pub fn refresh_servers(&self) {
-        let rows = self
-            .hub
-            .get()
-            .servers()
-            .iter()
-            .map(|server| {
-                let (status, failed) = match server.status() {
-                    mcp::Status::NotStarted | mcp::Status::Connecting => ("Connecting…".to_owned(), false),
-                    mcp::Status::Connected { tools, .. } => {
-                        (format!("{} tool{}", tools.len(), if tools.len() == 1 { "" } else { "s" }), false)
-                    }
-                    mcp::Status::Failed(error) => (error.lines().next().unwrap_or_default().to_owned(), true),
-                };
-                ServerRow { name: server.name.clone(), scope: server.scope.label(), status, failed }
-            })
-            .collect();
-        self.mcp_servers.set(rows);
-    }
-
-    /// Tries a failed server again.
-    /// Signs in to an MCP server that needs it, in the browser.
-    pub fn sign_in_server(&self, name: &str) {
-        let app = *self;
-        let servers: Vec<_> = self.hub.get().servers().into_iter().filter(|s| s.name == name).collect();
-        spawn(async move {
-            let _ = background(async move {
-                let client = http_client()?;
-                for server in servers {
-                    let pending = server.login(&client).await?;
-                    bubble_core::login::open_browser(&pending.url);
-                    pending.finish(&client).await?;
-                    server.reset().await;
-                    server.ensure(&client).await;
-                }
-                Ok::<_, anyhow::Error>(())
-            })
-            .await;
-            app.refresh_servers();
-        });
-        self.mcp_servers.update(|rows| {
-            for row in rows.iter_mut().filter(|r| r.name == name) {
-                row.status = "Finish signing in in your browser…".into();
-                row.failed = false;
-            }
-        });
-    }
-
-    pub fn retry_server(&self, name: &str) {
-        let app = *self;
-        let servers: Vec<_> = self.hub.get().servers().into_iter().filter(|s| s.name == name).collect();
-        spawn(async move {
-            let _ = background(async move {
-                let client = http_client()?;
-                for server in servers {
-                    server.reset().await;
-                    server.ensure(&client).await;
-                }
-                Ok::<_, anyhow::Error>(())
-            })
-            .await;
-            app.refresh_servers();
-        });
-        self.mcp_servers.update(|rows| {
-            for row in rows.iter_mut().filter(|r| r.name == name) {
-                row.status = "Connecting…".into();
-                row.failed = false;
-            }
-        });
-    }
-
-    /// Asks each signed-in subscription for its models, then offers them.
-    fn discover_models(&self) {
+    /// What auth.json says, until the agent answers.
+    fn show_accounts_from_disk(&self) {
         use bubble_core::auth::{AuthFile, Subscription};
-        let app = *self;
         let auth = AuthFile::default();
-        let all = [Subscription::ChatGpt, Subscription::Grok];
-        app.accounts.set(
-            all.iter()
-                .map(|s| {
-                    let signed_in = auth.signed_in(*s);
+        self.accounts.set(
+            [Subscription::ChatGpt, Subscription::Grok]
+                .into_iter()
+                .map(|subscription| {
+                    let signed_in = auth.signed_in(subscription);
                     Account {
-                        subscription: *s,
+                        subscription,
                         signed_in,
                         status: if signed_in { "Signed in; looking up its models…" } else { "Not signed in" }.to_owned(),
                     }
                 })
                 .collect(),
         );
-        app.models.set(app.config.with(|c| c.selectable_models()));
-        let signed_in: Vec<Subscription> = all.into_iter().filter(|s| auth.signed_in(*s)).collect();
-        for subscription in signed_in {
-            spawn(async move {
-                let found = background(async move {
-                    let client = http_client()?;
-                    bubble_core::discover::discover(&client, subscription).await
-                })
-                .await;
-                let status = match found {
-                    Ok(Ok(models)) => format!("Signed in; {} models", models.len()),
-                    Ok(Err(error)) => format!("{error:#}"),
-                    Err(error) => format!("{error}"),
-                };
-                app.set_account_status(subscription, status);
-                app.models.set(app.config.with(|c| c.selectable_models()));
-            });
+    }
+
+    /// The models the agent can run and the subscriptions signed in to.
+    fn load_models(&self, refresh: bool) {
+        let app = *self;
+        let hosts = self.hosts.get();
+        spawn(async move {
+            let found = background(async move {
+                let host = hosts.get().await?;
+                Ok::<_, anyhow::Error>((host.models(refresh).await?, host.accounts().await?))
+            })
+            .await;
+            match found {
+                Ok(Ok((models, accounts))) => app.show_models(models, accounts),
+                Ok(Err(error)) => app.agent_problem(&format!("{error:#}")),
+                Err(error) => app.agent_problem(&error.to_string()),
+            }
+        });
+    }
+
+    fn show_models(&self, models: bubble_host::Models, accounts: Vec<bubble_host::Account>) {
+        use bubble_core::auth::Subscription;
+        let mut catalog = Catalog { loaded: true, ..Catalog::default() };
+        let mut subscription_models: Vec<String> = Vec::new();
+        for provider in &models.providers {
+            catalog.providers.insert(provider.id.clone());
+            for model in &provider.models {
+                let levels: Vec<ThinkingLevel> = model.thinking_levels.iter().filter_map(|l| ThinkingLevel::parse(l)).collect();
+                catalog.levels.insert(model.reference.clone(), if levels.is_empty() { vec![ThinkingLevel::Off] } else { levels });
+                if provider.oauth {
+                    subscription_models.push(model.reference.clone());
+                }
+            }
         }
+        // The default, the recent ones the agent still knows, then what the
+        // subscriptions offer.
+        let (default, recent) = self.config.with(|c| (c.default_model_reference(), c.recent_models.clone()));
+        let default = Some(models.default_model.clone()).filter(|m| m.contains(':')).or(default);
+        let mut offered: Vec<String> = Vec::new();
+        for reference in default.into_iter().chain(recent).chain(subscription_models) {
+            let known = catalog.levels.contains_key(&reference)
+                || reference.split_once(':').is_some_and(|(provider, _)| catalog.providers.contains(provider));
+            if known && !offered.contains(&reference) {
+                offered.push(reference);
+            }
+        }
+        self.accounts.set(
+            accounts
+                .into_iter()
+                .filter_map(|account| {
+                    let subscription = Subscription::from_key(&account.provider_id)?;
+                    let count = models.providers.iter().find(|p| p.id == account.provider_id).map_or(0, |p| p.models.len());
+                    Some(Account {
+                        subscription,
+                        signed_in: account.signed_in,
+                        status: if account.signed_in { format!("Signed in; {count} models") } else { "Not signed in".to_owned() },
+                    })
+                })
+                .collect(),
+        );
+        self.models.set(offered);
+        self.catalog.set(Arc::new(catalog));
     }
 
     fn set_account_status(&self, subscription: bubble_core::auth::Subscription, status: String) {
@@ -468,25 +426,20 @@ impl AppState {
     }
 
     /// Signs in to `subscription` in the browser (the Grok CLI's sign-in is
-    /// taken when there is one).
+    /// taken when there is one). The agent does it, and keeps the tokens.
     pub fn sign_in(&self, subscription: bubble_core::auth::Subscription) {
-        use bubble_core::auth::{AuthFile, Subscription};
         let app = *self;
+        let hosts = self.hosts.get();
         app.set_account_status(subscription, "Finish signing in in your browser…".into());
         spawn(async move {
             let done = background(async move {
-                let auth = AuthFile::default();
-                let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
-                if subscription == Subscription::Grok && bubble_core::login::import_grok_cli(&auth, &bubble_home(), &home)? {
-                    return Ok(());
-                }
-                let pending = bubble_core::login::begin(subscription).await?;
-                bubble_core::login::open_browser(&pending.url);
-                pending.finish(&http_client()?, &auth).await.map(|_| ())
+                let host = hosts.get().await?;
+                let (progress, _unread) = tokio::sync::mpsc::unbounded_channel();
+                host.sign_in(subscription.key(), progress).await
             })
             .await;
             match done {
-                Ok(Ok(())) => app.discover_models(),
+                Ok(Ok(())) => app.load_models(true),
                 Ok(Err(error)) => app.set_account_status(subscription, format!("{error:#}")),
                 Err(error) => app.set_account_status(subscription, format!("{error}")),
             }
@@ -494,10 +447,94 @@ impl AppState {
     }
 
     pub fn sign_out(&self, subscription: bubble_core::auth::Subscription) {
-        match bubble_core::auth::AuthFile::default().remove(subscription) {
-            Ok(_) => self.discover_models(),
-            Err(error) => self.set_account_status(subscription, format!("{error:#}")),
-        }
+        let app = *self;
+        let hosts = self.hosts.get();
+        spawn(async move {
+            let done = background(async move { hosts.get().await?.sign_out(subscription.key()).await }).await;
+            match done {
+                Ok(Ok(())) => app.load_models(true),
+                Ok(Err(error)) => app.set_account_status(subscription, format!("{error:#}")),
+                Err(error) => app.set_account_status(subscription, format!("{error}")),
+            }
+        });
+    }
+
+    /// The person's skills, as the agent finds them.
+    fn load_skills(&self) {
+        let app = *self;
+        let hosts = self.hosts.get();
+        spawn(async move {
+            let found = background(async move { hosts.get().await?.skills(None).await }).await;
+            let Ok(Ok(found)) = found else { return };
+            let user_home = dirs_home();
+            let short = |folder: &str| match std::path::Path::new(folder).strip_prefix(&user_home) {
+                Ok(rest) => format!("~/{}", rest.display()),
+                Err(_) => folder.to_owned(),
+            };
+            let mut folders: Vec<String> = Vec::new();
+            for skill in &found.skills {
+                let folder = short(&skill.folder);
+                if !folders.contains(&folder) {
+                    folders.push(folder);
+                }
+            }
+            app.skills.set(SkillsSummary {
+                count: found.skills.iter().filter(|s| s.enabled && !s.manual_only).count(),
+                folders,
+                problems: found.problems.len(),
+                first_problem: found.problems.first().map(|d| match d.split_once("SKILL.md: ") {
+                    Some((path, why)) => format!("{why} in {}", path.trim_end_matches('/').rsplit('/').next().unwrap_or_default()),
+                    None => d.clone(),
+                }),
+            });
+            let mut rows: Vec<SkillRow> = found
+                .skills
+                .into_iter()
+                .filter(|skill| skill.enabled)
+                .map(|skill| SkillRow {
+                    source: match skill.source.as_str() {
+                        "project" => "project",
+                        "configured" => "configured",
+                        _ => "user",
+                    },
+                    name: skill.name,
+                    description: skill.description,
+                    folder: skill.folder,
+                    manual_only: skill.manual_only,
+                })
+                .collect();
+            rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            app.skill_list.set(rows);
+        });
+    }
+
+    /// Shows the person's MCP servers as the agent has them.
+    pub fn refresh_servers(&self) {
+        let app = *self;
+        let hosts = self.hosts.get();
+        spawn(async move {
+            let found = background(async move { hosts.get().await?.mcp_servers(None).await }).await;
+            if let Ok(Ok(servers)) = found {
+                app.mcp_servers.set(servers.iter().map(server_row).collect());
+            }
+        });
+    }
+
+    /// Tries a failed server again.
+    pub fn retry_server(&self, name: &str) {
+        let app = *self;
+        let hosts = self.hosts.get();
+        let server = name.to_owned();
+        spawn(async move {
+            let _ = background(async move { hosts.get().await?.reconnect_mcp_server(None, &server).await }).await;
+            app.refresh_servers();
+        });
+        self.mcp_servers.update(|rows| {
+            for row in rows.iter_mut().filter(|r| r.name == name) {
+                row.status = "Connecting…".into();
+                row.failed = false;
+            }
+        });
     }
 
     pub fn set_thinking(&self, level: ThinkingLevel) {
@@ -615,7 +652,7 @@ impl AppState {
             RunRole::Task => self.task_model.get(),
         };
         let Some(reference) = chosen.or_else(|| self.default_model()) else { return "No model".into() };
-        label_of(&reference, self.thinking.get())
+        self.label_of(&reference, self.thinking.get())
     }
 
     /// The model a task runs on: its own, else the Settings one.
@@ -667,10 +704,44 @@ impl AppState {
 
     /// The levels a model can think at.
     pub fn levels_of(&self, reference: &str) -> Vec<ThinkingLevel> {
+        if let Some(levels) = self.catalog.with(|c| c.levels.get(reference).cloned()) {
+            return levels;
+        }
+        // Until the agent has answered, or for a model it did not list.
         match reference.split_once(':') {
             Some((provider, model)) => bubble_core::model::info(provider, model).levels.to_vec(),
             None => vec![ThinkingLevel::Off],
         }
+    }
+
+    /// The level a model really thinks at when `requested` is asked for:
+    /// the nearest one it has at or below it, else its lowest.
+    pub fn effective_level(&self, reference: &str, requested: ThinkingLevel) -> ThinkingLevel {
+        let levels = self.levels_of(reference);
+        levels.iter().copied().filter(|level| *level <= requested).max().or_else(|| levels.first().copied()).unwrap_or(ThinkingLevel::Off)
+    }
+
+    /// A model and the level it thinks at, as the composer shows them.
+    fn label_of(&self, reference: &str, level: ThinkingLevel) -> String {
+        if self.levels_of(reference) == [ThinkingLevel::Off] {
+            reference.to_owned()
+        } else {
+            format!("{reference}  {}", self.effective_level(reference, level).as_str())
+        }
+    }
+
+    /// Why the agent cannot run `reference`, when that is already known.
+    fn check_model(&self, reference: &str) -> Result<(), String> {
+        let Some((provider, _)) = reference.split_once(':') else {
+            return Err(format!("model {reference:?} does not name its provider (provider:model)"));
+        };
+        self.catalog.with(|catalog| {
+            if !catalog.loaded || catalog.providers.contains(provider) {
+                Ok(())
+            } else {
+                Err(format!("Provider {provider:?} is not set up. Add it to ~/.bubble/config.json, or sign in to it in Settings."))
+            }
+        })
     }
 
     /// Stops a task's agent and its subagents and marks it canceled.
@@ -836,21 +907,6 @@ fn appearance_of(value: Option<&str>) -> nsh_core::platform::Appearance {
         Some("light") => Appearance::Light,
         Some("dark") => Appearance::Dark,
         _ => Appearance::System,
-    }
-}
-
-/// A model and the level it thinks at, as the composer shows them.
-fn label_of(reference: &str, level: ThinkingLevel) -> String {
-    match reference.split_once(':') {
-        Some((provider, model)) => {
-            let effective = bubble_core::model::effective_level(provider, model, level);
-            if *bubble_core::model::info(provider, model).levels == [ThinkingLevel::Off] {
-                reference.to_owned()
-            } else {
-                format!("{reference}  {}", effective.as_str())
-            }
-        }
-        None => reference.to_owned(),
     }
 }
 
@@ -1141,7 +1197,7 @@ impl Conversation {
         let model_reference = model_reference.ok_or_else(|| {
             "No model is set. Choose one in Settings, or set a default model in ~/.bubble/config.json.".to_owned()
         })?;
-        app.config.with(|c| c.resolve(&model_reference)).map_err(|e| format!("{e:#}"))?;
+        app.check_model(&model_reference)?;
         let start_now = task_id.is_none() || app.has_free_slot();
 
         // The run this message goes to: the Manager's, or the task's latest
@@ -1260,7 +1316,7 @@ impl Conversation {
         let model = reference
             .clone()
             .ok_or_else(|| anyhow!("no model is set"))
-            .and_then(|reference| app.config.with(|c| c.resolve(&reference)).map(|_| reference));
+            .and_then(|reference| app.check_model(&reference).map(|_| reference).map_err(|error| anyhow!(error)));
         let model = match model {
             Ok(model) => model,
             Err(error) => {
@@ -1570,7 +1626,7 @@ fn with_instructions(prompt: String, cwd: Option<&std::path::Path>) -> String {
 }
 
 /// Where a conversation without a project folder keeps its session.
-fn scratch_folder() -> PathBuf {
+pub(crate) fn scratch_folder() -> PathBuf {
     let folder = bubble_home().join("native").join("manager");
     std::fs::create_dir_all(&folder).ok();
     folder

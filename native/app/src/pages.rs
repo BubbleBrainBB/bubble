@@ -946,9 +946,7 @@ fn tool_settings(app: AppState) -> impl IntoElement {
                     .child(dynamic(move || {
                         let row = server.get();
                         let name = row.name.clone();
-                        if row.status.starts_with(bubble_core::mcp_oauth::NEEDS_SIGN_IN) {
-                            button("Sign in", move || app.sign_in_server(&name)).label(format!("Sign in to {}", row.name)).into_element()
-                        } else if row.failed {
+                        if row.failed {
                             button("Retry", move || app.retry_server(&name)).label(format!("Retry {}", row.name)).into_element()
                         } else {
                             view().into_element()
