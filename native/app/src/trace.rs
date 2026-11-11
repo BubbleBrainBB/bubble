@@ -458,6 +458,16 @@ pub fn running_step(lines: &[Line], turn: &str) -> Option<Line> {
 /// The last `count` lines of a command's output as a terminal leaves
 /// them: a line a carriage return rewrote (a progress bar) keeps its last
 /// frame.
+/// A command's output as a terminal would show it. The agent labels the
+/// streams for the model ("stdout:" / "stderr:"); when only standard output
+/// came, the label says nothing a person needs.
+pub fn command_output(text: &str) -> &str {
+    match text.strip_prefix("stdout:\n") {
+        Some(rest) if !rest.contains("\nstderr:\n") => rest,
+        _ => text,
+    }
+}
+
 pub fn output_tail(text: &str, count: usize) -> String {
     let lines: Vec<&str> = text
         .split('\n')
@@ -555,6 +565,14 @@ pub fn activity(lines: &[Line], turn: &str, status: TurnStatus, project: Option<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_command_that_only_printed_shows_without_the_stream_label() {
+        assert_eq!(super::command_output("stdout:\nsecond"), "second");
+        assert_eq!(super::command_output("stdout:\nout\nstderr:\nwarn"), "stdout:\nout\nstderr:\nwarn");
+        assert_eq!(super::command_output("stderr:\nboom"), "stderr:\nboom");
+        assert_eq!(super::command_output("(no output)"), "(no output)");
+    }
+
     use super::*;
 
     fn line(id: &str, kind: LineKind, text: &str, at: i64) -> Line {

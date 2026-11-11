@@ -600,6 +600,10 @@ fn tool_row(line: ReadSignal<Line>, project: Option<String>, opened: Signal<std:
                         text(move || {
                             let current = line.get();
                             let full = output();
+                            let full = match &current.kind {
+                                LineKind::Tool { name, .. } if name == "bash" => crate::trace::command_output(&full).to_owned(),
+                                _ => full,
+                            };
                             let shown: String = full.chars().take(OUTPUT_SHOWN).collect();
                             let shown = if shown.len() < full.len() { format!("{shown}\n…") } else { shown };
                             match &current.kind {

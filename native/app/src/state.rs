@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use bubble_core::delegate::{self, Children};
@@ -16,8 +16,7 @@ use bubble_core::hooks::Hooks;
 use bubble_core::mcp::{self, Hub};
 use bubble_core::skills::Skills;
 use bubble_core::{
-    AgentEvent, ChatMessage, Config, Decision, Level as ThinkingLevel, Permission, Toolbox, Turn, bubble_home,
-    http_client, run_turn,
+    AgentEvent, ChatMessage, Config, Decision, Level as ThinkingLevel, Permission, bubble_home, http_client,
 };
 use bubble_github::Gh;
 use bubble_store::{
@@ -26,10 +25,10 @@ use bubble_store::{
 use nsh_core::prelude::*;
 use tokio::sync::oneshot;
 
+use crate::engine::{self, Ending, HostTurn, Hosts, TurnEvent};
 use crate::github::{self, Level, Repo};
 use crate::manager;
 
-const MAX_TOKENS: u32 = 16_384;
 const MANAGER_KEY: &str = "manager";
 
 /// Settings keys in the store.
@@ -55,9 +54,6 @@ fn task_access_key(task_id: &str) -> String {
 fn run_cause_key(run_id: &str) -> String {
     format!("run_cause:{run_id}")
 }
-/// Set while memory has extractions phase 2 has not consolidated.
-const MEMORY_PENDING: &str = "memory_phase2_pending";
-
 /// An MCP server as Settings shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerRow {
@@ -133,6 +129,8 @@ pub struct AppState {
     /// The subscriptions signed in to, and what their services offer.
     /// ChatGPT and Grok: how each sign-in stands.
     pub accounts: Signal<Vec<Account>>,
+    /// Bubble's agent: the host process every turn runs on.
+    pub(crate) hosts: Stored<Arc<Hosts>>,
     /// MCP connections, shared by every task.
     hub: Stored<Arc<Hub>>,
     pub mcp_servers: Signal<Vec<ServerRow>>,
@@ -208,6 +206,7 @@ impl AppState {
                     .unwrap_or(ThinkingLevel::High),
             ),
             accounts: signal(Vec::new()),
+            hosts: stored(Arc::new(Hosts::default())),
             hub: stored(Arc::new(Hub::new())),
             mcp_servers: signal(Vec::new()),
             skills: signal(SkillsSummary::default()),
@@ -241,7 +240,7 @@ impl AppState {
         crate::automations::start(state);
         state.discover_models();
         state.start_tools();
-        state.start_memory();
+        state.show_hooks_and_memory();
         state.import_sessions();
         state
     }
@@ -271,11 +270,12 @@ impl AppState {
         });
     }
 
-    /// Phase 1 for conversations that changed since they were last read,
-    /// then phase 2 when there is something new; in the background.
-    fn start_memory(&self) {
-        use bubble_core::memory;
-        let app = *self;
+    /// Finds the person's skills and connects their own MCP servers, so
+    /// Settings shows what works before a task needs it.
+    /// What Settings says about hooks and memory. Both are the agent's own
+    /// work (it runs the hooks and keeps the memory, from the conversations
+    /// in its session files); the app only shows where they stand.
+    fn show_hooks_and_memory(&self) {
         let hooks = Hooks::load(&bubble_home(), None);
         self.hook_rules.set(
             hooks
@@ -284,143 +284,17 @@ impl AppState {
                 .map(|r| format!("{}: {}{}", r.events.join(", "), r.command, r.matcher.as_ref().map(|m| format!(" (matching {m})")).unwrap_or_default()))
                 .collect(),
         );
-        let root = memory::root();
-        let describe = move |extra: &str| {
-            let updated = std::fs::metadata(root.join("memory_summary.md"))
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| bubble_core::time::from_millis(d.as_millis()).date);
-            match updated {
-                Some(date) => format!("Summary updated {date}{extra}"),
-                None => format!("No memory yet{extra}"),
-            }
-        };
-        if memory::auto_disabled() {
-            self.memory_status.set(format!("{}; updating is off (BUBBLE_MEMORY_AUTO)", describe("")));
-            return;
-        }
-        let Some(model) = self.model_for(RunRole::Task).and_then(|r| self.config.with(|c| c.resolve(&r)).ok()) else {
-            self.memory_status.set(describe("; no model to update it with"));
-            return;
-        };
-        // Conversations worth reading: newest first, changed since last time.
-        let mut candidates: Vec<(String, String, Vec<ChatMessage>, usize, String)> = Vec::new();
-        let tasks = self.with_store(|s| s.list_tasks()).unwrap_or_default();
-        for task in tasks.iter().take(24) {
-            // Imported sessions were already read by the TypeScript memory.
-            if self.with_store(|s| Ok(s.is_imported(&task.task.id))).unwrap_or(false) {
-                continue;
-            }
-            let source = format!("task:{}", task.task.id);
-            let messages: Vec<Message> = self
-                .with_store(|s| Ok(s.runs_for_task(&task.task.id)?.iter().flat_map(|r| s.messages(&r.id).unwrap_or_default()).collect()))
-                .unwrap_or_default();
-            let meaningful = messages.iter().filter(|m| matches!(m.role, MessageRole::User | MessageRole::Assistant | MessageRole::Tool)).count();
-            if meaningful < memory::MIN_ENTRIES {
-                continue;
-            }
-            let newest = messages.iter().map(|m| m.created_at).max().unwrap_or_default();
-            let updated = bubble_core::time::from_millis(newest.max(0) as u128).iso;
-            let known = self.with_store(|s| s.stage1(&source)).flatten();
-            if known.is_some_and(|k| k.entry_count == messages.len() as i64 && k.source_updated_at == updated) {
-                continue;
-            }
-            let cwd = task.task.project_cwd.clone().unwrap_or_default();
-            candidates.push((source, cwd, history_of(&messages), messages.len(), updated));
-        }
-        let summary_missing = !memory::root().join("memory_summary.md").exists();
-        let has_rollouts = self.with_store(|s| s.all_stage1()).is_some_and(|r| !r.is_empty());
-        let pending = self.with_store(|s| s.setting(MEMORY_PENDING)).flatten().is_some();
-        if candidates.is_empty() && !pending && !(summary_missing && has_rollouts) {
-            self.memory_status.set(describe(""));
-            return;
-        }
-        self.memory_status.set(describe(&format!("; reading {} conversation(s)…", candidates.len())));
-        spawn(async move {
-            let jobs = candidates.clone();
-            let model_for_phase1 = model.clone();
-            let extracted = background(async move {
-                let client = http_client()?;
-                let mut found = Vec::new();
-                for (source, cwd, history, count, updated) in jobs {
-                    let transcript = memory::transcript(&history);
-                    match memory::extract(&client, &model_for_phase1, &cwd, &source, &transcript).await {
-                        Ok(extraction) => found.push((source, cwd, count, updated, extraction)),
-                        Err(error) => log::warn!("memory phase 1 for {source}: {error:#}"),
-                    }
-                }
-                Ok::<_, anyhow::Error>(found)
-            })
-            .await;
-            let found = match extracted {
-                Ok(Ok(found)) => found,
-                _ => Vec::new(),
-            };
-            let mut new = 0;
-            for (source, cwd, count, updated, extraction) in found {
-                let Some(extraction) = extraction else { continue };
-                new += 1;
-                app.with_store(|s| {
-                    s.upsert_stage1(&bubble_store::Stage1 {
-                        source: source.clone(),
-                        cwd: cwd.clone(),
-                        entry_count: count as i64,
-                        source_updated_at: updated.clone(),
-                        generated_at: bubble_store::now_ms(),
-                        raw_memory: extraction.raw_memory.clone(),
-                        rollout_summary: extraction.rollout_summary.clone(),
-                        slug: extraction.slug.clone(),
-                        selected: false,
-                    })
-                });
-            }
-            if new > 0 {
-                app.with_store(|s| s.set_setting(MEMORY_PENDING, Some("1")));
-            } else if !pending && !summary_missing {
-                app.memory_status.set(describe(""));
-                return;
-            }
-            // Phase 2 over this app's extractions and the TypeScript ones.
-            let mut all = app.with_store(|s| s.all_stage1()).unwrap_or_default();
-            let native: HashSet<String> = all.iter().map(|s| s.source.clone()).collect();
-            all.extend(bubble_store::legacy_stage1(&memory::root().join("state.sqlite")).into_iter().filter(|s| !native.contains(&s.source)));
-            all.sort_by(|a, b| b.source_updated_at.cmp(&a.source_updated_at));
-            let selected: Vec<memory::Rollout> = all
-                .iter()
-                .take(memory::SELECTION_LIMIT)
-                .map(|s| memory::Rollout {
-                    source: s.source.clone(),
-                    cwd: s.cwd.clone(),
-                    updated_at: s.source_updated_at.clone(),
-                    raw_memory: s.raw_memory.clone(),
-                    rollout_summary: s.rollout_summary.clone(),
-                    slug: s.slug.clone(),
-                    selected: s.selected,
-                })
-                .collect();
-            let removed = all.iter().skip(memory::SELECTION_LIMIT).filter(|s| s.selected).count();
-            app.memory_status.set(describe("; consolidating…"));
-            let sources: Vec<String> = selected.iter().map(|r| r.source.clone()).collect();
-            let done = background(async move {
-                let client = http_client()?;
-                memory::consolidate(&client, &model, &memory::root(), &selected, removed).await
-            })
-            .await;
-            match done {
-                Ok(Ok(())) => {
-                    app.with_store(|s| s.mark_stage1_selected(&sources));
-                    app.with_store(|s| s.set_setting(MEMORY_PENDING, None));
-                    app.memory_status.set(describe(""));
-                }
-                Ok(Err(error)) => app.memory_status.set(describe(&format!("; last update failed: {error:#}"))),
-                Err(error) => app.memory_status.set(describe(&format!("; last update failed: {error}"))),
-            }
+        let updated = std::fs::metadata(bubble_core::memory::root().join("memory_summary.md"))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| bubble_core::time::from_millis(d.as_millis()).date);
+        self.memory_status.set(match updated {
+            Some(date) => format!("Summary updated {date}"),
+            None => "No memory yet".to_owned(),
         });
     }
 
-    /// Finds the person's skills and connects their own MCP servers, so
-    /// Settings shows what works before a task needs it.
     fn start_tools(&self) {
         let app = *self;
         let home = bubble_home();
@@ -880,8 +754,6 @@ impl AppState {
             busy: signal(false),
             queued: signal(false),
             task_id: stored(task_id),
-            grants: stored(Arc::new(Mutex::new(HashSet::new()))),
-            unlocked: stored(Arc::new(Mutex::new(HashSet::new()))),
             children: stored(children),
             subagents: signal(Vec::new()),
             restored_children: stored(HashSet::new()),
@@ -1004,10 +876,6 @@ pub struct Conversation {
     /// Waiting for a free slot.
     pub queued: Signal<bool>,
     pub task_id: Stored<Option<String>>,
-    /// What "allow for this task" granted.
-    grants: Stored<Arc<Mutex<HashSet<String>>>>,
-    /// The deferred (MCP) tools the agent has loaded.
-    unlocked: Stored<Arc<Mutex<HashSet<String>>>>,
     /// Subagents the task's agent started; they outlive its turns.
     children: Stored<Arc<Children>>,
     pub subagents: Signal<Vec<delegate::Snapshot>>,
@@ -1022,8 +890,8 @@ pub struct Conversation {
     active_turn: Stored<String>,
     active_run: Stored<String>,
     checkpoint_at: Stored<i64>,
-    /// Cancels the running turn.
-    abort: Stored<Option<tokio::task::AbortHandle>>,
+    /// Stops the running turn.
+    abort: Stored<Option<Arc<tokio::sync::Notify>>>,
     /// Called after the lines change, to keep the newest in view.
     on_change: Stored<Option<Rc<dyn Fn()>>>,
 }
@@ -1193,8 +1061,9 @@ impl Conversation {
             self.changed();
             return;
         }
-        if let Some(handle) = self.abort.replace(None) {
-            handle.abort();
+        // The agent ends the turn and says so; what it wrote so far stays.
+        if let Some(stop) = self.abort.get() {
+            stop.notify_one();
         }
         self.children.get().cancel_all();
     }
@@ -1389,8 +1258,9 @@ impl Conversation {
             None => app.thinking.get_untracked(),
         };
         let model = reference
+            .clone()
             .ok_or_else(|| anyhow!("no model is set"))
-            .and_then(|reference| app.config.with(|c| c.resolve(&reference)));
+            .and_then(|reference| app.config.with(|c| c.resolve(&reference)).map(|_| reference));
         let model = match model {
             Ok(model) => model,
             Err(error) => {
@@ -1408,8 +1278,10 @@ impl Conversation {
                 return;
             }
         };
-        let (system, cwd, host_tools) = match &task_id {
-            None => (with_instructions(manager::PROMPT.to_owned(), None), None, manager::specs()),
+        // The Manager has a role of its own and only the app's tools; a task
+        // is Bubble's coding agent in its project, told what the task is.
+        let (system_prompt, append_system_prompt, cwd, host_tools) = match &task_id {
+            None => (Some(with_instructions(manager::PROMPT.to_owned(), None)), None, None, manager::specs()),
             Some(id) => {
                 let task = app.with_store(|s| s.get_task(id)).flatten();
                 let title = task.as_ref().map(|t| t.title.clone()).unwrap_or_default();
@@ -1417,11 +1289,13 @@ impl Conversation {
                 let cwd = project.as_deref().map(PathBuf::from).filter(|p| p.is_dir());
                 let tools = if cwd.is_some() { github::task_tools(app, project.as_deref()) } else { Vec::new() };
                 let full = app.task_full_access(id) && self.driven_by_person(app, &run.id);
-                let prompt = task_prompt(&title, project.as_deref(), cwd.is_some(), full);
-                (with_instructions(prompt, cwd.as_deref()), cwd, tools)
+                (None, Some(task_prompt(&title, project.as_deref(), cwd.is_some(), full)), cwd, tools)
             }
         };
-        let history = app.with_store(|s| Ok(history_of(&s.messages(&run.id)?))).unwrap_or_default();
+        // The newest message is what the agent answers; it keeps the rest
+        // itself, in the run's session.
+        let stored = app.with_store(|s| s.messages(&run.id)).unwrap_or_default();
+        let (text, pictures, recap) = prompt_of(&stored);
         app.with_store(|s| s.set_run_status(&run.id, RunStatus::Running, None));
         self.queued.set(false);
         self.busy.set(true);
@@ -1431,65 +1305,50 @@ impl Conversation {
         app.refresh_tasks();
         self.changed();
 
-        let turn = Turn {
+        let turn = HostTurn {
+            session_id: engine::session_of(&run.id),
+            // Without a project folder there are no file or command tools,
+            // and the session lives in the app's own folder.
+            allowed_tools: cwd.is_none().then(Vec::new),
+            cwd: cwd.unwrap_or_else(scratch_folder).to_string_lossy().into_owned(),
+            text,
+            pictures,
             model,
-            system: Some(system),
-            history,
-            cwd,
-            grants: self.grants.get(),
+            thinking: thinking.as_str().to_owned(),
+            append_system_prompt,
+            system_prompt,
             host_tools,
-            max_tokens: MAX_TOKENS,
-            thinking,
-            toolbox: None,
-            unlocked: self.unlocked.get(),
-            hooks: None,
-            role: bubble_core::hooks::Role::Parent,
-            allowed: None,
-            ask: true,
-            children: task_id.is_some().then(|| self.children.get()),
+            recap,
         };
-        // Tasks with a project get skills, web and MCP tools.
-        let tools_for = turn.cwd.clone();
-        let hub = app.hub.get();
-        let config = app.config.with(|c| c.clone());
+        let hosts = app.hosts.get();
+        let stop = Arc::new(tokio::sync::Notify::new());
+        self.abort.replace(Some(stop.clone()));
         let conversation = *self;
         let run_id = run.id.clone();
         // The turn belongs to the app, not to the screen that started it.
         app.root.run(move || {
             spawn(async move {
-                let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+                let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
                 let job = background(async move {
-                    let client = http_client()?;
-                    let mut turn = turn;
-                    turn.hooks = Some(Arc::new(Hooks::load(&bubble_home(), tools_for.as_deref())));
-                    if let Some(project) = tools_for {
-                        turn.toolbox = Some(Arc::new(Toolbox::load(&hub, &client, &config, Some(&project)).await));
-                        if let Some(children) = &turn.children {
-                            children.set_env(delegate::Env {
-                                client: client.clone(),
-                                config: config.clone(),
-                                model: turn.model.clone(),
-                                thinking: turn.thinking,
-                                cwd: project.clone(),
-                                toolbox: turn.toolbox.clone(),
-                                hooks: turn.hooks.clone(),
-                            });
-                        }
-                    }
-                    run_turn(&client, turn, sender).await
+                    let host = hosts.get().await?;
+                    engine::run(host, turn, sender, stop).await
                 });
-                conversation.abort.replace(Some(job.abort_handle()));
                 let mut step = 0usize;
                 while let Some(event) = receiver.recv().await {
-                    conversation.apply(app, &run_id, event, &mut step);
+                    match event {
+                        TurnEvent::Agent(event) => conversation.apply(app, &run_id, event, &mut step),
+                        TurnEvent::Compacted => conversation.note_compaction(),
+                        TurnEvent::Subagent(_) => {}
+                    }
                 }
                 let joined = job.await;
                 conversation.abort.replace(None);
                 app.refresh_servers();
-                let stopped = matches!(&joined, Err(error) if error.is_cancelled());
-                let result = match joined {
-                    Ok(result) => result,
-                    Err(error) => Err(anyhow!("the turn stopped: {error}")),
+                let (stopped, result) = match joined {
+                    Ok(Ok(Ending::Stopped)) => (true, Ok(())),
+                    Ok(Ok(Ending::Completed)) => (false, Ok(())),
+                    Ok(Err(error)) => (false, Err(error)),
+                    Err(error) => (false, Err(anyhow!("the turn stopped: {error}"))),
                 };
                 let pending = conversation.pending.get();
                 let partial_message = if stopped || result.is_err() {
@@ -1507,7 +1366,6 @@ impl Conversation {
                 match result {
                     _ if stopped => {
                         app.with_store(|s| s.set_run_status(&run_id, RunStatus::Idle, None));
-
                     }
                     Ok(()) => {
                         app.with_store(|s| s.set_run_status(&run_id, RunStatus::Idle, None));
@@ -1538,6 +1396,18 @@ impl Conversation {
                 app.pump_queue();
             });
         });
+    }
+
+    /// The agent summarized the conversation so far to stay within the
+    /// model's context; shown before the reply in progress.
+    fn note_compaction(&self) {
+        let pending = self.pending.get();
+        let note = Line::new(format!("checkpoint-{}", bubble_store::now_ms()), LineKind::Notice, CHECKPOINT_NOTE).in_turn(&self.active_turn.get());
+        self.lines.update(|lines| {
+            let at = lines.iter().position(|l| l.id == format!("{pending}:reasoning")).unwrap_or(lines.len());
+            lines.insert(at, note);
+        });
+        self.changed();
     }
 
     /// Shows and keeps what the turn reports.
@@ -1699,6 +1569,30 @@ fn with_instructions(prompt: String, cwd: Option<&std::path::Path>) -> String {
     }
 }
 
+/// Where a conversation without a project folder keeps its session.
+fn scratch_folder() -> PathBuf {
+    let folder = bubble_home().join("native").join("manager");
+    std::fs::create_dir_all(&folder).ok();
+    folder
+}
+
+/// What the agent is handed for a turn: the newest message that sets it
+/// going (its text as the model should read it, and its pictures), and a
+/// recap of what was said before, for a run the agent has no session of.
+fn prompt_of(messages: &[Message]) -> (String, Vec<bubble_host::Picture>, Option<String>) {
+    let opener = messages.iter().rposition(|m| matches!(m.role, MessageRole::User | MessageRole::System | MessageRole::External));
+    let Some(index) = opener else { return (String::new(), Vec::new(), None) };
+    let message = &messages[index];
+    let (text, pictures) = match message.content.as_deref().and_then(|c| serde_json::from_str::<ChatMessage>(c).ok()) {
+        Some(ChatMessage::User { text, images }) => (
+            text,
+            images.into_iter().map(|image| bubble_host::Picture { media_type: image.media_type, data: image.data }).collect(),
+        ),
+        _ => (message.text.clone(), Vec::new()),
+    };
+    (text, pictures, engine::recap_of(&history_of(&messages[..index])))
+}
+
 fn task_prompt(title: &str, project: Option<&str>, has_tools: bool, full: bool) -> String {
     let place = match (project, has_tools) {
         (Some(path), true) => format!(
@@ -1709,7 +1603,7 @@ fn task_prompt(title: &str, project: Option<&str>, has_tools: bool, full: bool) 
                  Say what a risky step will do before you take it, prefer reversible steps, and never push, \
                  delete or expose credentials just because nothing asks."
             } else {
-                "Changes and commands wait for the person's yes."
+                "Commands, and changes outside the project, wait for the person's yes."
             }
         ),
         (Some(path), false) => format!("The project folder {path} cannot be found, so you have no tools; say what you would do."),

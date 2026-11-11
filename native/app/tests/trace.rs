@@ -81,17 +81,33 @@ fn model() -> (String, mpsc::Sender<()>, mpsc::Sender<()>) {
                         + &delta(
                             json!({"content":if index == 2 { "Keep this stopped reply." } else { "Keep this failed reply." }}),
                         );
-                    header(&mut stream, events.len() + 1000);
-                    stream.write_all(events.as_bytes()).unwrap();
+                    // A streamed reply as services send it: in chunks, with no
+                    // length known ahead. It never gets its last chunk.
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{events}\r\n",
+                        events.len()
+                    )
+                    .unwrap();
                     stream.flush().unwrap();
                     if index == 2 {
                         // Stopping cancels this in-flight request.
                         let mut byte = [0];
                         let _ = stream.read(&mut byte);
                     }
-                    // Index 3 deliberately closes a truncated HTTP body.
+                    // Index 3 deliberately closes before the reply is complete.
                 }
-                _ => break,
+                // The agent tries a reply that broke off again; the service
+                // then turns it down for good, which ends the turn.
+                _ => {
+                    let body = r#"{"error":{"message":"The model is not available.","type":"invalid_request_error"}}"#;
+                    write!(
+                        stream,
+                        "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
             }
         }
     });
@@ -145,6 +161,7 @@ fn live_order_disclosures_terminal_states_and_restart_agree() {
         std::env::set_var("BUBBLE_NO_SHELL_ENV", "1");
         std::env::set_var("BUBBLE_MEMORY_AUTO", "0");
         std::env::set_var("BUBBLE_GH", root.join("no-gh"));
+        std::env::set_var("BUBBLE_PROVIDER_MAX_RETRIES", "0");
     }
     let long = Duration::from_secs(15);
     // New work starts with the Manager; this test starts from a task already made.

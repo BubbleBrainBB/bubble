@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bubble-core", "crates/bubble-store", "crates/bubble-github", "crates/bubble-term", "app", "cli"]
+members = ["crates/bubble-core", "crates/bubble-host", "crates/bubble-store", "crates/bubble-github", "crates/bubble-term", "app", "cli"]
 
 [workspace.package]
 edition = "2024"

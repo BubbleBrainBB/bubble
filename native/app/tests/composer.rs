@@ -163,8 +163,9 @@ fn the_composer_mentions_files_takes_pictures_and_remembers() {
     app.type_text("text:Message this task", "once more").unwrap();
     app.submit("text:once more").unwrap();
     app.wait_for_within("label:Send", long).unwrap();
-    let last = requests().lines().last().unwrap_or_default().to_owned();
-    assert!(last.contains("\"model\":\"step-3\""), "the task's own model ran: {}", &last[..last.len().min(300)]);
+    // The agent writes this provider's requests over several lines.
+    let sent = requests().replace("\": \"", "\":\"");
+    assert!(sent.contains("\"model\":\"step-3\""), "the task's own model ran");
 
     std::fs::remove_dir_all(&root).ok();
 }

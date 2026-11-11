@@ -1,0 +1,17 @@
+[package]
+name = "bubble-host"
+description = "Client for `bubble host --stdio`: Bubble's agent (the TypeScript core) as a child process."
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "process", "io-util", "time"] }
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

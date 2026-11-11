@@ -4,6 +4,7 @@
 
 mod automations;
 mod changes;
+mod engine;
 mod github;
 mod manager;
 mod pages;
