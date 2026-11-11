@@ -49,6 +49,11 @@ fn task_access_key(task_id: &str) -> String {
     format!("task_access:{task_id}")
 }
 /// Why a run began, when the person chose it (a rerun).
+/// The subagents a task's agent started, as the agent reported them.
+fn subagents_key(task_id: &str) -> String {
+    format!("subagents:{task_id}")
+}
+
 fn run_cause_key(run_id: &str) -> String {
     format!("run_cause:{run_id}")
 }
@@ -827,7 +832,6 @@ impl AppState {
             task_id: stored(task_id),
             children: stored(children),
             subagents: signal(Vec::new()),
-            restored_children: stored(HashSet::new()),
             approvals: stored(HashMap::new()),
             pending: stored(String::new()),
             active_turn: stored(String::new()),
@@ -839,24 +843,43 @@ impl AppState {
             on_change: stored(None),
         });
         self.conversations.with(|map| map.insert(key.to_owned(), conversation));
-        // The children's progress, shown under the conversation.
-        let children = conversation.children.get();
-        // Children kept from before show at once.
-        let snapshots = children.snapshots();
+        // Subagents from before show at once: those the agent reported in an
+        // earlier run of the app, and those the earlier engine kept on disk.
+        let mut snapshots = conversation.children.get().snapshots();
+        let stored_ones = conversation
+            .task_id
+            .get()
+            .and_then(|id| self.with_store(|s| s.setting(&subagents_key(&id))).flatten())
+            .and_then(|json| serde_json::from_str::<Vec<delegate::Snapshot>>(&json).ok())
+            .unwrap_or_default();
+        for mut child in stored_ones {
+            // The app closed while it ran; the agent it belonged to is gone.
+            if !child.status.is_final() {
+                child.status = delegate::Status::Failed;
+                child.error = Some("Interrupted when Bubble closed".to_owned());
+            }
+            if !snapshots.iter().any(|c| c.id == child.id) {
+                snapshots.push(child);
+            }
+        }
         conversation.lines.update(|lines| transcript::restore_child_anchors(lines, &snapshots));
-        conversation.restored_children.replace(snapshots.iter().map(|c| c.id.clone()).collect());
         conversation.subagents.set(snapshots);
+        // The earlier engine's children still change when the person applies
+        // or discards a worktree one of them kept.
+        let children = conversation.children.get();
         let mut changes = children.subscribe();
-        let app = *self;
         self.root.run(|| {
             spawn(async move {
                 while changes.changed().await.is_ok() {
-                    let snapshots = children.snapshots();
-                    let restored = conversation.restored_children.get();
-                    let new = snapshots.iter().filter(|c| !restored.contains(&c.id)).cloned().collect::<Vec<_>>();
-                    conversation.lines.update(|lines| transcript::anchor_children(lines, &new));
-                    conversation.subagents.set(snapshots);
-                    conversation.checkpoint(app, true);
+                    let kept = children.snapshots();
+                    conversation.subagents.update(|all| {
+                        for child in kept {
+                            match all.iter_mut().find(|c| c.id == child.id) {
+                                Some(existing) => *existing = child,
+                                None => all.push(child),
+                            }
+                        }
+                    });
                 }
             });
         });
@@ -935,7 +958,6 @@ pub struct Conversation {
     /// Subagents the task's agent started; they outlive its turns.
     children: Stored<Arc<Children>>,
     pub subagents: Signal<Vec<delegate::Snapshot>>,
-    restored_children: Stored<HashSet<String>>,
     /// Disclosure choices belong to the conversation, including across page changes.
     pub opened: Signal<HashSet<String>>,
     pub following: Signal<bool>,
@@ -1394,7 +1416,7 @@ impl Conversation {
                     match event {
                         TurnEvent::Agent(event) => conversation.apply(app, &run_id, event, &mut step),
                         TurnEvent::Compacted => conversation.note_compaction(),
-                        TurnEvent::Subagent(_) => {}
+                        TurnEvent::Subagent { tool, update } => conversation.subagent_update(app, &tool, update),
                     }
                 }
                 let joined = job.await;
@@ -1454,6 +1476,101 @@ impl Conversation {
         });
     }
 
+    /// A subagent moved on: kept for the panel under the call that
+    /// started it, and across restarts of the app.
+    fn subagent_update(&self, app: AppState, tool: &str, update: bubble_host::SubagentUpdate) {
+        use delegate::{Snapshot, Status};
+        let status = match update.status.as_str() {
+            "queued" => Status::Queued,
+            "completed" => Status::Completed,
+            "failed" => Status::Failed,
+            "blocked" => Status::Blocked,
+            "cancelled" => Status::Cancelled,
+            _ => Status::Running,
+        };
+        let mut settled = false;
+        let mut known = true;
+        self.subagents.update(|children| {
+            let index = match children.iter().position(|c| c.id == update.sub_agent_id) {
+                Some(index) => index,
+                None => {
+                    known = false;
+                    // What it was asked is the title of the call that started it.
+                    let asked = self.lines.with_untracked(|lines| {
+                        lines
+                            .iter()
+                            .rev()
+                            .find(|l| l.call_id.as_deref() == Some(update.parent_tool_call_id.as_str()))
+                            .map(|l| l.text.strip_prefix("Started a subagent: ").unwrap_or(&l.text).to_owned())
+                    });
+                    let workflow = tool == "run_workflow";
+                    let route = update.route.as_ref();
+                    let part = |key: &str| route.and_then(|r| r.get(key)).and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+                    children.push(Snapshot {
+                        id: update.sub_agent_id.clone(),
+                        parent_call_id: Some(update.parent_tool_call_id.clone()),
+                        nickname: update.nickname.clone().unwrap_or_else(|| update.agent_name.clone()),
+                        profile: update.agent_name.clone(),
+                        task: if workflow { String::new() } else { asked.clone().unwrap_or_default() },
+                        description: if workflow { None } else { asked },
+                        status,
+                        model: match (part("providerId"), part("model")) {
+                            (provider, model) if !provider.is_empty() && !model.is_empty() => format!("{provider}:{model}"),
+                            (_, model) => model,
+                        },
+                        summary: String::new(),
+                        notes: Vec::new(),
+                        error: None,
+                        workflow,
+                        pending_inputs: 0,
+                        category: update.category.clone(),
+                        tokens: 0,
+                        worktree: None,
+                    });
+                    children.len() - 1
+                }
+            };
+            let child = &mut children[index];
+            settled = child.status != status;
+            child.status = status;
+            match update.child_event.as_deref() {
+                Some(bubble_host::Event::ToolStart { id, name, args }) => {
+                    let call = bubble_core::ToolCall { id: id.clone(), name: name.clone(), arguments: args.to_string() };
+                    child.notes.push(bubble_core::tools::describe(&call));
+                    if child.notes.len() > 20 {
+                        child.notes.remove(0);
+                    }
+                }
+                Some(bubble_host::Event::TurnEnd { usage: Some(usage), .. }) => {
+                    child.tokens += usage.prompt_tokens + usage.completion_tokens;
+                }
+                // A new reply replaces what the last one said.
+                Some(bubble_host::Event::TurnStart) => child.summary.clear(),
+                _ => {}
+            }
+            if let Some(delta) = &update.summary_delta {
+                child.summary.push_str(delta);
+            }
+            match (status, &update.message) {
+                (Status::Completed, Some(message)) if !message.trim().is_empty() => child.summary = message.clone(),
+                (Status::Failed | Status::Blocked | Status::Cancelled, Some(message)) => child.error = Some(message.clone()),
+                _ => {}
+            }
+        });
+        if !known {
+            let children = self.subagents.get_untracked();
+            self.lines.update(|lines| transcript::anchor_children(lines, &children));
+        }
+        if !known || settled {
+            if let Some(task_id) = self.task_id.get() {
+                let kept = self.subagents.with_untracked(|children| serde_json::to_string(children).ok());
+                app.with_store(|s| s.set_setting(&subagents_key(&task_id), kept.as_deref()));
+            }
+            self.checkpoint(app, true);
+            self.changed();
+        }
+    }
+
     /// The agent summarized the conversation so far to stay within the
     /// model's context; shown before the reply in progress.
     fn note_compaction(&self) {
@@ -1511,9 +1628,6 @@ impl Conversation {
                 let turn = self.active_turn.get();
                 self.lines.update(|lines| {
                     transcript::assistant(lines, &turn, &pending, &message);
-                    let restored = self.restored_children.get();
-                    let children = self.children.get().snapshots().into_iter().filter(|c| !restored.contains(&c.id)).collect::<Vec<_>>();
-                    transcript::anchor_children(lines, &children);
                 });
                 let checkpoint = self.transcript_checkpoint();
                 app.with_store(|s| s.append_message_and_transcript(run_id, MessageRole::Assistant, text,
@@ -1565,11 +1679,7 @@ impl Conversation {
                     ToolStatus::Done
                 };
                 let turn = self.active_turn.get();
-                let snapshots = self.children.get().snapshots();
-                let restored = self.restored_children.get();
-                let new = snapshots.iter().filter(|c| !restored.contains(&c.id)).cloned().collect::<Vec<_>>();
                 self.lines.update(|lines| {
-                    transcript::anchor_children(lines, &new);
                     if let Some(line) = transcript::tool_mut(lines, &turn, &call_id) {
                         if let LineKind::Tool { name, .. } = &line.kind {
                             line.kind = LineKind::Tool { name: name.clone(), status, output: output.content };
@@ -1577,7 +1687,6 @@ impl Conversation {
                         line.live.clear();
                     }
                 });
-                self.subagents.set(snapshots);
                 self.checkpoint(app, true);
                 self.changed();
             }

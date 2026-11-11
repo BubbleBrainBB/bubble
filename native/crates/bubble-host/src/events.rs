@@ -135,6 +135,9 @@ pub struct SubagentUpdate {
     pub nickname: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
+    /// The model the subagent was routed to (`model`, `providerId`, ...).
+    #[serde(default)]
+    pub route: Option<Value>,
     /// "queued", "running", "completed", "failed", "blocked", "cancelled".
     pub status: String,
     /// What the subagent itself is doing.

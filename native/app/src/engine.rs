@@ -65,8 +65,9 @@ pub enum TurnEvent {
     Agent(AgentEvent),
     /// The context was summarized to stay within the model's window.
     Compacted,
-    /// A subagent of the turn moved on.
-    Subagent(bubble_host::SubagentUpdate),
+    /// A subagent moved on; `tool` is the call it reports through
+    /// (spawn_agent, wait_agent, run_workflow).
+    Subagent { tool: String, update: bubble_host::SubagentUpdate },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,8 +249,8 @@ fn report(step: &mut Step, event: Event, events: &mpsc::UnboundedSender<TurnEven
                 agent(AgentEvent::ToolStarted { call, description });
             }
         }
-        Event::ToolUpdate { update, .. } => {
-            let _ = events.send(TurnEvent::Subagent(update));
+        Event::ToolUpdate { name, update, .. } => {
+            let _ = events.send(TurnEvent::Subagent { tool: name, update });
         }
         Event::ToolEnd { id, result, .. } => {
             let denied = matches!(result.status.as_deref(), Some("blocked"));
