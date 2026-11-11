@@ -1,6 +1,17 @@
 # Bubble Native：NSH + Rust 重写计划
 
-状态：**v1，执行中**（2026-11-08）。
+状态：**v2，执行中**（2026-11-11）。v1 的"Agent 核心用 Rust 重写"已撤销，见下面"方向变更"；"决定"到"阶段"各节是 v1 的原文，留作记录。
+
+## 方向变更（2026-11-10 至 11）
+
+1. **Agent 核心留在 TypeScript。** npm 上的 0.0.63 是 Rust 版，核对后还缺 SDK、飞书、后台任务、`question`、LSP、`/goal`、`/rewind`、权限规则等，2026-11-10 用 0.0.64（代码同 0.0.62）回滚。用户定：不再用 Rust 重写核心。
+2. **桌面端仍用 NSH。** 界面用 Rust 写，Agent 是一个子进程：`bubble host --stdio`（`src/host/`），按行分隔的 JSON-RPC。应用发起会话和回合、读事件；宿主反过来向应用要审批、提问的回答、文件夹信任，以及应用自己执行的工具（Manager 的、GitHub 的）的结果。协议见 `src/host/protocol.ts`，Rust 客户端是 `native/crates/bubble-host`。
+3. **对话记录归 TS。** 每个 Run 是一个 Bubble 会话（`desk-<run id>`，在 `~/.bubble/sessions`），命令行可以续接，压缩、hooks、权限规则、记忆都是核心自己的。`bubble.db` 留任务、Run、GitHub 关联，以及一份显示用的消息日志。
+4. **界面照 Grok Bot。** 聊天软件式：左栏只有搜索、新建和 bot 列表；bot 是长期 Agent（名字、头像、指令、可选的项目文件夹、定时 Routine，一条持续的对话）；Manager 是 Main Bot；"任务"的概念取消；PR 和 issue 的动态作为消息发到对应 bot 的对话；Skills、模型等进设置。
+
+不再开发：`bubble-core` 里的 agent 循环、provider、工具、MCP 客户端、记忆管线，`native/cli`（Rust 命令行与 TUI）和 `bubble-term`。它们暂时留在仓库里（应用还用着其中的纯函数：工具行的描述、`@文件` 补全、读配置），功能对齐后删除。
+
+仍未做：把 Node 运行时捆进 `Bubble.app`（现在开发构建用仓库的 `dist/main.js`，否则找 PATH 上的 `bubble`）；命令行续接桌面会话后，新增的轮次回到桌面还看不到；`question` 工具和计划模式在桌面还没有卡片（现在直接回绝，agent 改在回复里问）；MCP 服务器的 OAuth 登录随 Rust 的 MCP 客户端一起没有了。
 
 ## 决定
 
@@ -205,7 +216,16 @@ native/
   - 工作轨迹 UI（照本机 Codex 26.1103 的实现，`/Applications/ChatGPT.app`，bundle id com.openai.codex）：连续工具调用折成一行摘要（"Edited files, read files, ran commands"，失败数标红）；运行中显示进行时（"Running …"/推理标题/"Thinking"）；推理不再单独成行，只在展开的组里以 "Thought" 出现；一轮以回复结束时，之前的工作折到 "Worked for 1m 20s" 下面；失败或被停的轮不折；Manager 的任务卡片不折。路径显示为相对项目、家目录用 `~`。逻辑在 `app/src/trace.rs`（纯函数，带测试）。
   - 修了两个旧 bug：模型复用 tool call id 时审批卡片插到旧行后面（现在旧行改名让位）；重载时工具行时间丢失。
 
+- 2026-11-11：引擎切到 TypeScript 核心（已提交，分支 feat/native-rust）。
+  - `src/host/`：`bubble host --stdio`。SDK 补了宿主需要的几样：自带系统提示（`systemPrompt`）、内置工具白名单（`allowedTools`）、MCP 状态与重连、一次性文本补全、`shutdown`。6 个测试。
+  - `native/crates/bubble-host`：起进程（`BUBBLE_HOST_ENTRY` / 应用内自带 / 开发构建用仓库的 `dist` / PATH 上的 `bubble`）、收发请求、按会话分发事件；自带 runtime，任何执行器都能 await。有一个对真实宿主进程 + 假模型的端到端测试。
+  - `native/app/src/engine.rs`：把核心的事件翻成对话层原有的词汇，所以审批卡片、Manager 和 GitHub 的工具、停止、排队、工作轨迹都照旧。任务、Manager、GitHub 分诊、子代理面板、设置页的模型 / 账号 / 技能 / MCP 全部走宿主进程。旧引擎留下的 Run 在第一次用新会话时带一段此前对话的摘录。
+  - 12 个无头测试全部在新引擎上通过；为此改了测试里的假模型（核心会先问 `/models`、工作流在后台跑要 `wait_workflow`、断流用 chunked 模拟）。
+  - 顺带修了核心的技能 frontmatter 不认 YAML 块标量（`description: |`）。发现但没修：回复按 `content-length` 截断时核心会一直挂着（已单独立项）。
+
 ## 修订记录
+
+- v2（2026-11-11）：核心留在 TypeScript，桌面经 `bubble host --stdio`；界面改为 Grok Bot 式。
 
 - v1（2026-11-08）：初稿。
 - v1.1（2026-11-08）：补进度。工具链要求 Rust ≥ 1.99（nsh-core 0.4 用到新标准库特性）。
