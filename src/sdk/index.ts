@@ -54,6 +54,7 @@ import { parseSkillInvocation } from "../skills/invocation.js";
 import type { SkillSummary } from "../skills/types.js";
 import { GoalStore } from "../goal/store.js";
 import { McpManager, gateMcpTools } from "../mcp/manager.js";
+import type { McpServerState } from "../mcp/types.js";
 import { loadMcpConfig } from "../mcp/config.js";
 import { ExternalHookController } from "../hooks/controller.js";
 import { buildMemoryPrompt } from "../memory/store.js";
@@ -154,6 +155,18 @@ export interface RunTurnOptions extends TurnHandlers {
    * harness) A/B prompt variants without forking the prompt builder.
    */
   appendSystemPrompt?: string;
+  /**
+   * Replaces the built system prompt, for a host whose agent has a role of its
+   * own (a coordinator that hands work out and never touches files, say).
+   * appendSystemPrompt still applies after it.
+   */
+  systemPrompt?: string;
+  /**
+   * Offer only these built-in and MCP tools. Host tools are always offered.
+   * Omit for all of them; an empty list leaves the host tools alone, and then
+   * MCP servers are not started either.
+   */
+  allowedTools?: string[];
   /**
    * Creates the provider instance for a subagent route whose provider differs
    * from the turn's provider (e.g. spawn_agent with `model: "provider:model"`).
@@ -495,6 +508,42 @@ export class BubbleSdk {
     await (await manager?.catch(() => null))?.shutdown().catch(() => undefined);
   }
 
+  /**
+   * The MCP servers of a folder and how each connection stands. Starts them
+   * if no turn has yet (the same lazy start a turn does).
+   */
+  async getMcpStatus(cwd?: string): Promise<McpServerState[]> {
+    const folder = cwd || this.defaultCwd;
+    await this.mcpToolsFor(folder);
+    const manager = await this.mcpManagersByCwd.get(folder);
+    return manager?.getStates() ?? [];
+  }
+
+  /** Reconnect one MCP server of a folder; null when it is not configured. */
+  async reconnectMcpServer(name: string, cwd?: string): Promise<McpServerState | null> {
+    const folder = cwd || this.defaultCwd;
+    await this.mcpToolsFor(folder);
+    const manager = await this.mcpManagersByCwd.get(folder);
+    if (!manager) return null;
+    const state = await manager.reconnect(name);
+    // The cached tool list predates the reconnect.
+    this.mcpToolsByCwd.set(folder, Promise.resolve(manager.getToolEntries()));
+    return state;
+  }
+
+  /**
+   * Stop every running turn and the MCP servers this instance started. Call
+   * before the host process exits; the instance is not usable afterwards.
+   */
+  async shutdown(): Promise<void> {
+    const sessions = new Set([...this.turnRuntimes.values()].map((runtime) => runtime.sessionId));
+    await Promise.all([...sessions].map((id) => this.stopAndWait(id, { cancelQueued: true }).catch(() => 0)));
+    const managers = [...this.mcpManagersByCwd.values()];
+    this.mcpManagersByCwd.clear();
+    this.mcpToolsByCwd.clear();
+    await Promise.all(managers.map(async (pending) => (await pending.catch(() => null))?.shutdown().catch(() => undefined)));
+  }
+
   /** Configured providers + default model, for a host's model picker. */
   getModelConfig(): {
     defaultProviderId: string;
@@ -507,6 +556,21 @@ export class BubbleSdk {
       defaultModel: this.userConfig.getDefaultModel() ?? "",
       providers: configured.map((p) => ({ id: p.id, baseURL: p.baseURL, hasApiKey: Boolean(p.apiKey) })),
     };
+  }
+
+  /**
+   * One-off text from the model, outside any session: no tools, no system
+   * prompt, nothing written to a transcript. For small host chores such as
+   * naming a task, where a full agent turn would be wasteful.
+   */
+  async completeText(options: { prompt: string; model?: string; signal?: AbortSignal }): Promise<string> {
+    const { provider, model } = this.resolveProvider(randomUUID(), options.model);
+    return provider.complete([{ role: "user", content: options.prompt }], {
+      model: decodeModel(model).modelId,
+      temperature: 0.2,
+      thinkingLevel: "off",
+      abortSignal: options.signal,
+    });
   }
 
   // ── The turn ─────────────────────────────────────────────────────────────
@@ -713,6 +777,8 @@ export class BubbleSdk {
         skillPaths: [...this.userConfig.getSkillPaths(), ...(options.skillPaths ?? [])],
         disabledSkills: this.userConfig.getDisabledSkills(),
       });
+      const allowedTools = options.allowedTools ? new Set(options.allowedTools) : undefined;
+      const offered = (tool: ToolRegistryEntry) => !allowedTools || allowedTools.has(tool.name);
       const tools = createAllTools(cwd, skillRegistry, {
         approvalController,
         fileStateTracker,
@@ -720,8 +786,12 @@ export class BubbleSdk {
         questionController,
         goalStore: new GoalStore(),
         checkpoints: () => session.getCheckpoints(),
-      });
-      tools.push(...gateMcpTools(await awaitWithAbort(this.mcpToolsFor(cwd), abortSignal), approvalController));
+      }).filter(offered);
+      if (!allowedTools || [...allowedTools].some((name) => name.startsWith("mcp__"))) {
+        tools.push(
+          ...gateMcpTools(await awaitWithAbort(this.mcpToolsFor(cwd), abortSignal), approvalController).filter(offered),
+        );
+      }
       const hostTools = options.hostTools ?? [];
       const registered = new Set(tools.map(tool => tool.name));
       for (const tool of hostTools) {
@@ -751,10 +821,13 @@ export class BubbleSdk {
       // Same ordering as the TUI: the provenance gate must run before memories
       // enter the system prompt.
       purgeUnsafeMemorySources(cwd);
-      const memoryPrompt = buildMemoryPrompt(cwd);
-      const builtSystemPrompt = buildSystemPrompt({
+      // A host prompt of its own brings its own context: memories and the
+      // skill catalog belong to the coding prompt.
+      const memoryPrompt = options.systemPrompt === undefined ? buildMemoryPrompt(cwd) : undefined;
+      const skills = tools.some((tool) => tool.name === "skill") ? skillRegistry.summaries() : [];
+      const builtSystemPrompt = options.systemPrompt ?? buildSystemPrompt({
         agentName: "Bubble",
-        skills: skillRegistry.summaries(),
+        skills,
         skillCatalogChars: this.userConfig.getSkillCatalogChars(),
         configuredProvider: providerId || "none",
         configuredModel: model ? displayModel(model) : "none",
@@ -812,7 +885,7 @@ export class BubbleSdk {
         mode,
         budgetLedger: new BudgetLedger(),
         fileStateTracker,
-        skills: skillRegistry.summaries(),
+        skills,
         skillCatalogChars: this.userConfig.getSkillCatalogChars(),
         memoryPrompt,
         externalHooks: hookController,
@@ -874,7 +947,7 @@ export class BubbleSdk {
         thinkingLevel,
         mode,
         tools: tools.map((t) => t.name),
-        skills: skillRegistry.summaries().map((s) => s.name),
+        skills: skills.map((s) => s.name),
       });
 
       // Match the TUI: a leading "/<skill-name> <task>" becomes an explicit
@@ -1388,6 +1461,7 @@ export { parseSkillInvocation, type SkillInvocation } from "../skills/invocation
 export type { SkillSummary } from "../skills/types.js";
 export { GoalStore } from "../goal/store.js";
 export { McpManager } from "../mcp/manager.js";
+export type { McpServerState, McpServerStatus } from "../mcp/types.js";
 export { loadMcpConfig } from "../mcp/config.js";
 export { ExternalHookController } from "../hooks/controller.js";
 export {

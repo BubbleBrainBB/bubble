@@ -89,6 +89,14 @@ async function main() {
     process.exit(1);
   }
 
+  if (args.command === "host") {
+    const [{ runHostCommand }, { getCurrentVersion }] = await Promise.all([
+      import("./host/index.js"),
+      import("./update/index.js"),
+    ]);
+    process.exit(await runHostCommand({ bubbleVersion: getCurrentVersion() }));
+  }
+
   if (args.command === "update") {
     const { runUpdateCommand } = await import("./update/index.js");
     const code = await runUpdateCommand({ checkOnly: args.checkOnly });
