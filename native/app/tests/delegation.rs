@@ -134,21 +134,18 @@ fn tasks_delegate_to_subagents_and_workflows() {
 
     app.press("id:side-Investigate").unwrap();
 
-    // A child is shown at its dispatch anchor and collected.
+    // A helper the bot starts does its part and its answer comes back:
+    // the bot says what came of it. The helper itself, like every tool the
+    // bot uses, is not the conversation's to show.
     app.type_text("id:composer", "Delegate please").unwrap();
     app.submit("text:Delegate please").unwrap();
     app.wait_for_within("text:Child said: The answer is 42.", long).unwrap();
-    app.wait_for("text:Subagents").unwrap();
-    app.wait_for("text:explorer").unwrap();
-    app.wait_for("text:completed").unwrap();
-    // The child and its dispatch remain visible when ordinary work folds.
-    app.wait_for("text:Started a subagent: Find the answer").unwrap();
+    assert!(!app.shows("text:Subagents") && !app.shows("text:/Started a subagent/"));
 
-    // A workflow fans out to two children and returns their answers.
+    // A workflow fans out to two helpers and returns their answers.
     app.type_text("id:composer", "Run a workflow").unwrap();
     app.submit("text:Run a workflow").unwrap();
     app.wait_for_within(r#"text:Workflow gave [ "Checked alpha", "Checked beta" ]"#, long).unwrap();
-    app.wait_for("text:alpha").unwrap();
 
     std::fs::remove_dir_all(&root).ok();
 }

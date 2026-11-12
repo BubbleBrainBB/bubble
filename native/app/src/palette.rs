@@ -78,19 +78,6 @@ pub fn needs() -> AdaptiveColor {
 pub fn failed() -> AdaptiveColor {
     pair(0xDC2626, 0xF87171)
 }
-/// Lines a change adds and removes, and their tints in a diff.
-pub fn added() -> AdaptiveColor {
-    pair(0x15803D, 0x4ADE80)
-}
-pub fn removed() -> AdaptiveColor {
-    pair(0xB91C1C, 0xF87171)
-}
-pub fn added_tint() -> AdaptiveColor {
-    pair_alpha(0x16A3_4A14, 0x22C5_5E1F)
-}
-pub fn removed_tint() -> AdaptiveColor {
-    pair_alpha(0xDC26_2614, 0xEF44_441F)
-}
 /// Shadows under raised surfaces.
 pub fn shadow() -> AdaptiveColor {
     pair_alpha(0x0F17_2A14, 0x0000_0066)

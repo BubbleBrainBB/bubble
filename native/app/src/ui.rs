@@ -10,7 +10,7 @@ use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 
 use crate::palette::*;
-use crate::state::{AppState, Conversation, Line, LineKind, ToolStatus, TurnStatus};
+use crate::state::{AppState, Conversation, Line, LineKind};
 use crate::trace::Block;
 
 /// An icon from SVG markup drawn in `currentColor`; set its color with
@@ -160,13 +160,6 @@ pub fn conversation_view(
         if following.get_untracked() { list.scroll_to_end(false); }
     });
     let empty = move || conversation.lines.with(|lines| lines.is_empty());
-    // Turns whose folded work the person opened.
-    let opened = conversation.opened;
-    let project = conversation
-        .task_id
-        .get()
-        .and_then(|id| app.with_store(|s| s.get_task(&id)).flatten())
-        .and_then(|t| t.project_cwd);
     view().flex_1().min_h(px(0.0)).child(scroll().flex_1().test_id("chat-transcript").element_ref(&list)
         .on_scroll(move |event: &nsh_core::element::ScrollEvent| {
             let height = event.content_size.height.0;
@@ -197,9 +190,8 @@ pub fn conversation_view(
             .child(each(
                 move || conversation.lines.with(|lines| crate::trace::layout(lines, conversation.busy.get())),
                 |block: &Block| block.id().to_owned(),
-                move |block, _| block_view(app, conversation, block, opened, project.clone()),
-            ))
-            .child(subagents_view(conversation, None)),
+                move |block, _| block_view(app, conversation, block),
+            )),
     )).child(when(move || !following.get(), move || {
         button("Jump to latest", move || {
             following.set(true);
@@ -230,920 +222,112 @@ fn stamp_line(line: ReadSignal<Line>) -> impl IntoElement {
     })
 }
 
-/// One block of the transcript, hidden while the turn it belongs to is
-/// folded.
-fn block_view(
-    app: AppState,
-    conversation: Conversation,
-    block: ReadSignal<Block>,
-    opened: Signal<std::collections::HashSet<String>>,
-    project: Option<String>,
-) -> AnyElement {
-    let shown = move || block.get().folded_by().is_none_or(|turn| opened.with(|o| o.contains(turn)));
-    let content = match block.get_untracked() {
-        Block::Worked { id, .. } => worked_divider(block, id, opened).into_element(),
-        Block::Turn { id, .. } => turn_header(block, conversation, id).into_element(),
-        Block::Status { .. } => status_line(block, conversation, project).into_element(),
-        Block::Group { .. } => when(shown, move || group_view(block, conversation, project.clone())).into_element(),
-        Block::Line { id, .. } => when(shown, move || {
-            let id = id.clone();
-            let project = project.clone();
+/// One thing the conversation shows.
+fn block_view(app: AppState, conversation: Conversation, block: ReadSignal<Block>) -> AnyElement {
+    let (content, gap) = match block.get_untracked() {
+        Block::Status { .. } => (activity_row(app, conversation, block).into_element(), 14.0),
+        Block::Line { id, close } => {
             // The line itself, kept live as it streams or finishes.
-            each(
+            let line = each(
                 move || conversation.lines.with(|lines| lines.iter().filter(|l| l.id == id).cloned().collect::<Vec<_>>()),
                 |line: &Line| line.id.clone(),
-                move |line, _| line_view(app, conversation, line, project.clone()),
-            )
-        })
-        .into_element(),
+                move |line, _| line_view(app, conversation, line),
+            );
+            // What a bot says after something it said sits close to it.
+            (line.into_element(), if close { 6.0 } else { 18.0 })
+        }
     };
     // A keyed transcript item must own a real native sibling. Returning a
     // bare If/Each region lets late descendant updates attach after the
-    // next row (notably a legacy reply followed by a new user prompt).
-    // Keep the sibling anchored, including while its work is folded.
-    // Steps of the trace sit close together; messages and headers apart.
-    let step = match block.get_untracked() {
-        Block::Group { .. } | Block::Status { .. } => true,
-        Block::Line { id, .. } => conversation.lines.with_untracked(|lines| {
-            lines.iter().find(|l| l.id == id).is_some_and(|l| match &l.kind {
-                LineKind::Reasoning => true,
-                LineKind::Tool { name, .. } => !matches!(name.as_str(), "create_bot" | "message_bot" | "create_task" | "continue_task" | "spawn_agent" | "run_workflow"),
-                _ => false,
-            })
-        }),
-        _ => false,
-    };
-    view()
-        .w_full()
-        .pt(px(if step { 8.0 } else { 18.0 }))
-        .test_id(&format!("trace-row:{}", block.get_untracked().id()))
-        .style_when(move || !shown(), |style| style.hidden())
-        .child(content)
-        .into_element()
+    // next row (notably a reply followed by a new prompt).
+    view().w_full().pt(px(gap)).test_id(&format!("trace-row:{}", block.get_untracked().id())).child(content).into_element()
 }
 
-macro_rules! tabler {
-    ($($path:literal),*) => {
-        concat!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">"#,
-            $($path,)*
-            "</svg>"
-        )
-    };
-}
-
-// The trace's icons, from Tabler as the Aegis trace's are.
-const GLYPH_EXPLORE: &str = tabler!(r#"<path d="M11 19h-6a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v2.5"/>"#, r#"<path d="M15 18a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"/>"#, r#"<path d="M20.2 20.2l1.8 1.8"/>"#);
-const GLYPH_COMMAND: &str = tabler!(r#"<path d="M8 9l3 3l-3 3"/>"#, r#"<path d="M13 15h3"/>"#, r#"<path d="M3 6a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2z"/>"#);
-const GLYPH_EDIT: &str = tabler!(r#"<path d="M14 3v4a1 1 0 0 0 1 1h4"/>"#, r#"<path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z"/>"#, r#"<path d="M12 10v4"/>"#, r#"<path d="M10 12h4"/>"#, r#"<path d="M10 17h4"/>"#);
-const GLYPH_WEB: &str = tabler!(r#"<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0"/>"#, r#"<path d="M3.6 9h16.8"/>"#, r#"<path d="M3.6 15h16.8"/>"#, r#"<path d="M11.5 3a17 17 0 0 0 0 18"/>"#, r#"<path d="M12.5 3a17 17 0 0 1 0 18"/>"#);
-const GLYPH_TOOL: &str = tabler!(r#"<path d="M9.785 6l8.215 8.215l-2.054 2.054a5.81 5.81 0 1 1 -8.215 -8.215l2.054 -2.054z"/>"#, r#"<path d="M4 20l3.5 -3.5"/>"#, r#"<path d="M15 4l-3.5 3.5"/>"#, r#"<path d="M20 9l-3.5 3.5"/>"#);
-const GLYPH_REASONING: &str = tabler!(r#"<path d="M3 12h1m8 -9v1m8 8h1m-15.4 -6.4l.7 .7m12.1 -.7l-.7 .7"/>"#, r#"<path d="M9 16a5 5 0 1 1 6 0a3.5 3.5 0 0 0 -1 3a2 2 0 0 1 -4 0a3.5 3.5 0 0 0 -1 -3"/>"#, r#"<path d="M9.7 17h4.6"/>"#);
-const GLYPH_APPROVAL: &str = tabler!(r#"<path d="M12 3a12 12 0 0 0 8.5 3a12 12 0 0 1 -8.5 15a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3"/>"#, r#"<path d="M12 8v4"/>"#, r#"<path d="M12 16h.01"/>"#);
-const GLYPH_CHEVRON: &str = tabler!(r#"<path d="M9 6l6 6l-6 6"/>"#);
-const GLYPH_SPINNER: &str = tabler!(r#"<path d="M12 3a9 9 0 1 0 9 9"/>"#);
-const GLYPH_INTERRUPTED: &str = tabler!(r#"<path d="M8.56 3.69a9 9 0 0 0 -2.92 1.95"/>"#, r#"<path d="M3.69 8.56a9 9 0 0 0 -.69 3.44"/>"#, r#"<path d="M3.69 15.44a9 9 0 0 0 1.95 2.92"/>"#, r#"<path d="M8.56 20.31a9 9 0 0 0 3.44 .69"/>"#, r#"<path d="M15.44 20.31a9 9 0 0 0 2.92 -1.95"/>"#, r#"<path d="M20.31 15.44a9 9 0 0 0 .69 -3.44"/>"#, r#"<path d="M20.31 8.56a9 9 0 0 0 -1.95 -2.92"/>"#, r#"<path d="M15.44 3.69a9 9 0 0 0 -3.44 -.69"/>"#);
-
-fn kind_glyph(kind: crate::trace::StageKind) -> &'static str {
-    use crate::trace::{Kind, StageKind};
-    match kind {
-        StageKind::Reasoning => GLYPH_REASONING,
-        StageKind::Tool(Kind::Explore) => GLYPH_EXPLORE,
-        StageKind::Tool(Kind::Command) => GLYPH_COMMAND,
-        StageKind::Tool(Kind::Edit) => GLYPH_EDIT,
-        StageKind::Tool(Kind::Web) => GLYPH_WEB,
-        StageKind::Tool(Kind::Other) => GLYPH_TOOL,
+/// Words with a light passing over them, a letter at a time: the sign
+/// that a bot is at work. Still, and dimmer, while it waits.
+fn shimmer(phrase: String, waiting: bool) -> AnyElement {
+    if waiting {
+        return text(phrase).text_size(px(BODY)).text_color(muted()).into_element();
     }
-}
-
-fn tool_glyph(line: &Line) -> &'static str {
-    match &line.kind {
-        LineKind::Tool { name, .. } => kind_glyph(crate::trace::StageKind::Tool(crate::trace::kind_of(name, &line.text))),
-        _ => GLYPH_TOOL,
-    }
-}
-
-/// How a trace row reads: `Active` lifts its title while the step runs,
-/// `Waiting` turns it amber, `Error` turns its icon red.
-#[derive(Clone, Copy, PartialEq)]
-enum Tone {
-    Plain,
-    Active,
-    Waiting,
-    Error,
-}
-
-/// The one glyph at a row's end.
-#[derive(Clone, Copy, PartialEq)]
-enum Trail {
-    Nothing,
-    Spinner,
-    Chevron(bool),
-    Interrupted,
-}
-
-fn toggle(opened: Signal<std::collections::HashSet<String>>, key: String) {
-    opened.update(|o| {
-        if !o.remove(&key) {
-            o.insert(key);
+    // The light starts before the first letter and leaves after the last.
+    const REACH: f32 = 0.35;
+    let light = animated_value(-REACH);
+    let _ = Animation::timing(&light, 1.0 + REACH, Timing::new(2200.0, Easing::Linear)).looped(None).start();
+    // Each letter with whether a space comes before it: a space set by
+    // itself takes no room, so it is the next letter's margin.
+    let mut letters: Vec<(char, bool)> = Vec::new();
+    let mut spaced = false;
+    for letter in phrase.chars() {
+        if letter.is_whitespace() {
+            spaced = !letters.is_empty();
+        } else {
+            letters.push((letter, spaced));
+            spaced = false;
         }
-    });
-}
-
-/// A spinning arc, while a step or a turn runs.
-fn spinner(size: f32) -> impl IntoElement {
-    let angle = animated_value(0.0);
-    let _ = Animation::timing(&angle, 360.0, Timing::new(900.0, Easing::Linear)).looped(None).start();
-    icon(GLYPH_SPINNER, size).text_color(muted()).bind_rotate(&angle)
-}
-
-/// A chevron pointing right, down once its disclosure is open.
-fn chevron(size: f32, open: impl Fn() -> bool + 'static) -> impl IntoElement {
-    icon(GLYPH_CHEVRON, size).text_color(faint()).rotate(move || if open() { deg(90.0) } else { deg(0.0) })
-}
-
-/// A label's opacity while its step runs: a slow breath now and then, in
-/// place of the Aegis trace's shimmer sweep.
-fn breath() -> AnimatedValue {
-    let value = animated_value(1.0);
-    let _ = Animation::sequence([
-        Animation::timing(&value, 0.45, Timing::new(700.0, Easing::EaseInOut)),
-        Animation::timing(&value, 1.0, Timing::new(700.0, Easing::EaseInOut)),
-        Animation::delay(1600.0),
-    ])
-    .looped(None)
-    .start();
-    value
-}
-
-/// A step's title on one line; breathing while `active`.
-fn step_title(title: Rc<dyn Fn() -> String>, color: impl Fn() -> AdaptiveColor + 'static, active: impl Fn() -> bool + 'static) -> View {
-    let active = Rc::new(active);
-    let still = active.clone();
-    let (moving_title, still_title) = (title.clone(), title);
-    let color = Rc::new(color);
-    let still_color = color.clone();
-    let line = |title: Rc<dyn Fn() -> String>, color: Rc<dyn Fn() -> AdaptiveColor>| {
-        text(move || title())
-            .min_w(px(0.0))
-            .number_of_lines(1)
-            .text_size(px(SMALL))
-            .line_height(px(20.0))
-            .text_color(move || color())
-    };
-    view()
-        .flex_shrink(1.0)
-        .min_w(px(0.0))
-        .child(when(move || active(), move || line(moving_title.clone(), color.clone()).bind_opacity(&breath())))
-        .child(when(move || !still(), move || line(still_title.clone(), still_color.clone())))
-}
-
-/// "+3 −1": what a change adds and removes.
-fn diff_stat_view(stat: impl Fn() -> Option<(usize, usize)> + 'static) -> impl IntoElement {
-    dynamic(move || {
-        stat().filter(|(a, r)| a + r > 0).map(|(a, r)| {
-            view()
-                .flex_row()
-                .flex_shrink_0()
-                .gap(px(4.0))
-                .child(text(format!("+{a}")).text_size(px(SMALL)).text_color(added()))
-                .child(text(format!("\u{2212}{r}")).text_size(px(SMALL)).text_color(removed()))
-        })
-    })
-}
-
-/// One step of an agent's trace: kind icon, title, small facts, trailing
-/// glyph. Every title shares one left edge.
-fn trace_row(
-    glyph: impl Fn() -> &'static str + 'static,
-    title: impl Fn() -> String + 'static,
-    meta: impl Fn() -> Option<(String, bool)> + 'static,
-    tone: impl Fn() -> Tone + 'static,
-    trail: impl Fn() -> Trail + 'static,
-) -> View {
-    trace_row_with(glyph, title, meta, || None, tone, trail)
-}
-
-/// A trace row with a change's line counts among its facts.
-fn trace_row_with(
-    glyph: impl Fn() -> &'static str + 'static,
-    title: impl Fn() -> String + 'static,
-    meta: impl Fn() -> Option<(String, bool)> + 'static,
-    stat: impl Fn() -> Option<(usize, usize)> + 'static,
-    tone: impl Fn() -> Tone + 'static,
-    trail: impl Fn() -> Trail + 'static,
-) -> View {
-    let tone = Rc::new(tone);
-    let trail = Rc::new(trail);
-    let (icon_tone, title_tone, meta_tone, active_tone) = (tone.clone(), tone.clone(), tone.clone(), tone);
-    let (spins, chevrons, open, stopped) = (trail.clone(), trail.clone(), trail.clone(), trail);
-    view()
-        .w_full()
-        .flex_row()
-        .items_center()
-        .gap(px(6.0))
-        .min_h(px(22.0))
-        .child(
-            svg(move || ImageSrc::svg_markup(glyph()))
-                .size(px(14.0))
-                .flex_shrink_0()
-                .text_color(move || match icon_tone() {
-                    Tone::Error => failed(),
-                    Tone::Waiting => needs(),
-                    _ => faint(),
-                }),
-        )
-        .child(step_title(
-            Rc::new(title),
-            move || match title_tone() {
-                Tone::Active | Tone::Waiting => secondary(),
-                _ => muted(),
-            },
-            move || active_tone() == Tone::Active,
-        ))
-        .child(diff_stat_view(stat))
-        .child(dynamic(move || {
-            let waiting = meta_tone() == Tone::Waiting;
-            meta().map(|(fact, error)| {
-                text(fact).flex_shrink_0().text_size(px(SMALL)).text_color(if error {
-                    failed()
-                } else if waiting {
-                    needs()
-                } else {
-                    muted()
-                })
-            })
-        }))
-        .child(when(move || spins() == Trail::Spinner, || spinner(12.0)))
-        .child(when(move || matches!(chevrons(), Trail::Chevron(_)), move || {
-            let open = open.clone();
-            chevron(12.0, move || open() == Trail::Chevron(true))
-        }))
-        .child(when(move || stopped() == Trail::Interrupted, || icon(GLYPH_INTERRUPTED, 12.0).text_color(faint())))
-}
-
-/// A row's children and details: indented to its title, under a guide at
-/// its icon's center.
-fn nest() -> View {
-    view().ml(px(6.5)).pl(px(14.5)).border_l(px(1.0)).border_l_color(hairline())
-}
-
-/// A step's toggle: "Worked for 1m 20s ›", "Explored 3 files ›".
-fn disclosure(label: impl Fn() -> String + 'static, open: impl Fn() -> bool + 'static) -> View {
-    let open = Rc::new(open);
-    let tint = open.clone();
+    }
+    let last = letters.len().saturating_sub(1).max(1) as f32;
     view()
         .flex_row()
-        .items_center()
-        .gap(px(6.0))
-        .cursor(Cursor::Pointer)
-        .child(
-            text(label)
-                .flex_shrink(1.0)
-                .min_w(px(0.0))
-                .number_of_lines(1)
+        // One phrase to a screen reader, not a row of letters.
+        .accessible(true)
+        .label(phrase.clone())
+        .accessibility_elements_hidden(true)
+        .children(letters.into_iter().enumerate().map(|(index, (letter, spaced))| {
+            let at = index as f32 / last;
+            let brightness = light.interpolate(&[at - REACH, at, at + REACH], &[0.4, 1.0, 0.4]);
+            text(letter.to_string())
+                .ml(px(if spaced { BODY * 0.3 } else { 0.0 }))
                 .text_size(px(BODY))
-                .line_height(px(20.0))
-                .text_color(move || if tint() { secondary() } else { muted() }),
-        )
-        .child(chevron(14.0, move || open()))
-}
-
-/// The model's reasoning, as a step: "Reasoning ›" opens it.
-fn reasoning_row(line: ReadSignal<Line>, opened: Signal<std::collections::HashSet<String>>) -> AnyElement {
-    let key = stored(format!("reasoning:{}", line.get_untracked().id));
-    let open = move || opened.with(|o| o.contains(&key.get()));
-    view()
-        .child(
-            trace_row(
-                || GLYPH_REASONING,
-                move || if line.get().pending { "Thinking".into() } else { "Reasoning".into() },
-                || None,
-                move || if line.get().pending { Tone::Active } else { Tone::Plain },
-                move || Trail::Chevron(open()),
-            )
-            .cursor(Cursor::Pointer)
-            .label("Reasoning")
-            .on_press(move || toggle(opened, key.get())),
-        )
-        .child(when(open, move || {
-            nest().pb(px(4.0)).child(
-                text(move || line.get().reasoning.trim().to_owned())
-                    .selectable(true)
-                    .text_size(px(SMALL))
-                    .line_height(px(20.0))
-                    .text_color(secondary()),
-            )
+                .text_color(ink())
+                .bind_opacity(&brightness)
         }))
         .into_element()
 }
 
-/// How much of a tool's output a row shows when opened.
-const OUTPUT_SHOWN: usize = 4000;
-
-/// How many lines of a running command's output an opened row shows.
-const LIVE_LINES: usize = 6;
-/// How many lines of a change an opened edit shows.
-const DIFF_SHOWN: usize = 200;
-
-/// A change's lines, added in green and removed in red, scrolling past a
-/// few screens of it.
-fn diff_view(diff: String) -> AnyElement {
-    let rows: Vec<AnyElement> = diff
-        .lines()
-        .take(DIFF_SHOWN)
-        .map(|line| {
-            let (mark, rest) = line.split_at(line.len().min(1));
-            let (color, tint) = match mark {
-                "+" => (added(), Some(added_tint())),
-                "-" => (removed(), Some(removed_tint())),
-                _ => (secondary(), None),
-            };
-            let row = view().w_full().px(px(10.0)).child(
-                text(format!("{} {rest}", if mark.is_empty() { " " } else { mark }))
-                    .selectable(true)
-                    .font_family("Menlo")
-                    .text_size(px(SMALL))
-                    .line_height(px(18.0))
-                    .text_color(color),
-            );
-            match tint {
-                Some(tint) => row.bg(tint).into_element(),
-                None => row.into_element(),
-            }
-        })
-        .collect();
-    view()
-        .rounded(px(8.0))
-        .border(px(LINE))
-        .border_color(border())
-        .overflow_hidden()
-        .child(scroll().max_h(px(288.0)).child(view().w_full().py(px(4.0)).child(rows)))
-        .into_element()
-}
-
-/// A tool call: one row; pressing it shows what the tool gave back: a
-/// running command's latest output, an edit's change, else its result.
-fn tool_row(line: ReadSignal<Line>, project: Option<String>, opened: Signal<std::collections::HashSet<String>>) -> AnyElement {
-    let key = stored(format!("tool-detail:{}", line.get_untracked().id));
-    let open = move || opened.with(|o| o.contains(&key.get()));
-    let status = move || match line.get().kind {
-        LineKind::Tool { status, .. } => status,
-        _ => ToolStatus::Done,
-    };
-    let output = move || match line.get().kind {
-        LineKind::Tool { output, .. } => output,
-        _ => String::new(),
-    };
-    let running = move || status() == ToolStatus::Running;
-    let live = move || if running() { crate::trace::output_tail(&line.get().live, LIVE_LINES) } else { String::new() };
-    let has_diff = move || line.with(|l| !l.diff.is_empty()) && !matches!(status(), ToolStatus::Failed | ToolStatus::Denied);
-    let expandable = move || !output().trim().is_empty() || has_diff() || !live().is_empty();
-    view()
-        .child(
-            trace_row_with(
-                move || tool_glyph(&line.get()),
-                move || crate::trace::tool_title(&line.get(), project.as_deref()),
-                move || match status() {
-                    ToolStatus::Failed => Some(("Failed".into(), true)),
-                    ToolStatus::Denied => Some(("Denied".into(), false)),
-                    ToolStatus::Interrupted => Some(("Interrupted".into(), false)),
-                    _ => None,
-                },
-                move || has_diff().then(|| crate::trace::diff_stat(&line.get().diff)),
-                move || match status() {
-                    ToolStatus::Queued | ToolStatus::Running => Tone::Active,
-                    ToolStatus::NeedsInput => Tone::Waiting,
-                    ToolStatus::Failed => Tone::Error,
-                    _ => Tone::Plain,
-                },
-                move || match status() {
-                    ToolStatus::Running => Trail::Spinner,
-                    ToolStatus::Interrupted => Trail::Interrupted,
-                    _ if expandable() => Trail::Chevron(open()),
-                    _ => Trail::Nothing,
-                },
-            )
-            .cursor(Cursor::Pointer)
-            .on_press(move || toggle(opened, key.get())),
-        )
-        // While it runs: the end of what it printed, as a terminal shows it.
-        .child(when(move || open() && !live().is_empty(), move || {
-            nest().pb(px(4.0)).child(
-                text(live)
-                    .font_family("Menlo")
-                    .text_size(px(SMALL))
-                    .line_height(px(18.0))
-                    .text_color(muted()),
-            )
-        }))
-        .child(when(move || open() && live().is_empty() && has_diff(), move || {
-            nest().pt(px(2.0)).pb(px(6.0)).child(dynamic(move || diff_view(line.get().diff)))
-        }))
-        .child(when(move || open() && live().is_empty() && !has_diff() && !output().trim().is_empty(), move || {
-            nest().pt(px(2.0)).pb(px(6.0)).child(
-                view()
-                    .px(px(10.0))
-                    .py(px(8.0))
-                    .rounded(px(8.0))
-                    .border(px(LINE))
-                    .border_color(border())
-                    .bg(tertiary())
-                    .child(
-                        text(move || {
-                            let current = line.get();
-                            let full = output();
-                            let full = match &current.kind {
-                                LineKind::Tool { name, .. } if name == "bash" => crate::trace::command_output(&full).to_owned(),
-                                _ => full,
-                            };
-                            let shown: String = full.chars().take(OUTPUT_SHOWN).collect();
-                            let shown = if shown.len() < full.len() { format!("{shown}\n…") } else { shown };
-                            match &current.kind {
-                                LineKind::Tool { name, .. } if name == "bash" => {
-                                    let command = current.text.strip_prefix("Ran ").unwrap_or(&current.text);
-                                    format!("$ {command}\n{}", shown.trim_end())
-                                }
-                                _ => shown.trim_end().to_owned(),
-                            }
-                        })
-                        .selectable(true)
-                        .font_family("Menlo")
-                        .text_size(px(SMALL))
-                        .line_height(px(18.0))
-                        .text_color(secondary()),
-                    ),
-            )
-        }))
-        .into_element()
-}
-
-/// One step of a group: a lone call, a reasoning, or a run of looking
-/// around that opens onto its calls.
-fn stage_view(stage: ReadSignal<crate::trace::Stage>, project: Option<String>, opened: Signal<std::collections::HashSet<String>>) -> AnyElement {
-    use crate::trace;
-    let key = stored(stage.get_untracked().id());
-    let open = move || opened.with(|o| o.contains(&key.get()));
-    let merged = move || stage.with(|s| s.members.len() > 1);
-    let rows = {
-        let project = project.clone();
-        move || {
-            let project = project.clone();
-            each(
-                move || stage.get().members,
-                |line: &Line| line.id.clone(),
-                move |line, _| {
-                    if matches!(line.get_untracked().kind, LineKind::Tool { .. }) {
-                        tool_row(line, project.clone(), opened)
-                    } else {
-                        reasoning_row(line, opened)
-                    }
-                },
-            )
-        }
-    };
-    let single = rows.clone();
-    view()
-        .test_id(&format!("trace-{}", stage.get_untracked().id()))
-        .child(when(move || !merged(), move || single()))
-        .child(when(merged, move || {
-            let project = project.clone();
-            let rows = rows.clone();
-            view()
-                .child(
-                    trace_row(
-                        move || kind_glyph(stage.get().kind),
-                        move || trace::stage_title(&stage.get(), project.as_deref()),
-                        move || match stage.with(|s| s.failures()) {
-                            0 => None,
-                            n => Some((format!("{n} failed"), true)),
-                        },
-                        move || {
-                            let s = stage.get();
-                            if s.waiting() { Tone::Waiting } else if s.running() || s.queued() { Tone::Active } else { Tone::Plain }
-                        },
-                        move || {
-                            let s = stage.get();
-                            if s.running() { Trail::Spinner } else if s.interrupted() { Trail::Interrupted } else { Trail::Chevron(open()) }
-                        },
-                    )
-                    .cursor(Cursor::Pointer)
-                    .on_press(move || toggle(opened, key.get())),
-                )
-                .child(when(open, move || nest().child(rows())))
-        }))
-        .into_element()
-}
-
-/// Tool calls in a row: one step as it is; several under a row saying
-/// what they did (what runs now, while they run), opening onto each.
-fn group_view(block: ReadSignal<Block>, conversation: Conversation, project: Option<String>) -> AnyElement {
-    use crate::trace;
-    let key = stored(block.get_untracked().id().to_owned());
-    let closed = stored(format!("closed:{}", block.get_untracked().id()));
-    let opened = conversation.opened;
-    let members = move || {
-        let ids = match block.get() {
-            Block::Group { members, .. } => members,
-            _ => Vec::new(),
-        };
-        conversation.lines.with(|lines| ids.iter().filter_map(|id| lines.iter().find(|l| &l.id == id).cloned()).collect::<Vec<Line>>())
-    };
-    let stages = move || trace::stages(&members());
-    let multi = move || stages().len() > 1;
-    // Open while a step in it waits on the person, until they close it.
-    let waits = move || stages().iter().any(trace::Stage::waiting);
-    let open = move || opened.with(|o| o.contains(&key.get()) || (waits() && !o.contains(&closed.get())));
-    let flip = move || {
-        let now = open();
-        opened.update(|o| {
-            if now {
-                o.remove(&key.get());
-                o.insert(closed.get());
-            } else {
-                o.insert(key.get());
-                o.remove(&closed.get());
-            }
-        })
-    };
-    let active = move || matches!(block.get(), Block::Group { active: true, .. });
-    // The step that runs or waits now, else the first.
-    let lead = move || {
-        let all = stages();
-        all.iter().rev().find(|s| s.running() || s.waiting() || s.queued()).cloned().or_else(|| all.first().cloned())
-    };
-    let each_stage = {
-        let project = project.clone();
-        move || {
-            let project = project.clone();
-            each(stages, |stage: &trace::Stage| stage.id(), move |stage, _| stage_view(stage, project.clone(), opened))
-        }
-    };
-    let single = each_stage.clone();
-    let header_project = project.clone();
-    view()
-        .child(when(move || !multi(), move || single()))
-        .child(when(multi, move || {
-            let project = header_project.clone();
-            let each_stage = each_stage.clone();
-            view()
-                .child(
-                    trace_row(
-                        move || lead().map(|s| kind_glyph(s.kind)).unwrap_or(GLYPH_TOOL),
-                        move || match lead() {
-                            Some(s) if active() && (s.running() || s.waiting() || s.queued()) => trace::stage_title(&s, project.as_deref()),
-                            _ => trace::summary(&stages()),
-                        },
-                        move || match stages().iter().map(trace::Stage::failures).sum::<usize>() {
-                            0 => None,
-                            n => Some((format!("{n} failed"), true)),
-                        },
-                        move || match lead() {
-                            Some(s) if s.waiting() => Tone::Waiting,
-                            Some(s) if active() && (s.running() || s.queued()) => Tone::Active,
-                            _ => Tone::Plain,
-                        },
-                        move || Trail::Chevron(open()),
-                    )
-                    .cursor(Cursor::Pointer)
-                    .label("Work")
-                    .test_id(&format!("trace-{}", block.get_untracked().id()))
-                    .on_press(move || flip()),
-                )
-                .child(when(open, move || nest().child(each_stage())))
-        }))
-        .into_element()
-}
-
-/// "Worked for 1m 20s ›" above a finished turn's reply, with a rule under
-/// it; opens the work.
-fn worked_toggle(label: impl Fn() -> String + 'static, key: String, opened: Signal<std::collections::HashSet<String>>) -> View {
-    let stored_key = stored(key);
-    view()
-        .w_full()
-        .gap(px(8.0))
-        .child(
-            disclosure(label, move || opened.with(|o| o.contains(&stored_key.get())))
-                .label("Worked")
-                .on_press(move || toggle(opened, stored_key.get())),
-        )
-        .child(view().w_full().h(px(0.0)).border_t(px(LINE)).border_color(border()))
-}
-
-/// "Worked for 1m 20s" above a legacy turn's reply; opens the work.
-fn worked_divider(block: ReadSignal<Block>, id: String, opened: Signal<std::collections::HashSet<String>>) -> impl IntoElement {
-    worked_toggle(
-        move || match block.get() {
-            Block::Worked { millis, .. } => format!("Worked for {}", crate::trace::duration(millis)),
-            _ => String::new(),
-        },
-        id,
-        opened,
-    )
-}
-
-/// What a turn's header shows.
-#[derive(Clone, Copy, PartialEq)]
-enum Header {
-    Nothing,
-    /// Running, with finished work folded: what it did, opening onto it.
-    Live,
-    /// Done: "Worked for …", opening onto the work.
-    Worked,
-    /// Stopped, failed or cut off: said once, the work stays open.
-    Ended,
-}
-
-/// A turn keeps one header and one disclosure identity for its lifetime:
-/// while it runs, a row saying what its folded work did; once done,
-/// "Worked for …" over the work folded before its reply.
-fn turn_header(block: ReadSignal<Block>, conversation: Conversation, id: String) -> impl IntoElement {
-    use crate::trace;
-    let opened = conversation.opened;
-    let mode = move || match block.get() {
-        Block::Turn { status, live_fold, .. } if trace::running(status) => if live_fold { Header::Live } else { Header::Nothing },
-        Block::Turn { status: TurnStatus::Completed, collapsible: true, .. } => Header::Worked,
-        Block::Turn { status: TurnStatus::Completed, .. } => Header::Nothing,
-        Block::Turn { .. } => Header::Ended,
-        _ => Header::Nothing,
-    };
-    let elapsed = move || match block.get() {
-        Block::Turn { started_at, completed_at, .. } => completed_at.map(|end| trace::duration(end - started_at)),
-        _ => None,
-    };
-    let live_id = id.clone();
-    let turn = stored(id.clone());
-    view()
-        .w_full()
-        .child(when(move || mode() == Header::Live, move || {
-            let key = stored(trace::live_key(&live_id));
-            disclosure(
-                move || {
-                    // What the folded work did: its finished calls.
-                    let turn = turn.get();
-                    conversation.lines.with(|lines| {
-                        let mine: Vec<Line> = lines
-                            .iter()
-                            .filter(|l| l.turn_id.as_deref() == Some(turn.as_str()) && l.id != turn)
-                            .filter(|l| match &l.kind {
-                                LineKind::Tool { name, status, .. } => {
-                                    !status.unfinished() && !matches!(name.as_str(), "create_bot" | "message_bot" | "create_task" | "continue_task" | "spawn_agent" | "run_workflow")
-                                }
-                                LineKind::Reasoning => !l.reasoning.trim().is_empty(),
-                                _ => false,
-                            })
-                            .cloned()
-                            .collect();
-                        if mine.is_empty() { "Show activity".to_owned() } else { trace::summary(&trace::stages(&mine)) }
-                    })
-                },
-                move || opened.with(|o| o.contains(&key.get())),
-            )
-            .label("Show work")
-            .on_press(move || toggle(opened, key.get()))
-        }))
-        .child(when(move || mode() == Header::Worked, move || {
-            worked_toggle(move || format!("Worked for {}", elapsed().unwrap_or_else(|| "a while".into())), id.clone(), opened)
-        }))
-        .child(when(move || mode() == Header::Ended, move || {
-            view()
-                .w_full()
-                .gap(px(8.0))
-                .child(
-                    text(move || {
-                        let Block::Turn { status, .. } = block.get() else { return String::new() };
-                        let after = elapsed().map(|d| format!(" after {d}")).unwrap_or_default();
-                        match status {
-                            TurnStatus::Stopped => format!("You stopped{after}"),
-                            TurnStatus::Failed => format!("Failed{after}"),
-                            _ => format!("Interrupted{after}"),
-                        }
-                    })
-                    .label("Turn status")
-                    .text_size(px(BODY))
-                    .line_height(px(20.0))
-                    .text_color(muted()),
-                )
-                .child(view().w_full().h(px(0.0)).border_t(px(LINE)).border_color(border()))
-        }))
-}
-
-/// How many lines of the current step's output the status panel shows.
-const STATUS_TAIL: usize = 4;
-
-/// A running turn's last row: what it does now, and for how long; with a
-/// command running, it opens onto the command and its latest output.
-fn status_line(block: ReadSignal<Block>, conversation: Conversation, project: Option<String>) -> impl IntoElement {
-    use crate::trace;
+/// What the bot is doing now, at the end of its conversation while a turn
+/// runs: its face, a few words, and how long it has been at it.
+fn activity_row(app: AppState, conversation: Conversation, block: ReadSignal<Block>) -> impl IntoElement {
     let now = signal(bubble_store::now_ms());
-    set_interval(std::time::Duration::from_secs(1), move || now.set(bubble_store::now_ms()));
-    let opened = conversation.opened;
-    let key = stored(format!("status-step:{}", block.get_untracked().id()));
-    let activity = move || match block.get() {
-        Block::Status { turn, status, .. } => conversation.lines.with(|lines| trace::activity(lines, &turn, status, project.as_deref())),
-        _ => (String::new(), false),
+    set_interval(std::time::Duration::from_secs(10), move || now.set(bubble_store::now_ms()));
+    // A memo: the words change with the step, not with every word the
+    // bot writes or command line it prints, so the light is not restarted.
+    let doing = computed(move || match block.get() {
+        Block::Status { turn, status, .. } => conversation.lines.with(|lines| crate::trace::activity(lines, &turn, status)),
+        Block::Line { .. } => crate::trace::Activity { phrase: String::new(), waiting: true },
+    });
+    let face = match conversation.task_id.get() {
+        Some(id) => crate::avatar::bot(app, &id, 28.0).into_element(),
+        None => crate::avatar::main(28.0).into_element(),
     };
-    let step = move || match block.get() {
-        Block::Status { turn, .. } => conversation.lines.with(|lines| trace::running_step(lines, &turn)),
-        _ => None,
-    };
-    let command = move || {
-        step().filter(|l| matches!(&l.kind, LineKind::Tool { name, .. } if name == "bash"))
-            .map(|l| l.text.strip_prefix("Ran ").unwrap_or(&l.text).to_owned())
-    };
-    let tail = move || step().map(|l| trace::output_tail(&l.live, STATUS_TAIL)).unwrap_or_default();
-    let can_open = move || command().is_some() || !tail().is_empty();
-    let open = move || can_open() && opened.with(|o| o.contains(&key.get()));
-    let label = activity.clone();
-    let panel_label = activity.clone();
-    let tint = activity.clone();
-    let waiting = move || activity().1;
-    let spinning = waiting.clone();
-    let (breathing, step_label) = (waiting.clone(), Rc::new(move || label().0) as Rc<dyn Fn() -> String>);
     view()
-        .gap(px(4.0))
-        .child(when(open, move || {
-            let panel_label = panel_label.clone();
-            let title_label = panel_label.clone();
-            view()
-                .gap(px(6.0))
-                .px(px(10.0))
-                .py(px(8.0))
-                .rounded(px(10.0))
-                .border(px(LINE))
-                .border_color(border())
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(text(move || title_label().0).flex_shrink(1.0).min_w(px(0.0)).number_of_lines(1).text_size(px(SMALL)).text_color(ink()))
-                        // The command itself, when the title does not already say it.
-                        .child(
-                            text(move || command().filter(|c| !panel_label().0.contains(c.as_str())).unwrap_or_default())
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .number_of_lines(1)
-                                .font_family("Menlo")
-                                .text_size(px(SMALL))
-                                .text_color(muted()),
-                        )
-                        .child(
-                            text(move || step().map(|l| trace::duration(now.get() - l.at)).unwrap_or_default())
-                                .flex_shrink_0()
-                                .text_size(px(SMALL))
-                                .text_color(muted()),
-                        ),
-                )
-                .child(when(move || !tail().is_empty(), move || {
-                    view().px(px(10.0)).py(px(6.0)).rounded(px(6.0)).bg(tertiary()).child(
-                        text(tail)
-                            .font_family("Menlo")
-                            .text_size(px(SMALL))
-                            .line_height(px(18.0))
-                            .text_color(secondary()),
-                    )
-                }))
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .test_id("activity")
+        .child(face)
+        .child(dynamic(move || {
+            let doing = doing.get();
+            shimmer(doing.phrase, doing.waiting)
         }))
         .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .min_h(px(22.0))
-                .label("Turn status")
-                .cursor(Cursor::Pointer)
-                .on_press(move || if can_open() { toggle(opened, key.get()) })
-                .child(when(move || !spinning(), || spinner(13.0)))
-                .child(when(waiting, || icon(GLYPH_APPROVAL, 13.0).text_color(needs())))
-                .child(step_title(step_label, move || if tint().1 { needs() } else { secondary() }, move || !breathing()))
-                .child(
-                    text(move || match block.get() {
-                        Block::Status { started_at, .. } if now.get() - started_at >= 1000 => format!("· {}", trace::duration(now.get() - started_at)),
-                        _ => String::new(),
-                    })
-                    .flex_shrink_0()
-                    .text_size(px(SMALL))
-                    .line_height(px(20.0))
-                    .text_color(muted()),
-                )
-                // Up while the panel above is closed, down once it is open.
-                .child(when(can_open, move || {
-                    icon(GLYPH_CHEVRON, 12.0).text_color(faint()).rotate(move || if open() { deg(90.0) } else { deg(-90.0) })
-                })),
+            text(move || match block.get() {
+                Block::Status { started_at, .. } => crate::trace::elapsed(now.get() - started_at).unwrap_or_default(),
+                Block::Line { .. } => String::new(),
+            })
+            .text_size(px(SMALL))
+            .text_color(muted()),
         )
 }
 
-/// The children a task's agent started: who, doing what, and how it went;
-/// a finished one opens to its answer.
-fn subagents_view(conversation: Conversation, anchor: Option<ReadSignal<Line>>) -> impl IntoElement {
-    use bubble_core::delegate::{Snapshot, Status};
-    let included = move |child: &Snapshot| {
-        match anchor {
-            Some(line) => line.get().child_ids.contains(&child.id),
-            None => !conversation.lines.with(|lines| lines.iter().any(|l| l.child_ids.contains(&child.id))) && child.status != Status::Closed,
-        }
-    };
-    let visible = move || conversation.subagents.with(|s| s.iter().any(included));
-    when(visible, move || {
-        view()
-            .gap(px(6.0))
-            .child(text("Subagents").text_size(px(SMALL)).text_color(muted()))
-            .child(each(
-                move || conversation.subagents.get().into_iter().filter(included).collect::<Vec<_>>(),
-                |child: &Snapshot| child.id.clone(),
-                move |child, _| {
-                    let key = stored(format!("child:{}", child.get_untracked().id));
-                    let opened = conversation.opened;
-                    let open = move || opened.with(|o| o.contains(&key.get()));
-                    let status_color = move || match child.get().status {
-                        Status::Failed | Status::Blocked => failed(),
-                        Status::Completed => ink(),
-                        _ => muted(),
-                    };
-                    let title = move || {
-                        let c = child.get();
-                        c.description.clone().unwrap_or(c.task).lines().next().unwrap_or_default().to_owned()
-                    };
-                    view()
-                        .gap(px(8.0))
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .rounded(px(10.0))
-                        .border(px(LINE))
-                        .border_color(border())
-                        .bg(pane())
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(10.0))
-                                .cursor(Cursor::Pointer)
-                                .on_press(move || { opened.update(|o| { if !o.remove(&key.get()) { o.insert(key.get()); } }); })
-                                .label(move || format!("Subagent {}", child.get().nickname))
-                                .child(text(move || child.get().nickname).text_size(px(BODY)).text_color(ink()))
-                                .child(text(move || child.get().profile).text_size(px(SMALL)).text_color(muted()))
-                                .child(text(title).flex_1().min_w(px(0.0)).number_of_lines(1).text_size(px(SMALL)).text_color(secondary()))
-                                .child(text(move || child.get().status.label()).text_size(px(SMALL)).text_color(status_color)),
-                        )
-                        .child(when(move || open(), move || {
-                            // Follows the child: its latest step, then its answer.
-                            dynamic(move || {
-                                let c = child.get();
-                                if !c.summary.is_empty() && c.status.is_final() {
-                                    let worktree = c.worktree.as_ref().filter(|w| w.changed == Some(true)).map(|w| {
-                                        if w.applied {
-                                            "Its changes were applied to the project.".to_owned()
-                                        } else if w.removed {
-                                            "Its changes were discarded.".to_owned()
-                                        } else {
-                                            format!("Changes kept for review: open Changes to apply or discard them.\n{}", w.diff_stat)
-                                        }
-                                    });
-                                    view()
-                                        .gap(px(6.0))
-                                        .child(markdown(c.summary.clone()))
-                                        .child(when(
-                                            {
-                                                let shown = worktree.is_some();
-                                                move || shown
-                                            },
-                                            move || text(worktree.clone().unwrap_or_default()).text_size(px(SMALL)).text_color(muted()),
-                                        ))
-                                        .into_element()
-                                } else if let Some(error) = c.error.clone() {
-                                    text(error).text_size(px(SMALL)).text_color(failed()).into_element()
-                                } else {
-                                    let note = c.notes.last().map(|n| format!("{n}…")).unwrap_or_else(|| "Starting…".into());
-                                    text(note).text_size(px(SMALL)).text_color(muted()).number_of_lines(2).into_element()
-                                }
-                            })
-                        }))
-                },
-            ))
-    })
-}
-
-fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, project: Option<String>) -> AnyElement {
+fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>) -> AnyElement {
     match line.get_untracked().kind {
-        // A bot the main bot made or wrote to shows as a card that follows
-        // it (the task names are what earlier versions recorded).
-        LineKind::Tool { name, .. } if matches!(name.as_str(), "create_bot" | "message_bot" | "create_task" | "continue_task") => {
-            task_card_line(app, conversation, line)
-        }
-        LineKind::Tool { ref name, .. } if name == "spawn_agent" || name == "run_workflow" => view()
-            .gap(px(6.0)).child(tool_row(line, project, conversation.opened)).child(subagents_view(conversation, Some(line))).into_element(),
-        LineKind::Tool { .. } => tool_row(line, project, conversation.opened),
-        LineKind::Reasoning => reasoning_row(line, conversation.opened),
-        LineKind::Turn { .. } => view().into_element(),
+        // How a bot got there is not the conversation's to show.
+        LineKind::Tool { .. } | LineKind::Reasoning | LineKind::Turn { .. } | LineKind::RunStart(_) => view().into_element(),
         LineKind::Question { .. } => question_card(app, conversation, line),
+        // Asked and not answered yet: the card. Once decided it goes.
         LineKind::Approval { .. } => {
-            let decided = move || matches!(line.get().kind, LineKind::Approval { decided: Some(_), .. });
-            let undecided = decided.clone();
-            view()
-                .child(when(move || !undecided(), move || approval_card(app, conversation, line)))
-                .child(when(decided, move || approval_row(line)))
-                .into_element()
+            let undecided = move || matches!(line.get().kind, LineKind::Approval { decided: None, .. });
+            view().child(when(undecided, move || approval_card(app, conversation, line))).into_element()
         }
         LineKind::Message(MessageRole::User) => view()
             .child(stamp_line(line))
@@ -1171,37 +355,11 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
             })),
             )
             .into_element(),
+        // What the bot says is a bubble; while it has said nothing yet,
+        // the row at the end of the conversation speaks for it.
         LineKind::Message(MessageRole::Assistant) => dynamic(move || {
             let current = line.get();
-            let waiting_on_person = move || {
-                conversation
-                    .lines
-                    .with(|lines| lines.iter().any(|l| matches!(l.kind, LineKind::Approval { decided: None, .. })))
-            };
-            if current.pending && current.text.is_empty() && waiting_on_person() {
-                view().into_element()
-            } else if current.pending && current.text.is_empty() && conversation.queued.get() {
-                text("Queued until another bot finishes").text_size(px(BODY)).text_color(muted()).into_element()
-            } else if current.pending && current.text.is_empty() {
-                // Reasoning shows as it streams: its last few lines.
-                let tail: Vec<&str> = current.reasoning.lines().filter(|l| !l.trim().is_empty()).collect();
-                let tail = tail[tail.len().saturating_sub(3)..].join("\n");
-                view()
-                    .gap(px(4.0))
-                    .child(text("Thinking…").text_size(px(BODY)).text_color(muted()))
-                    .child((!tail.is_empty()).then(|| {
-                        text(tail).text_size(px(SMALL)).line_height(px(18.0)).text_color(muted()).number_of_lines(3)
-                    }))
-                    .into_element()
-            } else {
-                // What the bot says is a bubble; its reasoning is part of
-                // the work above it, not of the reply.
-                view()
-                    .child((!current.text.trim().is_empty()).then(|| {
-                        reply_bubble(&current.text)
-                    }))
-                    .into_element()
-            }
+            view().child((!current.text.trim().is_empty()).then(|| reply_bubble(&current.text))).into_element()
         }),
         LineKind::Message(MessageRole::Tool | MessageRole::Checkpoint) => view().into_element(),
         LineKind::Message(MessageRole::External) => view()
@@ -1230,18 +388,6 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
                     .child(markdown(line.get_untracked().text)),
             )
             .into_element(),
-        LineKind::RunStart(index) => view()
-            .pt(px(8.0))
-            .gap(px(8.0))
-            .child(
-                view()
-                    .flex_row()
-                    .gap(px(8.0))
-                    .child(text(format!("Run {index}")).text_size(px(SMALL)).text_color(secondary()))
-                    .child(text(move || line.get().text).text_size(px(SMALL)).text_color(muted()).number_of_lines(1)),
-            )
-            .child(view().h(px(0.0)).border_t(px(LINE)).border_color(hairline()))
-            .into_element(),
         LineKind::Notice => text(move || line.get().text).text_size(px(SMALL)).text_color(muted()).into_element(),
         LineKind::Failure => view()
             .flex_row()
@@ -1256,96 +402,6 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
             )
             .into_element(),
     }
-}
-
-/// The Manager started or followed up on a task: a card that follows the
-/// task's state and opens it.
-fn task_card_line(app: AppState, conversation: Conversation, line: ReadSignal<Line>) -> AnyElement {
-    let task_id = move || match line.get().kind {
-        LineKind::Tool { status: ToolStatus::Done, output, .. } => crate::manager::task_id_in(&output),
-        _ => None,
-    };
-    dynamic(move || {
-        let Some(id) = task_id() else { return tool_row(line, None, conversation.opened) };
-        let lookup = id.clone();
-        let summary = move || app.tasks.with(|tasks| tasks.iter().find(|t| t.task.id == lookup).cloned());
-        let for_icon = summary.clone();
-        let for_title = summary.clone();
-        let for_meta = summary.clone();
-        let followed_up =
-            matches!(line.get_untracked().kind, LineKind::Tool { ref name, .. } if name == "continue_task" || name == "message_bot");
-        view()
-            .gap(px(6.0))
-            .child(when(move || followed_up, || text("Sent a message").text_size(px(SMALL)).text_color(muted())))
-            .child(
-                view()
-                    .max_w(px(520.0))
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .gap(px(3.0))
-                    .rounded(px(12.0))
-                    .border(px(LINE))
-                    .border_color(border())
-                    .bg(pane())
-                    .cursor(Cursor::Pointer)
-                    .hover(|s| s.bg(tertiary()))
-                    .on_press(move || app.route.set(crate::state::Route::Task(id.clone())))
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(state_icon(move || for_icon().map(|s| s.state).unwrap_or(TaskState::NotStarted), 14.0))
-                            .child(
-                                text(move || for_title().map(|s| s.task.title).unwrap_or_default())
-                                    .flex_1()
-                                    .text_size(px(BODY))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .number_of_lines(1),
-                            ),
-                    )
-                    .child(
-                        text(move || match for_meta() {
-                            Some(s) => {
-                                let project = s.task.project_cwd.as_deref().map(project_name).unwrap_or_else(|| "No project".into());
-                                format!("{}, {project}", state_label(s.state))
-                            }
-                            None => "This bot was removed".to_owned(),
-                        })
-                        .pl(px(22.0))
-                        .text_size(px(SMALL))
-                        .text_color(muted()),
-                    ),
-            )
-            .into_element()
-    })
-}
-
-/// An answered request, as a step of the trace: what it asked, and the
-/// answer.
-fn approval_row(line: ReadSignal<Line>) -> AnyElement {
-    let decided = move || match line.get().kind {
-        LineKind::Approval { decided, .. } => decided,
-        _ => None,
-    };
-    trace_row(
-        || GLYPH_APPROVAL,
-        move || match line.get().kind {
-            LineKind::Approval { summary, .. } => summary,
-            _ => String::new(),
-        },
-        move || {
-            decided().map(|d| match d {
-                Decision::AllowOnce => ("Allowed once".to_owned(), false),
-                Decision::AllowForTask => ("Allowed for this task".to_owned(), false),
-                Decision::Refuse("Turn ended") => ("Interrupted".to_owned(), false),
-                Decision::Deny | Decision::Refuse(_) => ("Denied".to_owned(), true),
-            })
-        },
-        || Tone::Plain,
-        || Trail::Nothing,
-    )
-    .into_element()
 }
 
 /// The agent waits for a yes: what it wants to do, and three answers.

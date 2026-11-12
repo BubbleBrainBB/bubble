@@ -150,20 +150,21 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
     }
     app.wait_for("1").unwrap();
 
-    // The Manager turns a request into a task, shown as a card; the task's
-    // agent starts at once and stops to ask before its command.
+    // The main bot gives a request to a bot and says so in words: the
+    // conversation shows what was said, not the calls behind it. The bot
+    // starts at once and stops to ask before its command.
     app.press("id:nav-home").unwrap();
     app.type_text("id:composer", "Please ship the notes").unwrap();
     app.submit("text:Please ship the notes").unwrap();
     app.wait_for_within("Started it.", long).unwrap();
-    app.wait_for("Ship the notes").unwrap();
-    app.wait_for_within("text:/^Needs you, project$/", long).unwrap();
+    app.wait_for("id:side-Ship the notes").unwrap();
+    app.wait_for_within("text:Waiting for you", long).unwrap();
 
     // A second task, started by the person, waits for the free slot.
     app.press("id:side-Second task").unwrap();
     app.type_text("id:composer", "Write the file").unwrap();
     app.submit("text:Write the file").unwrap();
-    app.wait_for("Queued until another bot finishes").unwrap();
+    app.wait_for("Waiting for a free slot").unwrap();
 
     // The first task gets its yes and finishes, which starts the second.
     app.press("id:side-Ship the notes").unwrap();
@@ -193,11 +194,11 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
     app.press("Allow once").unwrap();
     let started = std::time::Instant::now();
     app.press("label:Stop").unwrap();
-    app.wait_for_within("text:/^You stopped/", long).unwrap();
-    // A stopped turn's work stays open: the lone command is its own row.
-    app.wait_for("text:Ran sleep 20").unwrap();
+    // The bot is free again at once; nothing of the command it was in
+    // the middle of is left in the conversation.
+    app.wait_for_within("label:Send", long).unwrap();
     assert!(started.elapsed() < Duration::from_secs(10), "stopping does not wait for the command");
-    app.wait_for("label:Send").unwrap();
+    assert!(!app.shows("text:/sleep 20/"), "how the bot worked is not the conversation's to show");
 
     std::fs::remove_dir_all(&root).ok();
 }

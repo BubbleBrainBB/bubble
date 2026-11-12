@@ -829,28 +829,9 @@ pub fn framed(app: AppState, incoming: &Incoming) -> String {
     }
 }
 
-/// The id of the bot a tool's output names (`task_` and 32 hex digits).
-pub fn task_id_in(output: &str) -> Option<String> {
-    let start = output.find("task_")?;
-    let id: String = output[start..]
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .collect();
-    (id.len() > "task_".len()).then_some(id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn task_ids_are_found_in_outputs() {
-        assert_eq!(
-            task_id_in("Made bot task_0123abcd \"Docs\" in demo. It is working on the message; its answer will come to you.").as_deref(),
-            Some("task_0123abcd")
-        );
-        assert_eq!(task_id_in("Updated."), None);
-    }
 
     #[test]
     fn every_bot_can_reach_the_others_and_only_the_main_bot_makes_them() {

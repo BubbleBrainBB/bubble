@@ -1,5 +1,7 @@
 //! The real desktop/agent stream, paused at protocol boundaries: tool
 //! admission, approval, first answer token, stop, transport error, restart.
+//! The conversation shows what was said, what is asked and what failed;
+//! how the bot worked shows only as one row while it works.
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -169,7 +171,7 @@ fn ordered(app: &Headless, snippets: &[&str]) {
 }
 
 #[test]
-fn live_order_disclosures_terminal_states_and_restart_agree() {
+fn a_turn_shows_what_was_said_through_its_states_and_restores_as_it_was() {
     let root = std::env::temp_dir().join(format!("bubble-trace-test-{}", std::process::id()));
     let home = root.join("home");
     let project = root.join("demo");
@@ -196,62 +198,44 @@ fn live_order_disclosures_terminal_states_and_restart_agree() {
     app.type_text("id:composer", "Inspect").unwrap();
     app.submit("id:composer").unwrap();
     app.wait_for_within("Allow once", long).unwrap();
-    let (anchor, _) = stored(&home).remove(0);
-    // A running turn folds its work into one row, the status line at its end.
-    app.wait_for("text:Waiting for your approval").unwrap();
-    app.press("label:Show work").unwrap();
-    // Lone calls are rows of their own, with no group row over them.
-    app.wait_for("Queued: Ran printf second").unwrap();
-    ordered(
-        &app,
-        &[
-            "I will inspect",
-            "Waiting for approval: Ran printf first",
-            "Queued: Ran printf second",
-        ],
-    );
+    // A running turn shows what the bot said and what it asks, in the
+    // order they came, and one row at the end for what it is doing: here,
+    // waiting. The calls themselves do not show.
+    app.wait_for("text:Waiting for you").unwrap();
+    app.wait_for("id:activity").unwrap();
+    ordered(&app, &["I will inspect", "Run a command", "printf first"]);
+    assert!(!app.shows("text:/Ran printf/") && !app.shows("label:Show work"));
     app.press("Allow once").unwrap();
     app.wait_for_within("text:printf second", long).unwrap();
     app.press("Allow once").unwrap();
-    app.wait_for_within("Preparing answer", long).unwrap();
-    let second_row = "text:Ran printf second";
-    let node = app.screen().press_target(second_row).unwrap().unwrap();
-    // The open row and its output survive the first answer token.
-    app.press(second_row).unwrap();
-    app.wait_for("text:/^\\$ printf second\\nsecond/").unwrap();
+    // Both answered: the cards go, and the row says it is at work again.
+    app.wait_for_gone("Allow once", long).unwrap();
+    app.wait_for("id:activity").unwrap();
+    assert!(!app.shows("text:Waiting for you"));
+    assert!(!app.shows("text:/printf second/"), "what a command printed is not the conversation's to show");
+    // The reply's first words: it is the sign of life now, and the row goes.
     text.send(()).unwrap();
     app.wait_for_within("The final answer starts here.", long).unwrap();
-    assert_eq!(app.screen().press_target(second_row).unwrap(), Some(node));
-    app.wait_for("text:/^\\$ printf second\\nsecond/").unwrap();
+    app.wait_for_gone("id:activity", long).unwrap();
     end.send(()).unwrap();
     app.wait_for_within("The final answer starts here. It is complete.", long)
         .unwrap();
-    app.wait_for("text:/^Worked for /").unwrap();
-    app.press("label:Worked").unwrap();
-    // The raw-output disclosure remains open after folding.
-    app.wait_for("text:/^\\$ printf second\\nsecond/").unwrap();
-    ordered(
-        &app,
-        &[
-            "I will inspect",
-            "Ran printf first",
-            "Ran printf second",
-            "The final answer starts",
-        ],
-    );
+    app.wait_for_within("label:Send", long).unwrap();
+    assert!(!app.shows("text:/^Worked for /") && !app.shows("id:activity"));
+    ordered(&app, &["I will inspect", "The final answer starts"]);
 
     app.type_text("id:composer", "Stop this").unwrap();
     app.submit("id:composer").unwrap();
     app.wait_for_within("Keep this stopped reply.", long).unwrap();
     app.press("label:Stop").unwrap();
-    app.wait_for_within("text:/^You stopped/", long).unwrap();
+    // Stopped: the bot is free, and what it had said stays.
+    app.wait_for_within("label:Send", long).unwrap();
     app.wait_for("Keep this stopped reply.").unwrap();
     app.type_text("id:composer", "Fail this").unwrap();
     app.submit("id:composer").unwrap();
-    app.wait_for_within("text:/^Failed/", long).unwrap();
     // The agent asked for the broken-off reply once more and was turned
     // down: the failure shows, and the words of the superseded attempt do not.
-    app.wait_for("text:/The model is not available/").unwrap();
+    app.wait_for_within("text:/The model is not available/", long).unwrap();
     assert!(!app.shows("Superseded partial reply."), "a superseded partial reply stayed on screen");
     let before = stored(&home);
     assert_eq!(before.len(), 3);
@@ -265,15 +249,13 @@ fn live_order_disclosures_terminal_states_and_restart_agree() {
     app.press("id:side-Trace regression").unwrap();
     app.wait_for_within("Keep this stopped reply.", long).unwrap();
     app.wait_for("text:/The model is not available/").unwrap();
-    app.wait_for("text:/^You stopped/").unwrap();
-    app.wait_for("text:/^Failed/").unwrap();
     assert_eq!(
         stored(&home),
         before,
         "restoring must not rewrite terminal state or timing"
     );
-    app.press("label:Worked").unwrap();
     app.wait_for("I will inspect the project.").unwrap();
+    assert!(!app.shows("text:/Ran printf/"));
     ordered(
         &app,
         &[

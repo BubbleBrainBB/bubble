@@ -111,20 +111,17 @@ fn the_agent_asks_and_goes_on_with_the_answer() {
     app.wait_for_within("id:nav-home", long).unwrap();
     app.press("id:side-Notes").unwrap();
 
-    // The agent asks; the bot shows as waiting for the person, the question
-    // stays out of the folded work, and picking a choice answers it.
+    // The agent asks; the bot shows as waiting for the person, in the list
+    // and at the end of its conversation, and picking a choice answers it.
     app.type_text("id:composer", "Write the notes").unwrap();
     app.submit("text:Write the notes").unwrap();
     app.wait_for_within("Which format should the notes use?", long).unwrap();
-    app.wait_for("text:Waiting for your answer").unwrap();
-    app.wait_for("text:Waiting for you").unwrap();
+    assert_eq!(app.screen().count("text:Waiting for you").unwrap(), 2, "in the bot list and in the conversation");
     app.wait_for("Headings and lists").unwrap();
     app.press("label:Answer Markdown").unwrap();
     app.wait_for_within("text:/^The answer was: .*Markdown/", long).unwrap();
     assert!(!app.shows("text:Waiting for you"), "nothing waits on the person once they answered");
-    // The answered question is part of the turn's work, folded with it.
-    app.wait_for("text:/^Worked for /").unwrap();
-    app.press("label:Worked").unwrap();
+    // What was asked and answered stays in the conversation: it was said.
     app.wait_for("text:Answered").unwrap();
     app.wait_for("Which format should the notes use?").unwrap();
 

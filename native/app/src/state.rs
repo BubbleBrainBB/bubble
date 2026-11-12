@@ -1127,7 +1127,6 @@ impl AppState {
             active_turn: stored(String::new()),
             active_run: stored(String::new()),
             checkpoint_at: stored(0),
-            opened: signal(HashSet::new()),
             following: signal(true),
             abort: stored(None),
             on_change: stored(None),
@@ -1336,8 +1335,6 @@ pub struct Conversation {
     /// Subagents the task's agent started; they outlive its turns.
     children: Stored<Arc<Children>>,
     pub subagents: Signal<Vec<delegate::Snapshot>>,
-    /// Disclosure choices belong to the conversation, including across page changes.
-    pub opened: Signal<HashSet<String>>,
     pub following: Signal<bool>,
     /// Questions the agent waits on, by their line's id.
     approvals: Stored<HashMap<String, oneshot::Sender<Decision>>>,
@@ -2394,7 +2391,7 @@ impl Conversation {
     }
 }
 
-const CHECKPOINT_NOTE: &str = "Earlier messages were summarized to stay within the model's context";
+pub(crate) const CHECKPOINT_NOTE: &str = "Earlier messages were summarized to stay within the model's context";
 
 /// A system prompt with the person's AGENTS.md instructions after it.
 fn with_instructions(prompt: String, cwd: Option<&std::path::Path>) -> String {

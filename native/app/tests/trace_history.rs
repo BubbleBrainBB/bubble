@@ -1,5 +1,6 @@
-//! Legacy Manager history followed by a new turn. Check actual layout
-//! frames as well as tree order: a correct projection alone is not enough.
+//! History from before turns had headers (replies, and tool calls that
+//! no longer show), followed by a new turn. Check actual layout frames as
+//! well as tree order: a correct projection alone is not enough.
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -137,7 +138,7 @@ fn seed(store: &Store) {
 }
 
 #[test]
-fn legacy_cards_and_answers_stay_above_the_next_prompt_in_layout() {
+fn earlier_answers_stay_above_the_next_prompt_in_layout() {
     let root = std::env::temp_dir().join(format!("bubble-trace-history-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -204,16 +205,11 @@ fn legacy_cards_and_answers_stay_above_the_next_prompt_in_layout() {
     app.wait_for("Original final answer").unwrap();
     app.type_text("id:composer", "New follow-up request").unwrap();
     app.submit("id:composer").unwrap();
-    app.wait_for_within("Checking current state", Duration::from_secs(10))
-        .unwrap();
+    // The new turn is at work: one row at the end says so.
+    app.wait_for_within("id:activity", Duration::from_secs(10)).unwrap();
     let assert_order = |app: &Headless| {
         let texts = app.screen().texts();
-        let snippets = [
-            "Original request",
-            "Original task card",
-            "Original final answer",
-            "New follow-up request",
-        ];
+        let snippets = ["Original request", "Original final answer", "New follow-up request"];
         let indices = snippets.map(|s| texts.iter().rposition(|t| t.contains(s)).unwrap());
         assert!(indices.windows(2).all(|w| w[0] < w[1]), "tree order: {texts:?}");
         let frames = geometry.lock().unwrap();

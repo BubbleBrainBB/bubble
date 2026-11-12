@@ -162,20 +162,16 @@ fn tasks_use_mcp_tools_and_settings_show_what_is_there() {
     app.press("id:side-Echo").unwrap();
     app.type_text("id:composer", "Echo hi").unwrap();
     app.submit("text:Echo hi").unwrap();
-    // The calls so far fold into one row; the question stays out, and the
-    // group holding the waiting call opens by itself.
-    app.wait_for_within("text:Waiting for your approval", long).unwrap();
+    // What it asks to do shows as a card; the calls it made to get there
+    // do not show, and the row at the end says it waits for the person.
     app.wait_for_within("Use echo from the echo MCP server", long).unwrap();
-    app.press("label:Show work").unwrap();
-    app.wait_for("text:Loaded tools").unwrap();
+    app.wait_for("text:Waiting for you").unwrap();
+    assert!(!app.shows("text:Loaded tools"));
     app.press("Allow once").unwrap();
     app.wait_for_within("text:The server said: echo: hi", long).unwrap();
-    // Done, the turn's work folds under "Worked for"; opened, it is all there.
-    app.wait_for("text:/^Worked for /").unwrap();
-    app.press("label:Worked").unwrap();
-    // The group opened itself only while its call waited; it opens again.
-    app.press("text:Called 2 tools").unwrap();
-    app.wait_for("text:Used echo from echo").unwrap();
+    // Done: what it said, and nothing of how. The card that was answered goes too.
+    app.wait_for_within("label:Send", long).unwrap();
+    assert!(!app.shows("text:/^Worked for /") && !app.shows("text:Used echo from echo") && !app.shows("Allow once"));
     assert!(seen.exists(), "the skill list and the deferred tool reached the system prompt");
 
     // A command waits for a yes; turning on full access answers it.
