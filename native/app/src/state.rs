@@ -1231,17 +1231,43 @@ fn seed_development_home() {
     if !bubble_core::config::development_data() {
         return;
     }
-    let (from, to) = (bubble_core::config::production_home(), bubble_home());
+    bring_configuration(&bubble_core::config::production_home(), &bubble_home());
+}
+
+/// Copies the providers and sign-ins of the home `from` to the home `to`,
+/// unless `to` is set up already.
+fn bring_configuration(from: &std::path::Path, to: &std::path::Path) {
     if to.join("config.json").exists() {
         return;
     }
-    std::fs::create_dir_all(&to).ok();
+    std::fs::create_dir_all(to).ok();
     for file in ["config.json", "auth.json"] {
         if from.join(file).is_file() {
             if let Err(error) = std::fs::copy(from.join(file), to.join(file)) {
                 log::warn!("{file} could not be brought to the development data: {error}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod development_tests {
+    #[test]
+    fn a_home_that_is_not_set_up_takes_the_configuration_and_one_that_is_keeps_its_own() {
+        let root = std::env::temp_dir().join(format!("bubble-bring-{}", std::process::id()));
+        let (from, fresh, set_up) = (root.join("from"), root.join("fresh"), root.join("set-up"));
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&set_up).unwrap();
+        std::fs::write(from.join("config.json"), "theirs").unwrap();
+        std::fs::write(from.join("auth.json"), "signed in").unwrap();
+        std::fs::write(set_up.join("config.json"), "its own").unwrap();
+        super::bring_configuration(&from, &fresh);
+        super::bring_configuration(&from, &set_up);
+        assert_eq!(std::fs::read_to_string(fresh.join("config.json")).unwrap(), "theirs");
+        assert_eq!(std::fs::read_to_string(fresh.join("auth.json")).unwrap(), "signed in");
+        assert_eq!(std::fs::read_to_string(set_up.join("config.json")).unwrap(), "its own");
+        assert!(!set_up.join("auth.json").exists());
+        std::fs::remove_dir_all(root).ok();
     }
 }
 
@@ -1256,13 +1282,14 @@ fn seed_development_preferences(store: &Store, config: &Config) {
     }
     let theirs = bubble_core::config::production_home();
     let mut kept = Store::peek_settings(theirs.join("native").join("bubble.db"), &[MANAGER_MODEL, TASK_MODEL, THINKING, APPEARANCE, MAX_RUNS, MAX_ROLE_BOTS]);
-    // The model they work with there, when this configuration has its provider too.
-    if !kept.contains_key(MANAGER_MODEL) && !kept.contains_key(TASK_MODEL) {
-        let model = Config::load_from(&theirs.join("config.json")).ok().and_then(|c| c.default_model_reference());
-        let offered = |reference: &str| reference.split_once(':').is_some_and(|(provider, _)| config.providers.iter().any(|p| p.id == provider));
-        if let Some(model) = model.filter(|m| offered(m) && config.default_model_reference().as_deref() != Some(m.as_str())) {
-            kept.insert(MANAGER_MODEL.to_owned(), model.clone());
-            kept.insert(TASK_MODEL.to_owned(), model);
+    // Where they chose no model there, the app runs on their configuration's
+    // default; here that default may be another, so theirs is written
+    // down, when this configuration has its provider too.
+    let model = Config::load_from(&theirs.join("config.json")).ok().and_then(|c| c.default_model_reference());
+    let offered = |reference: &str| reference.split_once(':').is_some_and(|(provider, _)| config.providers.iter().any(|p| p.id == provider));
+    if let Some(model) = model.filter(|m| offered(m) && config.default_model_reference().as_deref() != Some(m.as_str())) {
+        for key in [MANAGER_MODEL, TASK_MODEL] {
+            kept.entry(key.to_owned()).or_insert_with(|| model.clone());
         }
     }
     for (key, value) in &kept {

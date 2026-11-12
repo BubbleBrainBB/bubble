@@ -1,7 +1,7 @@
 //! A development build's data is kept apart from the person's own: its
-//! bots, conversations and database live in `~/.bubble-dev`, which starts
-//! with their providers and how they set the app up, and their own data
-//! is left as it was.
+//! bots, conversations and database live in `~/.bubble-dev`, which keeps
+//! a configuration of its own when it has one and takes over how they set
+//! the app up, and their own data is left as it was.
 
 use std::time::Duration;
 
@@ -28,6 +28,15 @@ fn development_data_starts_from_the_persons_setup_and_stays_apart() {
         store.set_setting("max_concurrent_runs", Some("2")).unwrap();
         store.create_task(NewTask { title: "Mine", project_cwd: None, origin: Origin::User }).unwrap();
     }
+    // The development home has a configuration of its own already, with
+    // another default model: it is kept, and the model they work with
+    // there is written down for both the main bot and the bots.
+    std::fs::create_dir_all(&ours).unwrap();
+    std::fs::write(
+        ours.join("config.json"),
+        r#"{"providers":[{"id":"mock","name":"Mock","baseURL":"http://127.0.0.1:9","apiKey":"dev-key","enabled":true}],"defaultModel":"mock:other"}"#,
+    )
+    .unwrap();
     // SAFETY: the only test in this binary, before the engine starts.
     unsafe {
         std::env::set_var("HOME", &root);
@@ -46,9 +55,15 @@ fn development_data_starts_from_the_persons_setup_and_stays_apart() {
     assert!(!app.shows("id:side-Mine"), "the person's own bots are not development data");
     app.wait_for("text:/^No bots yet/").unwrap();
 
-    // It started with their providers and sign-ins, and how they set the app up.
-    assert!(ours.join("config.json").is_file() && ours.join("auth.json").is_file());
-    let kept = Store::peek_settings(ours.join("native/bubble.db"), &["thinking_level", "max_concurrent_runs", "development_seeded"]);
+    // It kept its own providers, and took over how they set the app up.
+    assert!(std::fs::read_to_string(ours.join("config.json")).unwrap().contains("dev-key"), "its own configuration is kept");
+    assert!(!ours.join("auth.json").exists(), "nothing is copied over a home that is set up");
+    let kept = Store::peek_settings(
+        ours.join("native/bubble.db"),
+        &["thinking_level", "max_concurrent_runs", "development_seeded", "manager_model", "task_model"],
+    );
+    assert_eq!(kept.get("manager_model").map(String::as_str), Some("mock:m"));
+    assert_eq!(kept.get("task_model").map(String::as_str), Some("mock:m"));
     assert_eq!(kept.get("thinking_level").map(String::as_str), Some("low"));
     assert_eq!(kept.get("max_concurrent_runs").map(String::as_str), Some("2"));
     assert_eq!(kept.get("development_seeded").map(String::as_str), Some("1"));
