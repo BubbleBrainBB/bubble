@@ -153,6 +153,11 @@ fn reply_bubble(source: &str) -> AnyElement {
         .into_element()
 }
 
+/// From this many characters on, a message to a bot shows only its beginning
+/// until the person opens it, this many points of it.
+const LONG_MESSAGE: usize = 700;
+const LONG_MESSAGE_SHOWN: f32 = 176.0;
+
 /// What someone other than the person said to this bot (the main bot,
 /// another bot, GitHub, a routine): where the person's own words would be
 /// and looking as they do, with who said it over it. Whoever a bot is
@@ -161,7 +166,16 @@ fn said_to_bot(from: impl Fn() -> String + 'static, line: ReadSignal<Line>) -> A
     let document = nsh_base::text_view::Parser::new().markdown(&line.get_untracked().text);
     let fits = !takes_given_width(&document.blocks) && document.footnotes.is_empty();
     let bubble = view().bg(user_bubble()).rounded(px(18.0)).px(px(16.0)).py(px(9.0));
-    let bubble = if fits { bubble } else { bubble.w_full() };
+    // As wide as what it says, and no wider than its place: without the
+    // limit on the bubble itself a long message is laid out on one line.
+    let bubble = if fits { bubble.max_w(percentage(1.0)) } else { bubble.w_full() };
+    // A long one (a bot's whole report) shows its beginning: the person
+    // reads what their bot makes of it, and opens it when they want it all.
+    let long = line.get_untracked().text.chars().count() > LONG_MESSAGE;
+    let open = signal(!long);
+    let words = view()
+        .style_when(move || !open.get(), |style| style.max_h(px(LONG_MESSAGE_SHOWN)).overflow_hidden())
+        .child(nsh_base::text_view::text_view().document(document).selectable(true).classes(reading_classes_on_ink()));
     view()
         .child(stamp_line(line))
         .child(
@@ -171,7 +185,14 @@ fn said_to_bot(from: impl Fn() -> String + 'static, line: ReadSignal<Line>) -> A
                 .items_end()
                 .gap(px(4.0))
                 .child(text(from).text_size(px(SMALL)).text_color(muted()))
-                .child(bubble.child(nsh_base::text_view::text_view().document(document).selectable(true).classes(reading_classes_on_ink()))),
+                .child(bubble.child(words))
+                .child(long.then(|| {
+                    text(move || if open.get() { "Show less" } else { "Show all" })
+                        .text_size(px(SMALL))
+                        .text_color(secondary())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move || open.update(|open| *open = !*open))
+                })),
         )
         .into_element()
 }
