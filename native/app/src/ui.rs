@@ -155,14 +155,18 @@ fn reply_bubble(source: &str) -> AnyElement {
 
 /// A mark in passing that this bot and another exchanged a message: a small
 /// line in the middle of the conversation with the other bot's face and
-/// name ("Message from", "Messaged"). What was said is the other bot's to
-/// show; with `body`, pressing the mark shows it here too.
-fn bot_mark(app: AppState, verb: &'static str, name: String, body: Option<ReadSignal<Line>>) -> AnyElement {
-    let open = signal(false);
-    let face = if name == crate::manager::MAIN_BOT {
-        Some(crate::avatar::main(16.0).into_element())
+/// name ("Message from", "Messaged"). What was said is in the other bot's
+/// conversation, and a press on the mark goes there.
+fn bot_mark(app: AppState, verb: &'static str, name: String) -> AnyElement {
+    // Where the other bot's conversation is: the main bot's is home.
+    let (face, there) = if name == crate::manager::MAIN_BOT {
+        (Some(crate::avatar::main(16.0).into_element()), Some(crate::state::Route::Home))
     } else {
-        crate::manager::find(app, &name).ok().map(|bot| crate::avatar::bot(app, &bot.task.id, 16.0).into_element())
+        match crate::manager::find(app, &name) {
+            Ok(bot) => (Some(crate::avatar::bot(app, &bot.task.id, 16.0).into_element()), Some(crate::state::Route::Task(bot.task.id))),
+            // A bot that is gone: its name, and nowhere to go.
+            Err(_) => (None, None),
+        }
     };
     let mark = view()
         .self_center()
@@ -172,15 +176,19 @@ fn bot_mark(app: AppState, verb: &'static str, name: String, body: Option<ReadSi
         .child(text(verb).text_size(px(SMALL)).text_color(muted()))
         .child(face)
         .child(text(name.clone()).text_size(px(SMALL)).text_color(secondary()).number_of_lines(1));
-    let mark = match body {
-        Some(_) => mark.cursor(Cursor::Pointer).label(format!("{verb} {name}")).on_press(move || open.update(|open| *open = !*open)),
-        None => mark,
-    };
-    view()
-        .gap(px(8.0))
-        .child(mark)
-        .child(body.map(|line| when(move || open.get(), move || reply_bubble(&line.get().text))))
-        .into_element()
+    match there {
+        Some(route) => mark
+            .cursor(Cursor::Pointer)
+            .label(format!("{verb} {name}"))
+            .on_press(move || {
+                if let crate::state::Route::Task(id) = &route {
+                    app.mark_seen(id);
+                }
+                app.route.set(route.clone());
+            })
+            .into_element(),
+        None => mark.into_element(),
+    }
 }
 
 /// From this many characters on, a message to a bot shows only its beginning
@@ -434,8 +442,8 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>) 
         LineKind::Tool { ref name, .. } if crate::trace::went_to_a_bot(name) => {
             let said = line.get_untracked().text;
             match (said.strip_prefix("Messaged "), said.strip_prefix("Made a bot: ")) {
-                (Some(bot), _) if bot != "a bot" => bot_mark(app, "Messaged", bot.to_owned(), None),
-                (_, Some(bot)) if !bot.is_empty() => bot_mark(app, "Made", bot.to_owned(), None),
+                (Some(bot), _) if bot != "a bot" => bot_mark(app, "Messaged", bot.to_owned()),
+                (_, Some(bot)) if !bot.is_empty() => bot_mark(app, "Made", bot.to_owned()),
                 _ => view().into_element(),
             }
         }
@@ -482,9 +490,10 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>) 
         LineKind::Message(MessageRole::Tool | MessageRole::Checkpoint) => view().into_element(),
         LineKind::Message(MessageRole::External) => said_to_bot(|| "From GitHub".to_owned(), line),
         // A bot's answer coming back is a mark in passing: this bot says
-        // what came of it, and the whole of it is a press away.
+        // what came of it, and the whole of it is in that bot's
+        // conversation, a press away.
         LineKind::Message(MessageRole::System) if app.is_reply(&line.get_untracked().id) => {
-            bot_mark(app, "Message from", app.sender_label(&line.get_untracked().id), Some(line))
+            bot_mark(app, "Message from", app.sender_label(&line.get_untracked().id))
         }
         LineKind::Message(MessageRole::System) => said_to_bot(move || format!("From {}", app.sender_label(&line.get().id)), line),
         LineKind::Notice => text(move || line.get().text).text_size(px(SMALL)).text_color(muted()).into_element(),

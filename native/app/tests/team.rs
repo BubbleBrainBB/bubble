@@ -148,14 +148,18 @@ fn bots_ask_each_other_and_answers_go_back_to_whoever_asked() {
     assert_eq!(app.screen().count("text:Message from").unwrap(), 1, "the main bot heard from Writer once, when it was done");
     assert_eq!(app.screen().count("text:Messaged").unwrap(), 1);
     assert!(!app.shows("text:/Writer reported: Waiting/"), "a bot still waiting on another has nothing to report yet");
-    // The answer itself is Writer's to show; a press on the mark shows it here.
+    // The answer itself is in Writer's conversation: a press on the mark goes there.
     assert!(!app.shows("text:/^Checker says: Checked: fine/"));
     app.press("label:Message from Writer").unwrap();
+    app.wait_for("text:Message Writer").unwrap();
     app.wait_for("text:/^Checker says: Checked: fine/").unwrap();
+    // From there, the mark of Checker's answer goes on to Checker's.
+    app.wait_for("From Bubble").unwrap();
+    app.press("label:Message from Checker").unwrap();
+    app.wait_for("text:Message Checker").unwrap();
 
     // What is asked of a bot shows where the person's own words would,
     // with who asked; an answer that came back to it is a mark.
-    app.press("id:side-Checker").unwrap();
     app.wait_for("From Writer").unwrap();
     app.wait_for("Check x").unwrap();
     app.press("id:side-Writer").unwrap();
