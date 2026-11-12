@@ -15,7 +15,28 @@ pub fn bubble_home() -> PathBuf {
     if let Some(home) = std::env::var_os("BUBBLE_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(home);
     }
+    if development_data() {
+        return development_home();
+    }
+    production_home()
+}
+
+/// Where the person's own data is: what they use every day.
+pub fn production_home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".bubble")
+}
+
+/// Where a development build keeps its data, apart from the person's own
+/// (the same folder Bubble's command line uses under `BUBBLE_DEV`).
+pub fn development_home() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".bubble-dev")
+}
+
+/// Whether this run keeps development data: `BUBBLE_DEV` is on and no
+/// `BUBBLE_HOME` names a folder outright.
+pub fn development_data() -> bool {
+    std::env::var_os("BUBBLE_HOME").is_none_or(|v| v.is_empty())
+        && std::env::var("BUBBLE_DEV").is_ok_and(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
 }
 
 /// The wire protocol a provider speaks.

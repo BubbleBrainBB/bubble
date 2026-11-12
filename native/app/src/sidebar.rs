@@ -192,7 +192,11 @@ pub fn sidebar(app: AppState) -> impl IntoElement {
                     .on_press(move || app.route.set(Route::Settings))
                     .child(icon(SETTINGS_ICON, 15.0).text_color(secondary()))
                     .child(text("Settings").text_size(px(BODY)).text_color(ink())),
-            ),
+            )
+            // A development build's data is not the person's own: say so.
+            .child(bubble_core::config::development_data().then(|| {
+                text("Development data").self_center().pt(px(8.0)).text_size(px(SMALL)).text_color(muted())
+            })),
         )
 }
 

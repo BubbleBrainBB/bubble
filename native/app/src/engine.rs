@@ -24,7 +24,10 @@ impl Hosts {
         }
         // The login shell's environment: an app opened from the Finder has
         // no PATH to find Node, or the tools the agent's commands use.
-        let env = tokio::task::spawn_blocking(|| bubble_core::mcp::shell_env().clone()).await?;
+        let mut env = tokio::task::spawn_blocking(|| bubble_core::mcp::shell_env().clone()).await?;
+        // The agent keeps its data where the app does, whatever the login
+        // shell says: a development build's sessions stay with its bots.
+        env.insert("BUBBLE_HOME".to_owned(), bubble_core::bubble_home().to_string_lossy().into_owned());
         let host = Host::start(Launch::find(&env)?).await?;
         *running = Some(host.clone());
         Ok(host)

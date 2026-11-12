@@ -240,6 +240,7 @@ impl AppState {
     /// Made by the root component, whose owner it keeps.
     pub fn load() -> Self {
         let mut problems = Vec::new();
+        seed_development_home();
         let config = Config::load().unwrap_or_else(|error| {
             problems.push(format!("config.json: {error:#}"));
             Config::default()
@@ -261,6 +262,9 @@ impl AppState {
                 None
             }
         };
+        if let Some(store) = &store {
+            seed_development_preferences(store, &config);
+        }
         let setting = |key: &str| store.as_ref().and_then(|s| s.setting(key).ok().flatten());
         let max_runs = setting(MAX_RUNS).and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MAX_RUNS);
         let state = AppState {
@@ -1218,6 +1222,53 @@ fn appearance_of(value: Option<&str>) -> nsh_core::platform::Appearance {
         Some("dark") => Appearance::Dark,
         _ => Appearance::System,
     }
+}
+
+/// A development home that has no configuration yet starts with the
+/// person's own: their providers and sign-ins, so models need no second
+/// setup. One that has its own keeps it.
+fn seed_development_home() {
+    if !bubble_core::config::development_data() {
+        return;
+    }
+    let (from, to) = (bubble_core::config::production_home(), bubble_home());
+    if to.join("config.json").exists() {
+        return;
+    }
+    std::fs::create_dir_all(&to).ok();
+    for file in ["config.json", "auth.json"] {
+        if from.join(file).is_file() {
+            if let Err(error) = std::fs::copy(from.join(file), to.join(file)) {
+                log::warn!("{file} could not be brought to the development data: {error}");
+            }
+        }
+    }
+}
+
+/// A development database that is new takes over how the person set the
+/// app up (its models, how hard they think, its look, its limits), once.
+/// Bots, conversations and what GitHub brought start empty: that is what
+/// is kept apart.
+fn seed_development_preferences(store: &Store, config: &Config) {
+    const SEEDED: &str = "development_seeded";
+    if !bubble_core::config::development_data() || store.setting(SEEDED).ok().flatten().is_some() {
+        return;
+    }
+    let theirs = bubble_core::config::production_home();
+    let mut kept = Store::peek_settings(theirs.join("native").join("bubble.db"), &[MANAGER_MODEL, TASK_MODEL, THINKING, APPEARANCE, MAX_RUNS, MAX_ROLE_BOTS]);
+    // The model they work with there, when this configuration has its provider too.
+    if !kept.contains_key(MANAGER_MODEL) && !kept.contains_key(TASK_MODEL) {
+        let model = Config::load_from(&theirs.join("config.json")).ok().and_then(|c| c.default_model_reference());
+        let offered = |reference: &str| reference.split_once(':').is_some_and(|(provider, _)| config.providers.iter().any(|p| p.id == provider));
+        if let Some(model) = model.filter(|m| offered(m) && config.default_model_reference().as_deref() != Some(m.as_str())) {
+            kept.insert(MANAGER_MODEL.to_owned(), model.clone());
+            kept.insert(TASK_MODEL.to_owned(), model);
+        }
+    }
+    for (key, value) in &kept {
+        let _ = store.set_setting(key, Some(value));
+    }
+    let _ = store.set_setting(SEEDED, Some("1"));
 }
 
 /// The known project folders: the ones bots were sent to, newest first,

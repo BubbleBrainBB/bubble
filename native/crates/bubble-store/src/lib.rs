@@ -533,6 +533,21 @@ impl Store {
         Self::from_connection(conn)
     }
 
+    /// The settings `keys` name in the database at `path`, read without
+    /// opening it for writing or bringing its schema up to date: a look at
+    /// another installation's preferences.
+    pub fn peek_settings(path: impl AsRef<Path>, keys: &[&str]) -> std::collections::HashMap<String, String> {
+        let mut found = std::collections::HashMap::new();
+        let Ok(conn) = Connection::open_with_flags(path.as_ref(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else { return found };
+        for key in keys {
+            let value: Option<String> = conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| row.get(0)).optional().ok().flatten();
+            if let Some(value) = value {
+                found.insert((*key).to_owned(), value);
+            }
+        }
+        found
+    }
+
     /// A store that lives in memory (tests).
     pub fn open_in_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory()?)
