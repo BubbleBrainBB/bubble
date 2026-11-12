@@ -1159,7 +1159,7 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
                     .rounded(px(18.0))
                     .px(px(16.0))
                     .py(px(9.0))
-                    .child(text(move || line.get().text).text_size(px(BODY)).line_height(px(21.0)).text_color(ink()))
+                    .child(text(move || line.get().text).text_size(px(BODY)).line_height(px(21.0)).text_color(user_bubble_text()))
             }))
             .child(when(move || line.get().images > 0, move || {
                 text(move || match line.get().images {

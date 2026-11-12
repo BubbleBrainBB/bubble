@@ -60,8 +60,14 @@ pub fn item_hover() -> AdaptiveColor {
 pub fn item_active() -> AdaptiveColor {
     pair_alpha(0x0000_000F, 0xFFFF_FF14)
 }
+/// What the person wrote: the strongest surface in the conversation, so
+/// it is told at a glance from what a bot said (gray). Black with white
+/// words in light; the reverse in dark, where black would not show.
 pub fn user_bubble() -> AdaptiveColor {
-    pair(0xEBEBEB, 0x2E2E2E)
+    pair(0x0B0B0B, 0xECECEC)
+}
+pub fn user_bubble_text() -> AdaptiveColor {
+    pair(0xFFFFFF, 0x1A1A1A)
 }
 pub fn tertiary() -> AdaptiveColor {
     pair(0xF5F5F7, 0x2A2A2A)
