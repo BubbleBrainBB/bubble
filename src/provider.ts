@@ -17,7 +17,9 @@ import {
   type GrokAuthAdapter,
 } from "./provider-grok.js";
 import { getChatGptFetch } from "./network/chatgpt-transport.js";
-import { createProviderFetch } from "./network/provider-transport.js";
+import { createProviderFetch, type ProviderFetch } from "./network/provider-transport.js";
+import { withChatStreamCompletionCheck } from "./network/chat-stream-completion.js";
+import { createPlainProviderFetch } from "./network/plain-provider-fetch.js";
 import { chatRequestShape, isSpaceBunnyUpstreamRejection, recoverableSpaceBunnyError } from "./provider-zen-errors.js";
 import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
@@ -184,21 +186,27 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     ...(grokSubscription ? buildGrokSubscriptionHeaders() : {}),
     ...(options.headers ?? {}),
   };
+  // Every client gets an explicit fetch. Left to itself the OpenAI SDK streams
+  // through its bundled node-fetch on Node, which reports a premature close
+  // only for chunked bodies: a reply cut short of its content-length left the
+  // stream neither ended nor failed, and the turn hung. Node's own fetch fails
+  // that read, and the completion check covers a body that ends cleanly but
+  // early.
+  const requestTimeoutMs = resolveRequestTimeoutMs(process.env.BUBBLE_PROVIDER_REQUEST_TIMEOUT_MS);
+  const transportFetch: ProviderFetch = grokSubscription
+    ? (options.grokAuth ? createGrokSubscriptionFetch(options.grokAuth) : getChatGptFetch())
+    : options.providerId === "opencode-zen"
+      ? createProviderFetch({ providerName: "OpenCode Zen" })
+      // No limit on how long the model may stay silent unless the person
+      // set a request timeout: Node's fetch would otherwise cut a reply
+      // after 300 seconds without a byte.
+      : createPlainProviderFetch({ idleTimeoutMs: requestTimeoutMs >= MAX_TIMER_MS ? 0 : requestTimeoutMs });
   const client = new OpenAI({
     apiKey: options.apiKey,
     baseURL: options.baseURL,
-    timeout: resolveRequestTimeoutMs(process.env.BUBBLE_PROVIDER_REQUEST_TIMEOUT_MS),
+    timeout: requestTimeoutMs,
     ...(Object.keys(defaultHeaders).length > 0 ? { defaultHeaders } : {}),
-    ...(options.providerId === "opencode-zen" ? {
-      fetch: createProviderFetch({ providerName: "OpenCode Zen" }) as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>["fetch"],
-    } : {}),
-    ...(grokSubscription
-      ? {
-          fetch: (options.grokAuth
-            ? createGrokSubscriptionFetch(options.grokAuth)
-            : getChatGptFetch()) as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>["fetch"],
-        }
-      : {}),
+    fetch: withChatStreamCompletionCheck(transportFetch) as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>["fetch"],
   });
 
   const fallbackModel = "gpt-4o";

@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
+import { describe, expect, it, vi } from "vitest";
 import {
   PrintRunCollector,
   formatPrintJson,
   formatPrintJsonError,
   parseOutputFormat,
+  watchForStalledTurn,
 } from "../print-output.js";
 import type { AgentEvent } from "../types.js";
 
@@ -187,5 +189,30 @@ describe("parseOutputFormat", () => {
     expect(parseOutputFormat("json")).toBe("json");
     expect(parseOutputFormat("stream-json")).toBeUndefined();
     expect(parseOutputFormat(undefined)).toBeUndefined();
+  });
+});
+
+describe("watchForStalledTurn", () => {
+  it("reports once when the event loop drains with the turn still pending", () => {
+    const proc = new EventEmitter();
+    const onStalled = vi.fn();
+    watchForStalledTurn(onStalled, proc);
+
+    proc.emit("beforeExit", 0);
+    proc.emit("beforeExit", 0);
+
+    expect(onStalled).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays silent once the turn has settled", () => {
+    const proc = new EventEmitter();
+    const onStalled = vi.fn();
+    const turnSettled = watchForStalledTurn(onStalled, proc);
+
+    turnSettled();
+    proc.emit("beforeExit", 0);
+
+    expect(onStalled).not.toHaveBeenCalled();
+    expect(proc.listenerCount("beforeExit")).toBe(0);
   });
 });
