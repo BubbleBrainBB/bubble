@@ -292,6 +292,41 @@ describe("ai-sdk provider request building", () => {
       expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low", includeThoughts: true });
     }
   });
+
+  it("sends Gemini 4 Hydrogen its native xhigh level", async () => {
+    for (const level of ["low", "medium", "high"] as const) {
+      const body = await captureBody(USER_MESSAGES, { model: "gemini-4-hydrogen", thinkingLevel: level });
+      expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: level, includeThoughts: true });
+    }
+    for (const level of ["off", "minimal"] as const) {
+      const body = await captureBody(USER_MESSAGES, { model: "gemini-4-hydrogen", thinkingLevel: level });
+      expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low", includeThoughts: true });
+    }
+    // The SDK schema stops at "high"; xhigh is restored on the wire and the
+    // internal carrier header never reaches Google.
+    for (const level of ["xhigh", "max"] as const) {
+      let body: Record<string, any> = {};
+      let headers = new Headers();
+      const provider = makeProvider(async (_url, init) => {
+        body = JSON.parse(String(init?.body ?? "{}"));
+        headers = new Headers(init?.headers);
+        return sseResponse(sse([HAPPY_CHUNKS[1], {
+          candidates: [{ content: { parts: [] as unknown[], role: "model" }, finishReason: "STOP" }],
+        }]));
+      });
+      await collect(provider.streamChat(USER_MESSAGES, { model: "gemini-4-hydrogen", thinkingLevel: level }));
+      expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "xhigh", includeThoughts: true });
+      expect(body.contents).toHaveLength(1);
+      expect(headers.has("x-bubble-thinking-level")).toBe(false);
+      expect(headers.get("x-goog-api-key")).toBe("test-key");
+      expect(headers.get("content-type")).toBe("application/json");
+    }
+    // Argon and Carbon have no xhigh: they must keep clamping to high.
+    for (const model of ["gemini-4-argon", "gemini-4-carbon"]) {
+      const body = await captureBody(USER_MESSAGES, { model, thinkingLevel: "xhigh" });
+      expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "high", includeThoughts: true });
+    }
+  });
 });
 
 describe("ai-sdk provider complete()", () => {
@@ -385,6 +420,38 @@ describe("Gemini model discovery", () => {
     });
   });
 
+  it("keeps Gemini 4 Carbon and Hydrogen and ranks them after Argon, ahead of Flash", () => {
+    const models = selectLatestGeminiModels([
+      entry("gemini-3.8-flash"),
+      entry("gemini-3.7-flash"),
+      entry("gemini-3.6-flash"),
+      entry("gemini-3.5-flash"),
+      entry("gemini-4-hydrogen", { displayName: "Gemini 4 Hydrogen", outputTokenLimit: 65536 }),
+      entry("gemini-4-carbon", { displayName: "Gemini 4 Carbon", outputTokenLimit: 32768 }),
+      entry("gemini-4-argon", { displayName: "Gemini 4 Argon", outputTokenLimit: 32768 }),
+    ]);
+
+    expect(models.map((m) => m.id)).toEqual([
+      "gemini-4-argon",
+      "gemini-4-carbon",
+      "gemini-4-hydrogen",
+      "gemini-3.8-flash",
+      "gemini-3.7-flash",
+    ]);
+    expect(models[1]).toEqual({
+      id: "gemini-4-carbon",
+      name: "Gemini 4 Carbon",
+      contextWindow: 1048576,
+      reasoningLevels: ["low", "medium", "high"],
+    });
+    expect(models[2]).toEqual({
+      id: "gemini-4-hydrogen",
+      name: "Gemini 4 Hydrogen",
+      contextWindow: 1048576,
+      reasoningLevels: ["low", "medium", "high", "xhigh"],
+    });
+  });
+
   it("prefers GA ids over dated previews within a family", () => {
     const models = selectLatestGeminiModels([
       entry("gemini-2.5-flash-preview-09-2025"),
@@ -395,6 +462,8 @@ describe("Gemini model discovery", () => {
 
   it("derives reasoning levels by family", () => {
     expect(geminiReasoningLevels("gemini-4-argon")).toEqual(["low", "medium", "high"]);
+    expect(geminiReasoningLevels("gemini-4-carbon")).toEqual(["low", "medium", "high"]);
+    expect(geminiReasoningLevels("gemini-4-hydrogen")).toEqual(["low", "medium", "high", "xhigh"]);
     expect(geminiReasoningLevels("gemini-3.8-flash")).toEqual(["off", "low", "medium", "high"]);
     expect(geminiReasoningLevels("gemini-3.7-flash")).toEqual(["off", "low", "medium", "high"]);
     expect(geminiReasoningLevels("gemini-3.5-flash")).toEqual(["minimal", "low", "medium", "high"]);
