@@ -95,10 +95,10 @@ fn model() -> (String, mpsc::Sender<()>, mpsc::Sender<()>) {
                 2 | 3 => {
                     let events = delta(json!({"reasoning_content":"**Keep this reasoning**"}))
                         + &delta(
-                            json!({"content":if index == 2 { "Keep this stopped reply." } else { "Keep this failed reply." }}),
+                            json!({"content":if index == 2 { "Keep this stopped reply." } else { "Superseded partial reply." }}),
                         );
                     // A streamed reply as services send it: in chunks, with no
-                    // length known ahead. It never gets its last chunk.
+                    // length known ahead.
                     write!(
                         stream,
                         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{events}\r\n",
@@ -110,11 +110,14 @@ fn model() -> (String, mpsc::Sender<()>, mpsc::Sender<()>) {
                         // Stopping cancels this in-flight request.
                         let mut byte = [0];
                         let _ = stream.read(&mut byte);
+                    } else {
+                        // The service breaks the reply off with an error. The
+                        // agent asks once more, and that is turned down below.
+                        let refusal = "data: {\"error\":{\"message\":\"The model is not available.\",\"type\":\"invalid_request_error\",\"code\":\"model_not_found\"}}\n\n";
+                        write!(stream, "{:x}\r\n{refusal}\r\n0\r\n\r\n", refusal.len()).unwrap();
                     }
-                    // Index 3 deliberately closes before the reply is complete.
                 }
-                // The agent tries a reply that broke off again; the service
-                // then turns it down for good, which ends the turn.
+                // Anything further is turned down.
                 _ => {
                     let body = r#"{"error":{"message":"The model is not available.","type":"invalid_request_error"}}"#;
                     write!(
@@ -246,7 +249,10 @@ fn live_order_disclosures_terminal_states_and_restart_agree() {
     app.type_text("id:composer", "Fail this").unwrap();
     app.submit("id:composer").unwrap();
     app.wait_for_within("text:/^Failed/", long).unwrap();
-    app.wait_for("Keep this failed reply.").unwrap();
+    // The agent asked for the broken-off reply once more and was turned
+    // down: the failure shows, and the words of the superseded attempt do not.
+    app.wait_for("text:/The model is not available/").unwrap();
+    assert!(!app.shows("Superseded partial reply."), "a superseded partial reply stayed on screen");
     let before = stored(&home);
     assert_eq!(before.len(), 3);
     for (index, expected) in ["Completed", "Stopped", "Failed"].iter().enumerate() {
@@ -258,7 +264,7 @@ fn live_order_disclosures_terminal_states_and_restart_agree() {
     let mut app = start();
     app.press("text:Trace regression").unwrap();
     app.wait_for_within("Keep this stopped reply.", long).unwrap();
-    app.wait_for("Keep this failed reply.").unwrap();
+    app.wait_for("text:/The model is not available/").unwrap();
     app.wait_for("text:/^You stopped/").unwrap();
     app.wait_for("text:/^Failed/").unwrap();
     assert_eq!(
@@ -274,7 +280,7 @@ fn live_order_disclosures_terminal_states_and_restart_agree() {
             "I will inspect",
             "The final answer starts",
             "Keep this stopped reply",
-            "Keep this failed reply",
+            "The model is not available",
         ],
     );
     drop(app);

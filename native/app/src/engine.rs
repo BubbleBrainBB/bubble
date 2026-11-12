@@ -65,6 +65,9 @@ pub enum TurnEvent {
     Agent(AgentEvent),
     /// The context was summarized to stay within the model's window.
     Compacted,
+    /// The model's reply broke off and is asked for again: what it had
+    /// written of it so far is superseded.
+    Retried,
     /// A subagent moved on; `tool` is the call it reports through
     /// (spawn_agent, wait_agent, run_workflow).
     Subagent { tool: String, update: bubble_host::SubagentUpdate },
@@ -267,6 +270,10 @@ fn report(step: &mut Step, event: Event, events: &mpsc::UnboundedSender<TurnEven
                 agent(AgentEvent::ToolResults(ChatMessage::Tool { results: std::mem::take(&mut step.results) }));
             }
         }
+        Event::ProviderRetry { .. } => {
+            *step = Step::default();
+            let _ = events.send(TurnEvent::Retried);
+        }
         Event::ContextCompaction { status, .. } if status == "completed" => {
             let _ = events.send(TurnEvent::Compacted);
         }
@@ -384,6 +391,7 @@ mod tests {
                 }
                 TurnEvent::Agent(AgentEvent::ToolResults(ChatMessage::Tool { results })) => format!("results:{}", results.len()),
                 TurnEvent::Compacted => "compacted".to_owned(),
+                TurnEvent::Retried => "retried".to_owned(),
                 _ => "other".to_owned(),
             });
         }
@@ -427,6 +435,19 @@ mod tests {
                 "assistant:Done.:",
             ]
         );
+    }
+
+    #[test]
+    fn a_reply_that_broke_off_is_superseded_by_the_one_asked_for_again() {
+        let seen = collect(vec![
+            event(serde_json::json!({ "type": "turn_start" })),
+            event(serde_json::json!({ "type": "text_delta", "content": "cut off" })),
+            event(serde_json::json!({ "type": "provider_retry", "attempt": 1, "maxAttempts": 10, "reason": "terminated" })),
+            event(serde_json::json!({ "type": "turn_start" })),
+            event(serde_json::json!({ "type": "text_delta", "content": "The whole answer." })),
+            event(serde_json::json!({ "type": "turn_end", "willContinue": false })),
+        ]);
+        assert_eq!(seen, ["model", "text:cut off", "retried", "model", "text:The whole answer.", "assistant:The whole answer.:"]);
     }
 
     #[test]

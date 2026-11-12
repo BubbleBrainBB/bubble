@@ -1507,6 +1507,7 @@ impl Conversation {
                     match event {
                         TurnEvent::Agent(event) => conversation.apply(app, &run_id, event, &mut step),
                         TurnEvent::Compacted => conversation.note_compaction(),
+                        TurnEvent::Retried => conversation.drop_pending_reply(),
                         TurnEvent::Subagent { tool, update } => conversation.subagent_update(app, &tool, update),
                     }
                 }
@@ -1660,6 +1661,19 @@ impl Conversation {
             self.checkpoint(app, true);
             self.changed();
         }
+    }
+
+    /// The model's reply broke off and the agent asks for it again: what
+    /// it had written so far is not part of the answer, and goes.
+    fn drop_pending_reply(&self) {
+        let pending = self.pending.get();
+        if pending.is_empty() {
+            return;
+        }
+        let thought = format!("{pending}:reasoning");
+        self.lines.update(|lines| lines.retain(|l| l.id != pending && l.id != thought));
+        self.pending.replace(String::new());
+        self.changed();
     }
 
     /// The agent summarized the conversation so far to stay within the
