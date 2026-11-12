@@ -1214,7 +1214,7 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
                     .py(px(10.0))
                     .rounded(px(18.0))
                     .bg(tertiary())
-                    .child(text(move || line.get().text).text_size(px(BODY)).line_height(px(21.0))),
+                    .child(markdown(line.get_untracked().text)),
             )
             .into_element(),
         LineKind::Message(MessageRole::System) => view()
@@ -1227,7 +1227,7 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
                     .py(px(10.0))
                     .rounded(px(18.0))
                     .bg(tertiary())
-                    .child(text(move || line.get().text).text_size(px(BODY)).line_height(px(21.0))),
+                    .child(markdown(line.get_untracked().text)),
             )
             .into_element(),
         LineKind::RunStart(index) => view()
