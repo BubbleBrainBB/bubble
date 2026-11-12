@@ -3,7 +3,6 @@
 //! Merging happens only here, by the person (design §5): no tool merges.
 
 use bubble_github::{Checks, Kind, PrSummary};
-use bubble_store::{NewTask, Origin};
 use nsh_core::prelude::*;
 
 use crate::palette::*;
@@ -123,19 +122,16 @@ fn load(app: AppState, rows: Signal<Vec<PrRow>>, problem: Signal<Option<String>>
     });
 }
 
-/// A task for a pull request no task has: in its repository's project,
-/// linked to it, waiting for the person's first message.
-fn make_task(app: AppState, row: &PrRow) {
+/// Gives a pull request no bot follows to the bot that looks after its
+/// repository: linked to it, so reviews and checks reach the bot, and
+/// open for the person's first word about it.
+fn give_to_bot(app: AppState, row: &PrRow) {
     let Some(project) = app.github_repos().into_iter().find(|r| r.name == row.repo).map(|r| r.project) else { return };
-    let title = if row.title.is_empty() { format!("PR #{}", row.number) } else { row.title.clone() };
-    let task = app.with_store(|s| {
-        let task = s.create_task(NewTask { title: &title, project_cwd: Some(&project), origin: Origin::User })?;
-        s.link(&task.id, Kind::PullRequest.as_str(), &row.repo, row.number as i64)?;
-        Ok(task)
-    });
-    if let Some(task) = task {
+    let purpose = format!("Looks after the GitHub repository {}: its issues, pull requests and reviews.", row.repo);
+    let Some(bot) = crate::manager::bot_for_project_or_new(app, &project, &purpose) else { return };
+    if app.with_store(|s| s.link(&bot, Kind::PullRequest.as_str(), &row.repo, row.number as i64)).is_some() {
         app.refresh_tasks();
-        app.route.set(Route::Task(task.id));
+        app.route.set(Route::Task(bot));
     }
 }
 
@@ -213,8 +209,8 @@ fn pr_row(app: AppState, row: ReadSignal<PrRow>, rows: Signal<Vec<PrRow>>, probl
                     });
                 }))
                 .child(dynamic(move || match row.get().task {
-                    Some(task) => button("Open task", move || app.route.set(Route::Task(task.clone()))).into_element(),
-                    None => button("Make a task", move || make_task(app, &row.get_untracked())).into_element(),
+                    Some(task) => button("Open bot", move || app.route.set(Route::Task(task.clone()))).into_element(),
+                    None => button("Give to its bot", move || give_to_bot(app, &row.get_untracked())).into_element(),
                 }))
                 .child(when(move || row.get().state == "OPEN" && !row.get().draft && !confirming.get(), move || {
                     button("Merge", move || confirming.set(true))

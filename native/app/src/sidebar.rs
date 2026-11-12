@@ -46,6 +46,13 @@ fn preview_of(app: AppState, bot: &TaskSummary) -> String {
         TaskState::Queued => return "Waiting for a free slot".to_owned(),
         _ => {}
     }
+    // Work brought to it that nobody asked for outright waits for a yes.
+    if let Some(title) = app.proposed.with(|all| all.iter().find(|t| t.task_id == bot.task.id).map(|t| t.title.clone())) {
+        return format!("Wants a yes: {title}");
+    }
+    if bot.state == TaskState::Failed {
+        return "Failed on its last turn".to_owned();
+    }
     let preview = app.previews.with(|p| p.get(&bot.task.id).cloned());
     match preview {
         Some(preview) => {
@@ -74,10 +81,17 @@ fn plain(text: &str) -> String {
     line
 }
 
+/// Whether a bot cannot go on, or start what was brought to it, without
+/// the person: a question or an approval, a failure, or proposed work.
+fn needs_person(app: AppState, bot: &TaskSummary) -> bool {
+    matches!(bot.state, TaskState::NeedsYou | TaskState::Failed) || app.proposed.with(|all| all.iter().any(|t| t.task_id == bot.task.id))
+}
+
 pub fn sidebar(app: AppState) -> impl IntoElement {
     let home_current = computed(move || app.route.get() == Route::Home);
     // The main bot marks what waits on the person anywhere: a question, or a failure.
     let main_busy = move || app.manager_conversation().busy.get();
+    let main_waits = move || app.manager_conversation().waits_on_person();
     view()
         .w(px(SIDEBAR_WIDTH))
         .flex_shrink_0()
@@ -114,8 +128,16 @@ pub fn sidebar(app: AppState) -> impl IntoElement {
                         .rounded_full()
                         .bg(move || if home_current.get() { item_active() } else { side() })
                         .child(avatar::main(56.0))
-                        .child(when(main_busy, || {
-                            view().absolute().right(px(6.0)).bottom(px(6.0)).size(px(10.0)).rounded_full().bg(online()).border(px(2.0)).border_color(side())
+                        .child(when(main_busy, move || {
+                            view()
+                                .absolute()
+                                .right(px(6.0))
+                                .bottom(px(6.0))
+                                .size(px(10.0))
+                                .rounded_full()
+                                .bg(move || if main_waits() { needs() } else { online() })
+                                .border(px(2.0))
+                                .border_color(side())
                         })),
                 )
                 .child(text(MAIN_BOT).text_size(px(SMALL)).text_color(ink())),
@@ -126,7 +148,22 @@ pub fn sidebar(app: AppState) -> impl IntoElement {
                     .px(px(10.0))
                     .pb(px(10.0))
                     .gap(px(2.0))
-                    .child(each(move || app.bots(), |bot: &TaskSummary| bot.task.id.clone(), move |bot, _| bot_row(app, bot)))
+                    // What needs the person comes first, under its own heading;
+                    // when nothing does, there is no heading.
+                    .child(when(move || app.bots().iter().any(|bot| needs_person(app, bot)), || {
+                        text("Needs you").px(px(10.0)).pt(px(2.0)).pb(px(4.0)).text_size(px(SMALL)).text_color(muted())
+                    }))
+                    .child(each(
+                        move || app.bots().into_iter().filter(|bot| needs_person(app, bot)).collect::<Vec<_>>(),
+                        |bot: &TaskSummary| bot.task.id.clone(),
+                        move |bot, _| bot_row(app, bot),
+                    ))
+                    .child(when(move || app.bots().iter().any(|bot| needs_person(app, bot)), || view().h(px(10.0))))
+                    .child(each(
+                        move || app.bots().into_iter().filter(|bot| !needs_person(app, bot)).collect::<Vec<_>>(),
+                        |bot: &TaskSummary| bot.task.id.clone(),
+                        move |bot, _| bot_row(app, bot),
+                    ))
                     .child(when(move || app.bots().is_empty(), || {
                         text("No bots yet. Make one with +, or ask Bubble for one.")
                             .px(px(10.0))
@@ -169,7 +206,7 @@ fn bot_row(app: AppState, bot: ReadSignal<TaskSummary>) -> impl IntoElement {
         let id = id.clone();
         move || !current.get() && app.unread(&id)
     };
-    let needs_you = move || matches!(bot.get().state, TaskState::NeedsYou | TaskState::Failed);
+    let needs_you = move || needs_person(app, &bot.get());
     let open = id.clone();
     view()
         .h(px(58.0))

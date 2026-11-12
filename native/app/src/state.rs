@@ -186,6 +186,8 @@ pub struct AppState {
     pub tasks: Signal<Vec<TaskSummary>>,
     /// The newest thing said in each bot's conversation.
     pub previews: Signal<HashMap<String, bubble_store::Preview>>,
+    /// Work brought to a bot that waits for the person's yes.
+    pub proposed: Signal<Vec<bubble_store::Ticket>>,
     /// When the person last looked at each bot's conversation.
     seen: Signal<HashMap<String, i64>>,
     /// GitHub events since the person last wrote to the Manager (Home's
@@ -227,6 +229,10 @@ impl AppState {
                 if let Err(error) = store.recover_interrupted_runs() {
                     log::warn!("could not mark interrupted runs: {error:#}");
                 }
+                // A bot that was working when the app closed never answered.
+                if let Err(error) = store.close_unanswered_tickets() {
+                    log::warn!("could not close unanswered tickets: {error:#}");
+                }
                 Some(store)
             }
             Err(error) => {
@@ -263,6 +269,7 @@ impl AppState {
             }),
             tasks: signal(Vec::new()),
             previews: signal(HashMap::new()),
+            proposed: signal(Vec::new()),
             seen: signal(setting(BOTS_SEEN).and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default()),
             away: signal(Vec::new()),
             linking: signal(false),
@@ -282,6 +289,7 @@ impl AppState {
             config: stored(config),
         };
         state.refresh_tasks();
+        state.refresh_tickets();
         state.refresh_away();
         // Which conversation is open is kept for the next start.
         effect(move || {
@@ -676,6 +684,18 @@ impl AppState {
         }
     }
 
+    /// Reads again which tickets wait for the person.
+    pub fn refresh_tickets(&self) {
+        if let Some(proposed) = self.with_store(|s| s.proposed_tickets()) {
+            self.proposed.set(proposed);
+        }
+    }
+
+    /// [`Self::bots`], without following changes.
+    pub fn bots_untracked(&self) -> Vec<TaskSummary> {
+        untracked(|| self.bots())
+    }
+
     /// The bots, the one that spoke or was spoken to last first: the
     /// conversations the person keeps (the command line's sessions and
     /// what was closed are found by searching).
@@ -1051,6 +1071,15 @@ fn projects_of(mut tasks: Vec<TaskSummary>) -> Vec<String> {
     projects
 }
 
+/// Work a bot does for someone other than the person writing to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Owed {
+    /// Who hears how it went: a bot does, an event or a routine does not.
+    to: Option<Sender>,
+    /// The record of the work.
+    ticket: Option<String>,
+}
+
 /// A conversation: the Manager's, or a task's runs.
 #[derive(Clone, Copy)]
 pub struct Conversation {
@@ -1079,8 +1108,8 @@ pub struct Conversation {
     abort: Stored<Option<Arc<tokio::sync::Notify>>>,
     /// Called after the lines change, to keep the newest in view.
     on_change: Stored<Option<Rc<dyn Fn()>>>,
-    /// Who asked for the work in progress and is owed word of how it went.
-    owes: Stored<Option<Sender>>,
+    /// The work in progress that someone other than the person asked for.
+    owes: Stored<Option<Owed>>,
     /// The bots this one asked and has not heard back from.
     awaiting: Stored<HashSet<String>>,
     /// What other bots sent while a turn ran, in order.
@@ -1335,6 +1364,14 @@ impl Conversation {
         self.post_to(app, text, role, None, None, None)
     }
 
+    /// Whether the turn in progress waits on the person: an approval or a
+    /// question nobody answered yet.
+    pub fn waits_on_person(&self) -> bool {
+        self.lines.with(|lines| {
+            lines.iter().any(|l| matches!(l.kind, LineKind::Approval { decided: None, .. } | LineKind::Question { answers: None, .. }))
+        })
+    }
+
     /// This bot asked `bot_id` for something and waits for its answer.
     pub fn awaits(&self, bot_id: &str) {
         self.awaiting.with(|waiting| {
@@ -1355,9 +1392,10 @@ impl Conversation {
     fn take(&self, app: AppState, incoming: Incoming) -> Result<bool, String> {
         let before = self.owes.get();
         match (&incoming.report, &incoming.from) {
-            // A request: its sender is owed the answer.
+            // A request: it is this bot's work now, and a bot that sent
+            // it is owed the answer.
             (None, from) => {
-                self.owes.replace(Some(from.clone()));
+                self.owes.replace(Some(Owed { to: from.hears_back().then(|| from.clone()), ticket: incoming.ticket.clone() }));
             }
             // The answer to something this bot asked.
             (Some(_), Sender::Bot(id)) => {
@@ -1365,12 +1403,14 @@ impl Conversation {
                     waiting.remove(id);
                 });
             }
-            (Some(_), Sender::Main) => {}
+            (Some(_), _) => {}
         }
         let label = incoming.from.name(app);
+        // What GitHub brings shows as its own kind of message.
+        let role = if incoming.from == Sender::Github { MessageRole::External } else { MessageRole::System };
         // The model is told who it is from; the person sees that as a label.
         let content = ChatMessage::user(manager::framed(app, &incoming));
-        let started = self.post_to(app, incoming.text, MessageRole::System, None, Some(content), Some(label));
+        let started = self.post_to(app, incoming.text, role, None, Some(content), Some(label));
         if started.is_err() {
             self.owes.replace(before);
         }
@@ -1381,7 +1421,7 @@ impl Conversation {
     /// the next message that waited is taken up.
     fn after_turn(&self, app: AppState, ending: TurnStatus, failure: Option<String>) {
         if self.awaiting.with(|waiting| waiting.is_empty()) {
-            if let Some(asker) = self.owes.replace(None) {
+            if let Some(owed) = self.owes.replace(None) {
                 let turn = self.active_turn.get();
                 let said = self
                     .lines
@@ -1411,12 +1451,24 @@ impl Conversation {
                 } else {
                     text
                 };
+                if let Some(ticket) = &owed.ticket {
+                    let status = match ending {
+                        TurnStatus::Failed => bubble_store::TicketStatus::Failed,
+                        TurnStatus::Stopped => bubble_store::TicketStatus::Stopped,
+                        _ => bubble_store::TicketStatus::Finished,
+                    };
+                    app.with_store(|s| s.set_ticket_status(ticket, status, Some(&text)));
+                    app.refresh_tickets();
+                }
                 let me = match self.task_id.get() {
                     Some(id) => Sender::Bot(id),
                     None => Sender::Main,
                 };
-                if let Err(error) = manager::deliver(app, &asker, Incoming { from: me, text, report: Some(outcome) }) {
-                    log::warn!("a report could not be delivered: {error}");
+                if let Some(asker) = &owed.to {
+                    let report = Incoming { from: me, text, report: Some(outcome), ticket: None };
+                    if let Err(error) = manager::deliver(app, asker, report) {
+                        log::warn!("a report could not be delivered: {error}");
+                    }
                 }
             }
         }

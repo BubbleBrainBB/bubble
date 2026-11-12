@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use bubble_core::{ToolCall, ToolOutput, ToolSpec};
-use bubble_store::{Lifecycle, MessageRole, NewTask, Origin, TaskState, TaskSummary};
+use bubble_store::{Lifecycle, MessageRole, NewTask, NewTicket, Origin, TaskState, TaskSummary, Ticket, TicketOrigin, TicketStatus};
 use serde_json::{Value, json};
 
 use crate::state::AppState;
@@ -50,11 +50,15 @@ else to do meanwhile. A message that begins with [From …] is a request from th
 them, so make it complete and honest: what you did, what is left, and the one question you need answered, if any. Say a draft is a \
 draft and a failure is a failure. While you work, stay quiet; ask the person only when you cannot go on without them.";
 
-/// Who a message between bots is from.
+/// Who a message to a bot is from, when it is not the person.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sender {
     Main,
     Bot(String),
+    /// Something that happened on GitHub.
+    Github,
+    /// One of the bot's own routines, by name, on its schedule.
+    Routine(String),
 }
 
 impl Sender {
@@ -65,7 +69,14 @@ impl Sender {
                 .tasks
                 .with_untracked(|tasks| tasks.iter().find(|t| &t.task.id == id).map(|t| t.task.title.clone()))
                 .unwrap_or_else(|| "a bot".to_owned()),
+            Sender::Github => "GitHub".to_owned(),
+            Sender::Routine(name) => format!("your routine {name}"),
         }
+    }
+
+    /// Whether the sender reads an answer: a bot does, an event does not.
+    pub fn hears_back(&self) -> bool {
+        matches!(self, Sender::Main | Sender::Bot(_))
     }
 }
 
@@ -77,6 +88,14 @@ pub struct Incoming {
     /// A request (`None`) is owed an answer; a report is that answer, and
     /// says how the work ended: "finished", "failed", "stopped by the person".
     pub report: Option<&'static str>,
+    /// The ticket this request is the work of.
+    pub ticket: Option<String>,
+}
+
+impl Incoming {
+    pub fn request(from: Sender, text: impl Into<String>) -> Incoming {
+        Incoming { from, text: text.into(), report: None, ticket: None }
+    }
 }
 
 /// The tools of the main bot.
@@ -221,7 +240,7 @@ pub fn execute(app: AppState, caller: &Sender, call: &ToolCall) -> ToolOutput {
 }
 
 /// The bot `reference` names: by id, or by its name when one bot has it.
-fn find(app: AppState, reference: &str) -> Result<TaskSummary, String> {
+pub fn find(app: AppState, reference: &str) -> Result<TaskSummary, String> {
     if reference.is_empty() {
         return Err("Say which bot: its id or its name. Call list_bots for them.".into());
     }
@@ -382,7 +401,7 @@ fn create_bot(app: AppState, name: &str, purpose: &str, project: &str, message: 
     app.set_bot_instruction(&task.id, purpose);
     app.refresh_tasks();
     let place = project.as_deref().map(|p| format!(" in {}", project_name(p))).unwrap_or_default();
-    let started = deliver(app, &Sender::Bot(task.id.clone()), Incoming { from: Sender::Main, text: message.to_owned(), report: None });
+    let started = deliver(app, &Sender::Bot(task.id.clone()), Incoming::request(Sender::Main, message));
     match started {
         Ok(true) => ok(format!("Made bot {} \"{name}\"{place}. It is working on the message; its answer will come to you.", task.id)),
         Ok(false) => ok(format!("Made bot {} \"{name}\"{place}. It starts when another bot finishes; its answer will come to you.", task.id)),
@@ -406,7 +425,7 @@ fn message_bot(app: AppState, caller: &Sender, bot: &str, message: &str) -> Tool
     }
     let name = target.task.title.clone();
     let to = Sender::Bot(target.task.id.clone());
-    let sent = deliver(app, &to, Incoming { from: caller.clone(), text: message.to_owned(), report: None });
+    let sent = deliver(app, &to, Incoming::request(caller.clone(), message));
     if let (Ok(_), Sender::Bot(me)) = (&sent, caller) {
         // Its own asker hears from this bot once the answer is in.
         app.task_conversation(me).awaits(&target.task.id);
@@ -465,17 +484,137 @@ fn link_github(app: AppState, task_id: &str, args: &Value) -> ToolOutput {
 
 /// Hands `incoming` to the conversation of `to`. `Ok(true)`: its turn
 /// started; `Ok(false)`: it waits (the bot is busy, or no slot is free).
-pub fn deliver(app: AppState, to: &Sender, incoming: Incoming) -> Result<bool, String> {
+///
+/// A request from the main bot or another bot becomes a ticket of the bot
+/// it goes to: the record of who asked for what, and how it went.
+pub fn deliver(app: AppState, to: &Sender, mut incoming: Incoming) -> Result<bool, String> {
     let conversation = match to {
         Sender::Main => app.manager_conversation(),
         Sender::Bot(id) => {
             if app.tasks.with_untracked(|tasks| !tasks.iter().any(|t| &t.task.id == id)) {
                 return Err(format!("There is no bot {id}."));
             }
+            if incoming.report.is_none() && incoming.ticket.is_none() {
+                let (origin, asker) = match &incoming.from {
+                    Sender::Bot(sender) => (TicketOrigin::Bot, Some(sender.as_str())),
+                    _ => (TicketOrigin::Main, None),
+                };
+                incoming.ticket = app
+                    .with_store(|s| {
+                        s.create_ticket(NewTicket {
+                            task_id: id,
+                            title: &title_of(&incoming.text),
+                            text: &incoming.text,
+                            origin,
+                            asker,
+                            explicit: true,
+                            status: TicketStatus::Accepted,
+                        })
+                    })
+                    .map(|ticket| ticket.id);
+            }
             app.task_conversation(id)
         }
+        Sender::Github | Sender::Routine(_) => return Err("Only a bot can be written to.".into()),
     };
     conversation.receive(app, incoming)
+}
+
+/// A few words naming a piece of work: the start of its first line.
+pub fn title_of(text: &str) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim();
+    if line.chars().count() > 80 { format!("{}…", line.chars().take(79).collect::<String>()) } else { line.to_owned() }
+}
+
+/// How far work nobody asked the bot for outright may go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// Written down only: what would have been done.
+    Record,
+    /// Waits for the person's yes.
+    Propose,
+    /// Goes to the bot now.
+    Accept,
+}
+
+/// Work for a bot that an event or a routine brings: a ticket, given to
+/// the bot at once, held for the person's yes, or only recorded.
+pub fn bring(
+    app: AppState,
+    bot_id: &str,
+    from: Sender,
+    title: &str,
+    text: &str,
+    asker: &str,
+    explicit: bool,
+    standing: Standing,
+) -> Option<Ticket> {
+    let origin = match from {
+        Sender::Routine(_) => TicketOrigin::Routine,
+        Sender::Github => TicketOrigin::Github,
+        Sender::Bot(_) => TicketOrigin::Bot,
+        Sender::Main => TicketOrigin::Main,
+    };
+    let status = match standing {
+        Standing::Record => TicketStatus::Recorded,
+        Standing::Propose => TicketStatus::Proposed,
+        Standing::Accept => TicketStatus::Accepted,
+    };
+    let ticket = app.with_store(|s| {
+        s.create_ticket(NewTicket { task_id: bot_id, title, text, origin, asker: Some(asker), explicit, status })
+    })?;
+    if standing == Standing::Accept {
+        hand_over(app, &ticket, from);
+    }
+    app.refresh_tickets();
+    Some(ticket)
+}
+
+fn hand_over(app: AppState, ticket: &Ticket, from: Sender) {
+    let incoming = Incoming { from, text: ticket.text.clone(), report: None, ticket: Some(ticket.id.clone()) };
+    if let Err(error) = deliver(app, &Sender::Bot(ticket.task_id.clone()), incoming) {
+        app.with_store(|s| s.set_ticket_status(&ticket.id, TicketStatus::Failed, Some(&error)));
+    }
+}
+
+/// The person says yes to a proposed ticket: its bot gets the work.
+pub fn accept_ticket(app: AppState, ticket_id: &str) {
+    let Some(ticket) = app.with_store(|s| s.get_ticket(ticket_id)).flatten() else { return };
+    if ticket.status != TicketStatus::Proposed {
+        return;
+    }
+    app.with_store(|s| s.set_ticket_status(ticket_id, TicketStatus::Accepted, None));
+    let from = match ticket.origin {
+        TicketOrigin::Routine => Sender::Routine(ticket.title.clone()),
+        _ => Sender::Github,
+    };
+    hand_over(app, &ticket, from);
+    app.refresh_tickets();
+}
+
+/// The person turns a proposed ticket down.
+pub fn dismiss_ticket(app: AppState, ticket_id: &str) {
+    app.with_store(|s| s.set_ticket_status(ticket_id, TicketStatus::Dismissed, None));
+    app.refresh_tickets();
+}
+
+/// The bot that looks after a project folder: the one at work there that
+/// was active last.
+pub fn bot_for_project(app: AppState, project: &str) -> Option<String> {
+    app.bots_untracked().into_iter().find(|t| t.task.project_cwd.as_deref() == Some(project)).map(|t| t.task.id)
+}
+
+/// The bot that looks after `project`, made now if there is none: work
+/// that arrives for a folder nobody looks after still needs someone.
+pub fn bot_for_project_or_new(app: AppState, project: &str, purpose: &str) -> Option<String> {
+    if let Some(id) = bot_for_project(app, project) {
+        return Some(id);
+    }
+    let name = project_name(project);
+    let task = app.with_store(|s| s.create_task(NewTask { title: &name, project_cwd: Some(project), origin: Origin::Github }))?;
+    app.set_bot_instruction(&task.id, purpose);
+    app.refresh_tasks();
+    Some(task.id)
 }
 
 /// What the model reads for a message between bots: who it is from, and
@@ -485,10 +624,13 @@ pub fn framed(app: AppState, incoming: &Incoming) -> String {
     let who = match &incoming.from {
         Sender::Main => format!("the main bot {name}"),
         Sender::Bot(_) => format!("the bot {name}"),
+        Sender::Github | Sender::Routine(_) => name.clone(),
     };
-    match incoming.report {
-        Some(outcome) => format!("[Report from {who}: {outcome}]\n{}", incoming.text),
-        None => format!("[From {who}]\n{}", incoming.text),
+    match (&incoming.from, incoming.report) {
+        (_, Some(outcome)) => format!("[Report from {who}: {outcome}]\n{}", incoming.text),
+        (Sender::Github, None) => format!("[From GitHub]\n{}", incoming.text),
+        (Sender::Routine(routine), None) => format!("[Your routine \"{routine}\", on its schedule]\n{}", incoming.text),
+        (_, None) => format!("[From {who}]\n{}", incoming.text),
     }
 }
 

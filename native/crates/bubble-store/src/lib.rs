@@ -17,7 +17,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 
 /// The schema version this build writes (`PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {
@@ -231,6 +231,134 @@ pub struct Task {
     pub created_at: i64,
     pub updated_at: i64,
     pub closed_at: Option<i64>,
+}
+
+/// Who a piece of work for a bot came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TicketOrigin {
+    /// The main bot handed it out.
+    Main,
+    /// Another bot asked.
+    Bot,
+    /// Something on GitHub: an assignment, a review request.
+    Github,
+    /// A routine of the bot's, on its schedule.
+    Routine,
+}
+
+impl TicketOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TicketOrigin::Main => "main",
+            TicketOrigin::Bot => "bot",
+            TicketOrigin::Github => "github",
+            TicketOrigin::Routine => "routine",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        match value {
+            "bot" => TicketOrigin::Bot,
+            "github" => TicketOrigin::Github,
+            "routine" => TicketOrigin::Routine,
+            _ => TicketOrigin::Main,
+        }
+    }
+}
+
+/// Where a piece of work stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TicketStatus {
+    /// Nobody asked for it outright: it waits for the person's yes.
+    Proposed,
+    /// Only written down: what would have been done, had acting been on.
+    Recorded,
+    /// Given to the bot, which has not answered yet.
+    Accepted,
+    Finished,
+    Failed,
+    /// The person stopped the bot while it worked on it.
+    Stopped,
+    /// The person turned a proposal down.
+    Dismissed,
+}
+
+impl TicketStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TicketStatus::Proposed => "proposed",
+            TicketStatus::Recorded => "recorded",
+            TicketStatus::Accepted => "accepted",
+            TicketStatus::Finished => "finished",
+            TicketStatus::Failed => "failed",
+            TicketStatus::Stopped => "stopped",
+            TicketStatus::Dismissed => "dismissed",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        match value {
+            "proposed" => TicketStatus::Proposed,
+            "recorded" => TicketStatus::Recorded,
+            "finished" => TicketStatus::Finished,
+            "failed" => TicketStatus::Failed,
+            "stopped" => TicketStatus::Stopped,
+            "dismissed" => TicketStatus::Dismissed,
+            _ => TicketStatus::Accepted,
+        }
+    }
+}
+
+/// A piece of work a bot was given by someone other than the person
+/// writing to it: what was asked, by whom, on what grounds, and how it
+/// went. The record of why the bot acted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ticket {
+    pub id: String,
+    /// The bot it belongs to.
+    pub task_id: String,
+    pub title: String,
+    /// What was asked, as the bot gets it.
+    pub text: String,
+    pub origin: TicketOrigin,
+    /// Who or what asked: a bot's id, `owner/repo#12`, a routine's id.
+    pub asker: Option<String>,
+    /// Someone asked outright (`true`), or it was inferred from an event.
+    pub explicit: bool,
+    pub status: TicketStatus,
+    /// What the bot answered, cut to a few thousand characters.
+    pub report: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub struct NewTicket<'a> {
+    pub task_id: &'a str,
+    pub title: &'a str,
+    pub text: &'a str,
+    pub origin: TicketOrigin,
+    pub asker: Option<&'a str>,
+    pub explicit: bool,
+    pub status: TicketStatus,
+}
+
+fn ticket_from_row(row: &Row<'_>) -> rusqlite::Result<Ticket> {
+    let origin: String = row.get("origin")?;
+    let strength: String = row.get("strength")?;
+    let status: String = row.get("status")?;
+    Ok(Ticket {
+        id: row.get("id")?,
+        task_id: row.get("task_id")?,
+        title: row.get("title")?,
+        text: row.get("text")?,
+        origin: TicketOrigin::parse(&origin),
+        asker: row.get("asker")?,
+        explicit: strength == "explicit",
+        status: TicketStatus::parse(&status),
+        report: row.get("report")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
 }
 
 /// The newest message of a conversation, for a list.
@@ -479,6 +607,71 @@ impl Store {
 
     /// Every task with its derived state, what wants a person first, then
     /// the most recently changed.
+    pub fn create_ticket(&self, new: NewTicket<'_>) -> Result<Ticket> {
+        let id = new_id("ticket");
+        let now = now_ms();
+        self.conn().execute(
+            "INSERT INTO tickets (id, task_id, title, text, origin, asker, strength, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            params![
+                id,
+                new.task_id,
+                new.title,
+                new.text,
+                new.origin.as_str(),
+                new.asker,
+                if new.explicit { "explicit" } else { "inferred" },
+                new.status.as_str(),
+                now
+            ],
+        )?;
+        self.get_ticket(&id)?.ok_or_else(|| anyhow::anyhow!("the ticket was not saved"))
+    }
+
+    pub fn get_ticket(&self, id: &str) -> Result<Option<Ticket>> {
+        Ok(self.conn().query_row("SELECT * FROM tickets WHERE id = ?1", [id], ticket_from_row).optional()?)
+    }
+
+    /// Moves a ticket on, keeping what the bot answered when there is something.
+    pub fn set_ticket_status(&self, id: &str, status: TicketStatus, report: Option<&str>) -> Result<()> {
+        self.conn().execute(
+            "UPDATE tickets SET status = ?2, report = COALESCE(?3, report), updated_at = ?4 WHERE id = ?1",
+            params![id, status.as_str(), report, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// A bot's tickets, newest first.
+    pub fn tickets_for_task(&self, task_id: &str, limit: usize) -> Result<Vec<Ticket>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare("SELECT * FROM tickets WHERE task_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT ?2")?;
+        let rows = statement.query_map(params![task_id, limit as i64], ticket_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The tickets that wait for the person's yes, oldest first.
+    pub fn proposed_tickets(&self) -> Result<Vec<Ticket>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare("SELECT * FROM tickets WHERE status = 'proposed' ORDER BY created_at ASC, rowid ASC")?;
+        let rows = statement.query_map([], ticket_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Tickets given to a bot that it never answered: the app closed, or
+    /// the bot was archived, while it worked. They are marked stopped.
+    pub fn close_unanswered_tickets(&self) -> Result<usize> {
+        Ok(self.conn().execute(
+            "UPDATE tickets SET status = 'stopped', report = COALESCE(report, 'Bubble closed before the bot answered.'), updated_at = ?1 WHERE status = 'accepted'",
+            params![now_ms()],
+        )?)
+    }
+
+    /// Moves a bot to another folder (or to none).
+    pub fn set_task_project(&self, id: &str, project_cwd: Option<&str>) -> Result<()> {
+        self.conn().execute("UPDATE tasks SET project_cwd = ?2, updated_at = ?3 WHERE id = ?1", params![id, project_cwd, now_ms()])?;
+        Ok(())
+    }
+
     /// The newest thing said in each open conversation the app lists (the
     /// command line's sessions are not among them), by task.
     pub fn previews(&self) -> Result<std::collections::HashMap<String, Preview>> {
@@ -1278,6 +1471,28 @@ fn migrate(conn: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    if version < 5 {
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE tickets (
+               id TEXT PRIMARY KEY,
+               task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+               title TEXT NOT NULL,
+               text TEXT NOT NULL,
+               origin TEXT NOT NULL,
+               asker TEXT,
+               strength TEXT NOT NULL,
+               status TEXT NOT NULL,
+               report TEXT,
+               created_at INTEGER NOT NULL,
+               updated_at INTEGER NOT NULL
+             );
+             CREATE INDEX tickets_by_task ON tickets (task_id, created_at);
+             CREATE INDEX tickets_by_status ON tickets (status);
+             PRAGMA user_version = 5;
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -1603,6 +1818,59 @@ mod tests {
         assert!(store.stage1("task:a").unwrap().unwrap().selected);
         assert!(!store.stage1("task:b").unwrap().unwrap().selected);
         assert!(legacy_stage1(Path::new("/nonexistent/state.sqlite")).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ticket_tests {
+    use super::*;
+
+    #[test]
+    fn a_ticket_records_who_asked_and_how_it_went() {
+        let dir = std::env::temp_dir().join(format!("bubble-ticket-{}", uuid::Uuid::new_v4()));
+        let store = Store::open(dir.join("bubble.db")).unwrap();
+        let bot = store.create_task(NewTask { title: "Docs", project_cwd: None, origin: Origin::User }).unwrap();
+        let asked = store
+            .create_ticket(NewTicket {
+                task_id: &bot.id,
+                title: "Update the guide",
+                text: "Update the install guide for 0.0.64.",
+                origin: TicketOrigin::Main,
+                asker: None,
+                explicit: true,
+                status: TicketStatus::Accepted,
+            })
+            .unwrap();
+        let inferred = store
+            .create_ticket(NewTicket {
+                task_id: &bot.id,
+                title: "#12 Typo in README",
+                text: "You were assigned #12.",
+                origin: TicketOrigin::Github,
+                asker: Some("acme/demo#12"),
+                explicit: false,
+                status: TicketStatus::Proposed,
+            })
+            .unwrap();
+        assert!(asked.explicit && !inferred.explicit);
+        assert_eq!(store.proposed_tickets().unwrap().iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), [inferred.id.as_str()]);
+
+        store.set_ticket_status(&asked.id, TicketStatus::Finished, Some("The guide is updated.")).unwrap();
+        // Accepting keeps no report; a later status keeps the one there is.
+        store.set_ticket_status(&inferred.id, TicketStatus::Accepted, None).unwrap();
+        let listed = store.tickets_for_task(&bot.id, 10).unwrap();
+        assert_eq!(listed[0].id, inferred.id, "newest first");
+        assert_eq!((listed[1].status, listed[1].report.as_deref()), (TicketStatus::Finished, Some("The guide is updated.")));
+        assert!(store.proposed_tickets().unwrap().is_empty());
+
+        // What was never answered when the app closed is not left open.
+        assert_eq!(store.close_unanswered_tickets().unwrap(), 1);
+        assert_eq!(store.get_ticket(&inferred.id).unwrap().unwrap().status, TicketStatus::Stopped);
+        assert_eq!(store.get_ticket(&asked.id).unwrap().unwrap().status, TicketStatus::Finished);
+
+        store.set_task_project(&bot.id, Some("/tmp/elsewhere")).unwrap();
+        assert_eq!(store.get_task(&bot.id).unwrap().unwrap().project_cwd.as_deref(), Some("/tmp/elsewhere"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

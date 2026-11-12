@@ -149,13 +149,22 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
     app.press("label:Prepare for acme/demo").unwrap();
     app.wait_for("text:/^Agents work on new issues and reviews/").unwrap();
 
-    // The assignment becomes a task waiting to start, linked to the issue.
+    // The assignment becomes work proposed to the bot that looks after the
+    // repository, linked to the issue. No bot is made for it, and nothing
+    // starts until the person says so.
+    app.press("id:side-Set up").unwrap();
     app.wait_for_within("#7 Login breaks", long).unwrap();
-    app.press("id:side-#7 Login breaks").unwrap();
+    // The bot list says first what needs the person, and why.
+    app.wait_for("text:Needs you").unwrap();
+    app.wait_for("text:Wants a yes: #7 Login breaks").unwrap();
+    app.wait_for("text:/^From GitHub, acme\\/demo#7\\. Nobody asked the bot for this yet\\.$/").unwrap();
     app.wait_for("Issue #7").unwrap();
-    app.press("Start").unwrap();
+    assert!(!app.shows("id:side-#7 Login breaks"), "an issue is not a bot");
+    assert!(!app.shows("Looking into it."), "proposed work waits for the yes");
+    app.press("Give it to the bot").unwrap();
     app.wait_for("From GitHub").unwrap();
     app.wait_for_within("Looking into it.", long).unwrap();
+    app.wait_for_gone("Give it to the bot", long).unwrap();
 
     // A new comment on the issue reaches the agent; its answer on GitHub
     // asks first, and "allow for this task" is not offered.
@@ -166,6 +175,8 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
     assert!(!root.join("posted.log").exists(), "nothing is posted before the yes");
     app.press("Allow once").unwrap();
     app.wait_for_within("Commented.", long).unwrap();
+    // With nothing left to decide, the heading goes.
+    app.wait_for_gone("text:Needs you", long).unwrap();
     let posted = std::fs::read_to_string(root.join("posted.log")).unwrap();
     assert!(posted.contains("body=Handled empty passwords too."), "{posted}");
 

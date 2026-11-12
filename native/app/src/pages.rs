@@ -65,15 +65,6 @@ pub fn title_bar(app: AppState, route: Route) -> AnyElement {
             let for_title = summary.clone();
             let chips_id = id.clone();
             let menu_id = id.clone();
-            let start_id = id.clone();
-            let can_start = {
-                let id = id.clone();
-                let summary = summary.clone();
-                move || {
-                    summary().map(|s| s.state == TaskState::NotStarted).unwrap_or(false)
-                        && crate::github::brief_of(app, &id).is_some()
-                }
-            };
             // Where it works, said quietly on the left.
             let folder = {
                 let summary = summary.clone();
@@ -126,10 +117,6 @@ pub fn title_bar(app: AppState, route: Route) -> AnyElement {
                                         .child(text(label).text_size(px(SMALL)).text_color(secondary()))
                                 })
                                 .collect::<Vec<_>>()
-                        }))
-                        .child(when(can_start, move || {
-                            let id = start_id.clone();
-                            primary_button("Start", move || crate::github::start_task(app, &id))
                         }))
                         .child(dynamic(move || {
                             let label = if app.changes_open.get() { "Hide changes" } else { "Changes" };
@@ -421,9 +408,9 @@ pub fn home(app: AppState) -> impl IntoElement {
 /// What a GitHub event became, in a few words.
 fn outcome(disposition: &str) -> &'static str {
     match disposition {
-        "attached" => "went to its task",
-        "pending" => "on its way to a task",
-        "created" => "new task to start",
+        "attached" => "went to its bot",
+        "pending" => "on its way to a bot",
+        "created" => "work for a bot",
         "untriaged" => "being sorted",
         "ignored" => "needed nothing",
         _ => "recorded",
@@ -438,8 +425,8 @@ fn away_row(app: AppState) -> impl IntoElement {
         let events = app.away.get();
         let count = |d: &[&str]| events.iter().filter(|e| d.contains(&e.disposition.as_str())).count();
         let parts: Vec<String> = [
-            (count(&["attached", "pending"]), "went to tasks"),
-            (count(&["created"]), "new tasks to start"),
+            (count(&["attached", "pending"]), "went to bots"),
+            (count(&["created"]), "work for a bot"),
             (count(&["untriaged"]), "being sorted"),
             (count(&["ignored"]), "needed nothing"),
             (count(&["noted"]), "recorded"),
@@ -619,6 +606,7 @@ pub fn task(app: AppState, task_id: String) -> impl IntoElement {
     app.mark_seen(&task_id);
     let bot_name = app.with_store(|s| s.get_task(&task_id)).flatten().map(|t| t.title).unwrap_or_else(|| "this bot".to_owned());
     let link_id = task_id.clone();
+    let proposals_id = task_id.clone();
     app.linking.set(false);
     let panel_id = task_id.clone();
     view()
@@ -635,9 +623,55 @@ pub fn task(app: AppState, task_id: String) -> impl IntoElement {
                     "What should the agent do?",
                     "Describe what the agent should do, then send.",
                 ))
+                .child(proposals(app, proposals_id))
                 .child(composer(app, conversation, format!("Message {bot_name}"), ComposerFor::Task(task_id))),
         )
         .child(when(move || app.changes_open.get(), move || crate::changes::panel(app, panel_id.clone())))
+}
+
+/// Work that was brought to this bot and waits for the person's yes: each
+/// with what it is, where it came from, and the two answers.
+fn proposals(app: AppState, bot_id: String) -> impl IntoElement {
+    let mine = move || app.proposed.get().into_iter().filter(|t| t.task_id == bot_id).collect::<Vec<_>>();
+    view().w_full().max_w(px(READING_WIDTH - 48.0)).mx(auto()).px(px(0.0)).gap(px(8.0)).child(each(
+        mine,
+        |ticket: &bubble_store::Ticket| ticket.id.clone(),
+        move |ticket, _| {
+            let id = ticket.get_untracked().id;
+            let accept = id.clone();
+            let from = move || {
+                let t = ticket.get();
+                let source = match t.origin {
+                    bubble_store::TicketOrigin::Github => "From GitHub",
+                    bubble_store::TicketOrigin::Routine => "From a routine",
+                    bubble_store::TicketOrigin::Bot => "From another bot",
+                    bubble_store::TicketOrigin::Main => "From Bubble",
+                };
+                match t.asker {
+                    Some(asker) if t.origin == bubble_store::TicketOrigin::Github => format!("{source}, {asker}. Nobody asked the bot for this yet."),
+                    _ => format!("{source}. Nobody asked the bot for this yet."),
+                }
+            };
+            view()
+                .mb(px(8.0))
+                .p(px(14.0))
+                .gap(px(8.0))
+                .rounded(px(12.0))
+                .border(px(LINE))
+                .border_color(border())
+                .bg(pane())
+                .child(text(move || ticket.get().title).text_size(px(BODY)).font_weight(FontWeight::SEMIBOLD).number_of_lines(2))
+                .child(text(from).text_size(px(SMALL)).text_color(muted()))
+                .child(text(move || ticket.get().text).text_size(px(SMALL)).line_height(px(18.0)).text_color(secondary()).number_of_lines(3))
+                .child(
+                    view()
+                        .flex_row()
+                        .gap(px(8.0))
+                        .child(primary_button("Give it to the bot", move || crate::manager::accept_ticket(app, &accept)))
+                        .child(button("Dismiss", move || crate::manager::dismiss_ticket(app, &id))),
+                )
+        },
+    ))
 }
 
 // --- Skills ------------------------------------------------------------------

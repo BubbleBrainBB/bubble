@@ -147,11 +147,12 @@ fn the_sidebar_pages_work() {
     if let Err(e) = app.wait_for_within("text:#7 Add docs", long) {
         panic!("{e}\nTEXTS: {:?}", app.screen().texts());
     }
-    app.press("Make a task").unwrap();
+    app.press("Give to its bot").unwrap();
     app.wait_for("PR #7").unwrap();
+    app.wait_for("text:Message Set up").unwrap();
     app.press("id:nav-settings").unwrap();
     app.press("id:nav-pull-requests").unwrap();
-    app.wait_for_within("Open task", long).unwrap();
+    app.wait_for_within("Open bot", long).unwrap();
     app.press("Merge").unwrap();
     app.press("Squash and merge").unwrap();
     app.wait_for_within("text:/Merged/", long).unwrap();
@@ -167,10 +168,15 @@ fn the_sidebar_pages_work() {
     app.press("Every few minutes").unwrap();
     app.press("Save automation").unwrap();
     app.wait_for("text:/^Every hour, in demo, next /").unwrap();
+    // Run now: the prompt goes to the bot that looks after the project, as
+    // its routine's; no bot is made for a run.
     app.press("Run now").unwrap();
-    app.press("Last task").unwrap();
+    app.press("Open its bot").unwrap();
+    app.wait_for("text:Message Set up").unwrap();
+    app.wait_for("From your routine Nightly check").unwrap();
     app.wait_for("text:Check the nightly build").unwrap();
     app.wait_for_within("On it.", long).unwrap();
+    assert!(!app.shows("id:side-Nightly check"), "a routine's run is not a bot");
 
     // Skills: listed, and found by what they do.
     app.press("id:nav-settings").unwrap();
@@ -187,9 +193,9 @@ fn the_sidebar_pages_work() {
     app.wait_for("id:search").unwrap();
     app.clear("id:search").unwrap();
     app.type_text("id:search", "nightly build").unwrap();
-    app.wait_for("label:Found in Nightly check").unwrap();
-    app.press("label:Found in Nightly check").unwrap();
-    app.wait_for("text:/Nightly check$/").unwrap();
+    app.wait_for("label:Found in Set up").unwrap();
+    app.press("label:Found in Set up").unwrap();
+    app.wait_for("text:Message Set up").unwrap();
 
     // A bot is made with a name, what it is for, and the folder it works in.
     app.press("id:nav-new-bot").unwrap();

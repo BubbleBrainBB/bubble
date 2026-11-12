@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use bubble_core::{AgentEvent, Decision, ToolCall, ToolOutput, ToolSpec};
-use bubble_store::{Event, MessageRole, NewTask, Origin, RunRole};
+use bubble_store::{Event, RunRole};
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
 
@@ -26,9 +26,10 @@ thread_local! {
 
 pub const PROMPT: &str = "You triage GitHub notifications for the person, on Bubble's behalf. Each notification below is \
 something on GitHub that mentions them or a thread they take part in; no rule placed it. Decide each one, with a tool call per notification:\n\
-- attach_event when it belongs to an existing task (call list_bots and get_bot to see what exists); the task's agent gets it.\n\
-- create_task_from_event when it asks for work no task covers: a short title and a self-contained brief (what is asked, \
-where to read it with `gh`, what done means). Set start to true only when the work is clear and safe to begin without the person.\n\
+- attach_event when it adds to work a bot already has (call list_bots and get_bot to see what exists); that bot gets it.\n\
+- give_event_to_bot when it asks for new work: a short title and a self-contained brief (what is asked, where to read it with \
+`gh`, what done means). Leave bot out to give it to the bot that looks after the repository. The work waits for the person's \
+yes unless start is true and the repository allows that; set start only when the work is clear and safe to begin without them.\n\
 - ignore_event when it needs nothing (a thank-you, a bot, news that changes no work), with a short reason.\n\
 Decide every notification; then answer with one line saying what you did.";
 
@@ -38,20 +39,21 @@ pub fn specs() -> Vec<ToolSpec> {
     specs.extend([
         ToolSpec {
             name: "attach_event".into(),
-            description: "Give a notification to an existing task: it is linked to the task and its agent is told.".into(),
+            description: "Give a notification to a bot that already has that work: it is linked to the bot and the bot is told.".into(),
             parameters: json!({
                 "type": "object",
-                "properties": { "event_id": { "type": "string" }, "task_id": { "type": "string" } },
-                "required": ["event_id", "task_id"]
+                "properties": { "event_id": { "type": "string" }, "bot": { "type": "string", "description": "Its id or its name" } },
+                "required": ["event_id", "bot"]
             }),
         },
         ToolSpec {
-            name: "create_task_from_event".into(),
-            description: "Make a task for a notification, in its repository's project. It waits for the person to start it unless start is true and the repository allows that.".into(),
+            name: "give_event_to_bot".into(),
+            description: "Make a notification into work for a bot. It waits for the person's yes unless start is true and the repository allows that.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "event_id": { "type": "string" },
+                    "bot": { "type": "string", "description": "Its id or its name; the repository's own bot when left out" },
                     "title": { "type": "string" },
                     "brief": { "type": "string" },
                     "start": { "type": "boolean" }
@@ -117,10 +119,10 @@ fn execute(app: AppState, call: &ToolCall, batch: &[Event]) -> ToolOutput {
     let kind = p["kind"].as_str().unwrap_or("issue").to_owned();
     match call.name.as_str() {
         "attach_event" => {
-            let task_id = text("task_id");
-            if app.tasks.with_untracked(|t| !t.iter().any(|t| t.task.id == task_id)) {
-                return error(format!("There is no task {task_id}. Call list_bots for the ids."));
-            }
+            let task_id = match crate::manager::find(app, &text("bot")) {
+                Ok(bot) => bot.task.id,
+                Err(message) => return error(message),
+            };
             // The task's agent reads what happened; it goes out when the
             // task can take it.
             let message = p["brief"].as_str().unwrap_or(&event.payload).to_owned();
@@ -133,38 +135,48 @@ fn execute(app: AppState, call: &ToolCall, batch: &[Event]) -> ToolOutput {
                 return error("The notification could not be saved.");
             }
             github::deliver_pending(app);
-            ok(format!("Gave {id} to task {task_id}."))
+            ok(format!("Gave {id} to bot {task_id}."))
         }
-        "create_task_from_event" => {
+        "give_event_to_bot" => {
             let (title, brief) = (text("title"), text("brief"));
             if title.is_empty() || brief.is_empty() {
-                return error("A task needs a title and a brief.");
+                return error("The work needs a title and a brief.");
             }
             let repos = app.github_repos();
             let Some(home) = repos.iter().find(|r| r.name == repo) else {
                 return error(format!("{repo} is not a watched project."));
             };
-            let level = home.level;
-            let project = home.project.clone();
-            let created = app.with_store(|s| {
-                let task = s.create_task(NewTask { title: &title, project_cwd: Some(&project), origin: Origin::Github })?;
-                s.link(&task.id, &kind, &repo, number)?;
+            let bot = match text("bot").as_str() {
+                "" => crate::manager::bot_for_project_or_new(
+                    app,
+                    &home.project,
+                    &format!("Looks after the GitHub repository {repo}: its issues, pull requests and reviews."),
+                ),
+                named => match crate::manager::find(app, named) {
+                    Ok(bot) => Some(bot.task.id),
+                    Err(message) => return error(message),
+                },
+            };
+            let Some(bot) = bot else { return error("No bot could take it.") };
+            let start = args["start"] == true && home.level == Some(Level::Act);
+            let saved = app.with_store(|s| {
+                s.link(&bot, &kind, &repo, number)?;
                 let mut kept = p.clone();
                 kept["brief"] = json!(brief);
                 s.set_event_payload(&id, &kept.to_string())?;
-                s.set_event_disposition(&id, "created", Some(&task.id))?;
-                Ok(task)
+                s.set_event_disposition(&id, "created", Some(&bot))
             });
-            let Some(task) = created else { return error("The task could not be saved.") };
-            app.refresh_tasks();
-            let start = args["start"] == true && level == Some(Level::Act);
-            if start {
-                let _ = app.task_conversation(&task.id).post(app, brief, MessageRole::External);
+            if saved.is_none() {
+                return error("The notification could not be saved.");
             }
+            let standing = if start { crate::manager::Standing::Accept } else { crate::manager::Standing::Propose };
+            let asker = format!("{repo}#{number}");
+            crate::manager::bring(app, &bot, crate::manager::Sender::Github, &title, &brief, &asker, false, standing);
+            app.refresh_tasks();
+            app.task_revision.update(|revision| *revision += 1);
             ok(format!(
-                "Created task {} \"{title}\"; {}.",
-                task.id,
-                if start { "its agent is working on it" } else { "it waits for the person to start it" }
+                "Gave it to bot {bot} as \"{title}\"; {}.",
+                if start { "the bot is working on it" } else { "it waits for the person's yes" }
             ))
         }
         "ignore_event" => {

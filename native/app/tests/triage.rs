@@ -17,7 +17,7 @@ fn events(body: &str) -> String {
     let last = messages.last().cloned().unwrap_or_default();
     if system.contains("You triage GitHub notifications") {
         if last["role"] == "tool" {
-            return say("Made one task for the docs mention.");
+            return say("Gave the docs mention to the repository's bot.");
         }
         let listing = last["content"].as_str().unwrap_or_default();
         let id = listing.lines().find_map(|l| l.split(" | ").next().filter(|w| w.starts_with("evt_"))).unwrap_or_default();
@@ -27,7 +27,7 @@ fn events(body: &str) -> String {
             "brief": "Someone mentioned you on acme/demo#9 about a typo in the docs. Read it with `gh issue view 9 --repo acme/demo` and fix it.",
             "start": false
         });
-        return call("create_task_from_event", &arguments.to_string());
+        return call("give_event_to_bot", &arguments.to_string());
     }
     say("Looking into it.")
 }
@@ -147,16 +147,21 @@ fn a_mention_is_triaged_into_a_task_and_shown_on_home() {
     app.wait_for_within("acme/demo", long).unwrap();
     app.press("label:Prepare for acme/demo").unwrap();
 
-    // The mention is triaged into a task waiting to start, and Home says so.
+    // The mention is triaged into work proposed to the repository's bot,
+    // and Home says so.
     app.press("id:nav-home").unwrap();
-    if let Err(e) = app.wait_for_within("text:/While you were away, GitHub brought 1 thing: 1 new tasks to start/", long) {
+    if let Err(e) = app.wait_for_within("text:/While you were away, GitHub brought 1 thing: 1 work for a bot/", long) {
         panic!("{e}\nTEXTS: {:?}", app.screen().texts());
     }
     app.press("label:While you were away").unwrap();
-    app.wait_for("text:/acme\\/demo #9 mention: Docs typo in setup guide \\(new task to start\\)/").unwrap();
+    app.wait_for("text:/acme\\/demo #9 mention: Docs typo in setup guide \\(work for a bot\\)/").unwrap();
     app.press("text:/acme\\/demo #9 mention/").unwrap();
+    // It opens the bot that already looks after the repository, with the
+    // work waiting for a yes there.
+    app.wait_for("text:Message Set up").unwrap();
     app.wait_for("Fix the docs typo").unwrap();
-    app.wait_for("Start").unwrap();
+    app.wait_for("Give it to the bot").unwrap();
+    assert!(!app.shows("id:side-Fix the docs typo"), "a mention is not a bot");
 
     std::fs::remove_dir_all(&root).ok();
 }

@@ -12,11 +12,12 @@ use std::time::Duration;
 
 use bubble_core::{Permission, ToolCall, ToolOutput, ToolSpec};
 use bubble_github::{Change, Gh, Kind, Notification, Snapshot, changes, number_in_url};
-use bubble_store::{Event, Lifecycle, MessageRole, NewEvent, NewTask, Origin};
+use bubble_store::{Event, MessageRole, NewEvent};
 use nsh_core::prelude::*;
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::sync::oneshot;
 
+use crate::manager::{self, Sender, Standing};
 use crate::state::{AppState, Conversation};
 
 const SOURCE: &str = "github";
@@ -199,9 +200,8 @@ fn route_change(app: AppState, task_id: &str, repo: &str, kind: Kind, number: u6
     if !matches!(recorded, Some(Some(_))) {
         return;
     }
-    if matches!(change, Change::Merged | Change::Closed) {
-        app.set_lifecycle(task_id, Lifecycle::Done);
-    }
+    // A merged or closed item ends that piece of work, not the bot.
+    let _ = level;
 }
 
 fn quote(body: &str) -> String {
@@ -266,22 +266,37 @@ fn handle_notification(app: AppState, repo: &Repo, level: Level, n: &Notificatio
         })
     });
     let Some(Some(event)) = recorded else { return };
-    if disposition != "created" {
+    if !starts_work || linked.is_some() {
         return;
     }
-    let title = format!("#{} {}", n.number, n.title);
-    let Some(task) = app.with_store(|s| {
-        let task = s.create_task(NewTask { title: &title, project_cwd: Some(&repo.project), origin: Origin::Github })?;
-        s.link(&task.id, n.kind.as_str(), &n.repo, n.number as i64)?;
-        s.set_event_disposition(&event.id, "created", Some(&task.id))?;
-        Ok(task)
-    }) else {
-        return;
+    // New work nobody asked the bot for outright: it goes to the bot that
+    // looks after the repository, as far as the repository's level allows.
+    let standing = match level {
+        Level::Act => Standing::Accept,
+        Level::Prepare => Standing::Propose,
+        _ => Standing::Record,
     };
-    app.refresh_tasks();
-    if level == Level::Act {
-        let _ = app.task_conversation(&task.id).post(app, brief, MessageRole::External);
+    let bot = match standing {
+        // Only writing down what would be done makes no bot.
+        Standing::Record => manager::bot_for_project(app, &repo.project),
+        _ => manager::bot_for_project_or_new(
+            app,
+            &repo.project,
+            &format!("Looks after the GitHub repository {}: its issues, pull requests and reviews.", n.repo),
+        ),
+    };
+    let Some(bot) = bot else { return };
+    let title = format!("#{} {}", n.number, n.title);
+    if standing != Standing::Record {
+        app.with_store(|s| {
+            s.link(&bot, n.kind.as_str(), &n.repo, n.number as i64)?;
+            s.set_event_disposition(&event.id, "created", Some(&bot))
+        });
     }
+    manager::bring(app, &bot, Sender::Github, &title, &brief, &format!("{}#{}", n.repo, n.number), false, standing);
+    app.refresh_tasks();
+    // The bot's links changed under a conversation that may be open.
+    app.task_revision.update(|revision| *revision += 1);
 }
 
 fn brief_for(n: &Notification) -> String {
@@ -319,26 +334,6 @@ fn deliver(app: AppState, event: &Event) {
     }
     if conversation.post(app, event.payload.clone(), MessageRole::External).is_ok() {
         app.with_store(|s| s.set_event_disposition(&event.id, "attached", None));
-    }
-}
-
-/// The brief a GitHub task was created with, while it has not started.
-pub fn brief_of(app: AppState, task_id: &str) -> Option<String> {
-    let events = app.with_store(|s| s.events_for_task(task_id))?;
-    events
-        .iter()
-        .find(|e| e.disposition == "created")
-        .and_then(|e| serde_json::from_str::<Value>(&e.payload).ok())
-        .and_then(|v| v["brief"].as_str().map(str::to_owned))
-}
-
-/// Starts a GitHub task on its brief.
-pub fn start_task(app: AppState, task_id: &str) {
-    if let Some(brief) = brief_of(app, task_id) {
-        let conversation = app.task_conversation(task_id);
-        if let Err(message) = conversation.post(app, brief, MessageRole::External) {
-            log::warn!("starting {task_id}: {message}");
-        }
     }
 }
 

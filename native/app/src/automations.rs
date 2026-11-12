@@ -6,7 +6,6 @@
 
 use std::time::Duration;
 
-use bubble_store::{MessageRole, NewTask, Origin};
 use chrono::{Datelike, Local, NaiveTime, TimeZone};
 use nsh_core::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -85,6 +84,10 @@ pub struct Automation {
     /// The task its last run started.
     #[serde(default)]
     pub last_task: Option<String>,
+    /// The bot whose routine this is; found (or made) from the project on
+    /// its first run when it was saved without one.
+    #[serde(default)]
+    pub bot: Option<String>,
 }
 
 impl Automation {
@@ -116,21 +119,32 @@ fn update(app: AppState, id: &str, f: impl FnOnce(&mut Automation)) {
     save(app, list);
 }
 
-/// Starts a task for `automation` now.
+/// Runs a routine now: its prompt goes to its bot, as a piece of work the
+/// person asked for when they wrote the routine.
 pub fn run_now(app: AppState, id: &str) {
     let Some(automation) = app.automations.with_untracked(|l| l.iter().find(|a| a.id == id).cloned()) else { return };
-    let task = app.with_store(|s| {
-        s.create_task(NewTask { title: &automation.name, project_cwd: Some(&automation.project), origin: Origin::Automation })
+    let known = automation.bot.clone().filter(|bot| app.bots_untracked().iter().any(|t| &t.task.id == bot));
+    let bot = known.or_else(|| {
+        crate::manager::bot_for_project_or_new(app, &automation.project, &format!("Runs the routine \"{}\".", automation.name))
     });
-    let Some(task) = task else { return };
-    app.refresh_tasks();
-    if let Err(message) = app.task_conversation(&task.id).post(app, automation.prompt.clone(), MessageRole::User) {
-        log::warn!("automation {}: {message}", automation.name);
-    }
-    let task_id = task.id.clone();
+    let Some(bot) = bot else {
+        log::warn!("routine {}: no bot could take it", automation.name);
+        return;
+    };
+    crate::manager::bring(
+        app,
+        &bot,
+        crate::manager::Sender::Routine(automation.name.clone()),
+        &automation.name,
+        &automation.prompt,
+        &automation.id,
+        true,
+        crate::manager::Standing::Accept,
+    );
     update(app, id, |a| {
         a.last_run = Some(bubble_store::now_ms());
-        a.last_task = Some(task_id);
+        a.last_task = Some(bot.clone());
+        a.bot = Some(bot);
     });
 }
 
@@ -242,6 +256,7 @@ fn form(app: AppState, composing: Signal<bool>) -> impl IntoElement {
             created_at: bubble_store::now_ms(),
             last_run: None,
             last_task: None,
+            bot: None,
         });
         save(app, list);
         composing.set(false);
@@ -358,7 +373,7 @@ fn row(app: AppState, automation: ReadSignal<Automation>) -> impl IntoElement {
                 .child(text(detail).text_size(px(SMALL)).text_color(muted()).number_of_lines(1)),
         )
         .child(when(move || automation.get().last_task.is_some(), move || {
-            button("Last task", move || {
+            button("Open its bot", move || {
                 if let Some(task) = automation.get_untracked().last_task {
                     app.route.set(Route::Task(task));
                 }
@@ -446,6 +461,7 @@ mod tests {
             created_at: 0,
             last_run: None,
             last_task: None,
+            bot: None,
         };
         assert!(automation.is_due(15 * 60_000) && !automation.is_due(15 * 60_000 - 1));
         automation.enabled = false;
