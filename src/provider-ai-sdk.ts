@@ -636,6 +636,18 @@ export async function fetchGeminiModels(options: {
   return selectLatestGeminiModels(data.models ?? [], options.limit ?? 5);
 }
 
+/** Model tiers live discovery keeps; any other name is filtered out. */
+const GEMINI_TEXT_TIERS = ["argon", "carbon", "hydrogen", "pro", "flash"] as const;
+const GEMINI_TEXT_MODEL_ID = new RegExp(`^gemini-(\\d+(?:\\.\\d+)?)-(${GEMINI_TEXT_TIERS.join("|")})(-lite)?`);
+/**
+ * Names the selection rules of selectLatestGeminiModels. It is part of the
+ * discovery cache key: a list chosen by a build that did not know a tier (an
+ * older install, or an older Bubble still running and sharing the disk cache)
+ * must not satisfy this build, or new models stay hidden from /model for as
+ * long as that cached list lives.
+ */
+export const GEMINI_MODEL_SELECTION_SCOPE = `tiers:${GEMINI_TEXT_TIERS.join(",")}`;
+
 /**
  * Ranking: one entry per (version, tier) family — GA ids beat dated previews —
  * then newest version first, pro/argon before carbon before hydrogen before
@@ -664,7 +676,7 @@ export function selectLatestGeminiModels(
     if (!id.startsWith("gemini-")) continue;
     if (GEMINI_MODEL_EXCLUDE.test(id)) continue;
     if (entry.supportedGenerationMethods && !entry.supportedGenerationMethods.includes("generateContent")) continue;
-    const match = /^gemini-(\d+(?:\.\d+)?)-(argon|carbon|hydrogen|pro|flash)(-lite)?/.exec(id);
+    const match = GEMINI_TEXT_MODEL_ID.exec(id);
     if (!match) continue;
     const tier = `${match[2]}${match[3] ?? ""}`;
     candidates.push({

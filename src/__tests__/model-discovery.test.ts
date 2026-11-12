@@ -249,6 +249,83 @@ describe("Gemini model discovery cache", () => {
   });
 });
 
+describe("Gemini model discovery cache across upgrades", () => {
+  it("does not reuse a list selected by a build that did not know the new tiers", async () => {
+    const previousBubbleHome = process.env.BUBBLE_HOME;
+    const previousVitest = process.env.VITEST;
+    const bubbleHome = mkdtempSync(join(tmpdir(), "bubble-gemini-upgrade-"));
+    const provider: ProviderProfile = {
+      id: "google",
+      name: "Google Gemini",
+      baseURL: "https://generativelanguage.googleapis.com/v1beta",
+      apiKey: "g-key",
+      enabled: true,
+      protocol: "ai-sdk",
+    };
+    const cachedModel = (id: string) => ({
+      id, name: id, providerId: "google", reasoningLevels: ["low", "medium", "high"], contextWindow: 1_048_576,
+    });
+
+    try {
+      process.env.BUBBLE_HOME = bubbleHome;
+      process.env.VITEST = "true";
+      const probe = isolatedRegistry([provider]);
+      const currentKey = (probe as any).modelDiscoveryKey(provider) as string;
+      // The key every build up to 0.0.65 wrote: same identity, no scope.
+      const legacyKey = JSON.stringify([...(JSON.parse(currentKey) as unknown[]).slice(0, 5), null]);
+      expect(currentKey).not.toBe(legacyKey);
+      expect(currentKey).toContain("carbon");
+      expect(currentKey).toContain("hydrogen");
+
+      writeFileSync(join(bubbleHome, "model-discovery-cache.json"), JSON.stringify({
+        [legacyKey]: {
+          result: {
+            models: ["gemini-4-argon", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"].map(cachedModel),
+            source: "remote",
+            authoritative: true,
+          },
+          expiresAt: Date.now() + 23 * 60 * 60 * 1000,
+          identityKey: "old-build",
+          providerId: "google",
+          protocol: "ai-sdk",
+        },
+      }));
+
+      clearDynamicModelMetadata("google");
+      process.env.VITEST = "false";
+      const registry = isolatedRegistry([provider]);
+      const remote = ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"];
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+        models: remote.map((id) => ({
+          name: `models/${id}`,
+          displayName: id,
+          inputTokenLimit: 1_048_576,
+          supportedGenerationMethods: ["generateContent"],
+        })),
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await registry.discoverModels(provider);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(result.source).toBe("remote");
+      expect(result.models.map((model) => model.id)).toEqual([
+        "gemini-4-argon",
+        "gemini-4-carbon",
+        "gemini-4-hydrogen",
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+      ]);
+    } finally {
+      clearDynamicModelMetadata("google");
+      rmSync(bubbleHome, { recursive: true, force: true });
+      if (previousBubbleHome === undefined) delete process.env.BUBBLE_HOME;
+      else process.env.BUBBLE_HOME = previousBubbleHome;
+      if (previousVitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = previousVitest;
+    }
+  });
+});
+
 describe("grok subscription discovery", () => {
   const grokProvider: ProviderProfile = {
     id: "grok",
