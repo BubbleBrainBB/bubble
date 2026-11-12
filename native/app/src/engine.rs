@@ -40,7 +40,10 @@ pub fn session_of(run_id: &str) -> String {
 /// One turn handed to the agent.
 pub struct HostTurn {
     pub session_id: String,
-    /// The folder the session lives in and its tools work in.
+    /// The folder the session lives in: one place for a conversation's
+    /// whole life, whatever it works on.
+    pub home: String,
+    /// The folder this turn's tools work in.
     pub cwd: String,
     pub text: String,
     pub pictures: Vec<Picture>,
@@ -126,7 +129,7 @@ impl Step {
 /// Runs `turn` to its end. `stop` ends it early (the reply so far stays).
 pub async fn run(host: Host, turn: HostTurn, events: mpsc::UnboundedSender<TurnEvent>, stop: Arc<Notify>) -> Result<Ending> {
     let session = turn.session_id.clone();
-    host.open_session(&session, &turn.cwd).await?;
+    host.open_session(&session, &turn.home).await?;
     let mut text = turn.text;
     if let Some(recap) = turn.recap.filter(|r| !r.trim().is_empty()) {
         if host.history(&session).await.map(|h| h.is_empty()).unwrap_or(false) {
@@ -138,6 +141,7 @@ pub async fn run(host: Host, turn: HostTurn, events: mpsc::UnboundedSender<TurnE
     let mut messages = host.subscribe(&session);
     host.start_turn(TurnRequest {
         session_id: session.clone(),
+        cwd: Some(turn.cwd),
         text,
         pictures: turn.pictures,
         model: Some(turn.model),

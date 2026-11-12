@@ -122,17 +122,17 @@ fn load(app: AppState, rows: Signal<Vec<PrRow>>, problem: Signal<Option<String>>
     });
 }
 
-/// Gives a pull request no bot follows to the bot that looks after its
-/// repository: linked to it, so reviews and checks reach the bot, and
-/// open for the person's first word about it.
+/// Asks the main bot to give a pull request no bot follows to the bot
+/// that fits: it is the one who hands work out.
 fn give_to_bot(app: AppState, row: &PrRow) {
     let Some(project) = app.github_repos().into_iter().find(|r| r.name == row.repo).map(|r| r.project) else { return };
-    let purpose = format!("Looks after the GitHub repository {}: its issues, pull requests and reviews.", row.repo);
-    let Some(bot) = crate::manager::bot_for_project_or_new(app, &project, &purpose) else { return };
-    if app.with_store(|s| s.link(&bot, Kind::PullRequest.as_str(), &row.repo, row.number as i64)).is_some() {
-        app.refresh_tasks();
-        app.route.set(Route::Task(bot));
-    }
+    let ask = format!(
+        "Have the bot that fits look after pull request #{} in {} (\"{}\"), in the project folder {project}: link it to the bot so \
+         reviews and checks reach it.",
+        row.number, row.repo, row.title
+    );
+    app.manager_conversation().send(app, ask);
+    app.route.set(Route::Home);
 }
 
 fn pr_row(app: AppState, row: ReadSignal<PrRow>, rows: Signal<Vec<PrRow>>, problem: Signal<Option<String>>) -> impl IntoElement {
@@ -210,7 +210,7 @@ fn pr_row(app: AppState, row: ReadSignal<PrRow>, rows: Signal<Vec<PrRow>>, probl
                 }))
                 .child(dynamic(move || match row.get().task {
                     Some(task) => button("Open bot", move || app.route.set(Route::Task(task.clone()))).into_element(),
-                    None => button("Give to its bot", move || give_to_bot(app, &row.get_untracked())).into_element(),
+                    None => button("Give to a bot", move || give_to_bot(app, &row.get_untracked())).into_element(),
                 }))
                 .child(when(move || row.get().state == "OPEN" && !row.get().draft && !confirming.get(), move || {
                     button("Merge", move || confirming.set(true))

@@ -1,8 +1,9 @@
 //! The triage session (design §4.4): GitHub notifications no rule placed
 //! (mentions, comments, state changes, newly opened issues and pull
 //! requests) are decided by a hidden turn of the
-//! main bot's model with five tools: list_bots, get_bot, attach_event,
-//! create_task_from_event and ignore_event. It appears in no list; its
+//! main bot's model: it is the main bot handing work out, in the
+//! background, with list_bots, get_bot, create_bot, attach_event,
+//! give_event_to_bot and ignore_event. It appears in no list; its
 //! decisions are written to the events, where the "while you were away"
 //! row and the tasks show them.
 
@@ -25,24 +26,44 @@ thread_local! {
     static RUNNING: Cell<bool> = const { Cell::new(false) };
 }
 
-pub const PROMPT: &str = "You triage GitHub notifications for the person, on Bubble's behalf. Each notification below is \
-something on GitHub that mentions them, a thread they take part in, or an issue or pull request newly opened in a repository \
-they have Bubble watch (reason `opened`, with who opened it; the person's own issue is them asking for it); no rule placed \
-it. Decide each one, with a tool call per notification:\n\
-- attach_event when it adds to work a bot already has (call list_bots and get_bot to see what exists); that bot gets it.\n\
-- give_event_to_bot when it asks for new work: a short title and a self-contained brief (what is asked, where to read it with \
-`gh`, what done means). Leave bot out to give it to the bot that looks after the repository. The work waits for the person's \
-yes unless start is true and the repository allows that; set start only when the work is clear and safe to begin without them.\n\
-- ignore_event when it needs nothing (a thank-you, a bot, news that changes no work), with a short reason.\n\
-Decide every notification; then answer with one line saying what you did.";
+pub const PROMPT: &str = "You are Bubble, the person's main bot, sorting what came in from GitHub while they were busy. They do not \
+see this conversation, only what becomes of each item. Each item below is something in a repository they have Bubble watch: an issue or \
+pull request newly opened (reason `opened`, with who opened it; the person's own issue is them asking for it), an assignment or a \
+review request, a mention, or news on a thread they take part in. Decide each one, with one tool call per item:\n\
+- ignore_event when it needs no work (a thank-you, a duplicate, a question already answered, news that changes nothing), with a short \
+reason.\n\
+- attach_event when it adds to work a bot already has (get_bot shows what a bot is on); that bot gets it.\n\
+- give_event_to_bot when it asks for new work. Choose the bot by its role with list_bots: bots are roles on the team (a developer, a \
+reviewer), not keepers of one repository, and the same bot works in any project. Give a short title and a self-contained brief that \
+says no more than the item asks: what is asked, where to read it with `gh`, what done means. Do not add work the item does not ask for, \
+and do not ask for a pull request unless the item does. Set priority to first for what blocks someone or was asked of the person by \
+name, to later for what can wait, and leave it out otherwise. You need not check whether the bot is busy: work for a busy bot goes to a \
+free bot of its role, or to a copy of it.\n\
+- When no bot's role fits the work, make one first with create_bot (a name, a role, instructions), then give it the work.\n\
+New work waits for the person's yes unless start is true and the repository allows that; set start only when the work is clear and safe \
+to begin without them.\n\
+Decide every item; then answer with one line saying what you did.";
 
 pub fn specs() -> Vec<ToolSpec> {
     let manager = crate::manager::specs();
-    let mut specs: Vec<ToolSpec> = manager.into_iter().filter(|s| s.name == "list_bots" || s.name == "get_bot").collect();
+    let mut specs: Vec<ToolSpec> = manager.into_iter().filter(|s| matches!(s.name.as_str(), "list_bots" | "get_bot")).collect();
     specs.extend([
         ToolSpec {
+            name: "create_bot".into(),
+            description: "Make a new long-lived bot for a role no bot has yet: a role on the team, not tied to a folder. Then give it the work.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Short, in the person's language; no other bot has it" },
+                    "role": { "type": "string", "description": "Its role in a word or two: Developer, Reviewer, Writer" },
+                    "instructions": { "type": "string", "description": "What the bot is responsible for and how it should work" }
+                },
+                "required": ["name", "role"]
+            }),
+        },
+        ToolSpec {
             name: "attach_event".into(),
-            description: "Give a notification to a bot that already has that work: it is linked to the bot and the bot is told.".into(),
+            description: "Give an item to a bot that already has that work: it is linked to the bot and the bot is told.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": { "event_id": { "type": "string" }, "bot": { "type": "string", "description": "Its id or its name" } },
@@ -51,22 +72,23 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "give_event_to_bot".into(),
-            description: "Make a notification into work for a bot. It waits for the person's yes unless start is true and the repository allows that.".into(),
+            description: "Make an item into work for a bot, done in the item's project folder. It waits for the person's yes unless start is true and the repository allows that.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "event_id": { "type": "string" },
-                    "bot": { "type": "string", "description": "Its id or its name; the repository's own bot when left out" },
+                    "bot": { "type": "string", "description": "The id or name of the bot whose role fits" },
                     "title": { "type": "string" },
                     "brief": { "type": "string" },
+                    "priority": { "type": "string", "enum": ["first", "normal", "later"] },
                     "start": { "type": "boolean" }
                 },
-                "required": ["event_id", "title", "brief"]
+                "required": ["event_id", "bot", "title", "brief"]
             }),
         },
         ToolSpec {
             name: "ignore_event".into(),
-            description: "Mark a notification as needing nothing.".into(),
+            description: "Mark an item as needing nothing.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": { "event_id": { "type": "string" }, "reason": { "type": "string" } },
@@ -85,8 +107,10 @@ fn payload(event: &Event) -> Value {
 fn describe(event: &Event) -> String {
     let p = payload(event);
     let by = p["author"].as_str().map(|author| format!(" by @{author}")).unwrap_or_default();
+    // Asked of the person by name: an assignment, a review request.
+    let pressing = if p["priority"] == "first" { " | asked of the person by name" } else { "" };
     format!(
-        "{} | {}{by} in {} #{} | \"{}\"",
+        "{} | {}{by} in {} #{} | \"{}\"{pressing}",
         event.id,
         event.kind,
         event.repo.as_deref().unwrap_or("?"),
@@ -109,6 +133,10 @@ fn execute(app: AppState, call: &ToolCall, batch: &[Event]) -> ToolOutput {
     let text = |key: &str| args[key].as_str().map(str::trim).unwrap_or_default().to_owned();
     if matches!(call.name.as_str(), "list_bots" | "get_bot") {
         return crate::manager::execute(app, &crate::manager::Sender::Main, call);
+    }
+    if call.name == "create_bot" {
+        // Its work is on its way: it has no need to ask where to start.
+        return crate::manager::make_bot(app, &json!({ "name": text("name"), "role": text("role"), "instructions": text("instructions") }), false);
     }
     let id = text("event_id");
     let Some(event) = batch.iter().find(|e| e.id == id) else {
@@ -150,18 +178,10 @@ fn execute(app: AppState, call: &ToolCall, batch: &[Event]) -> ToolOutput {
             let Some(home) = repos.iter().find(|r| r.name == repo) else {
                 return error(format!("{repo} is not a watched project."));
             };
-            let bot = match text("bot").as_str() {
-                "" => crate::manager::bot_for_project_or_new(
-                    app,
-                    &home.project,
-                    &format!("Looks after the GitHub repository {repo}: its issues, pull requests and reviews."),
-                ),
-                named => match crate::manager::find(app, named) {
-                    Ok(bot) => Some(bot.task.id),
-                    Err(message) => return error(message),
-                },
+            let bot = match crate::manager::find(app, &text("bot")) {
+                Ok(bot) => bot.task.id,
+                Err(message) => return error(format!("{message} When no bot's role fits, make one with create_bot.")),
             };
-            let Some(bot) = bot else { return error("No bot could take it.") };
             // A bot was given it in the meantime (an assignment came in
             // after it was opened): one piece of work, not two.
             if let Some(holder) = app.with_store(|s| s.task_for_link(&kind, &repo, number)).flatten() {
@@ -169,23 +189,43 @@ fn execute(app: AppState, call: &ToolCall, batch: &[Event]) -> ToolOutput {
                 return ok(format!("Bot {holder} already has {repo}#{number}; nothing was added."));
             }
             let start = args["start"] == true && home.level == Some(Level::Act);
+            let priority = match args["priority"].as_str().or_else(|| p["priority"].as_str()) {
+                Some("first") => crate::manager::FIRST,
+                Some("later") => crate::manager::LATER,
+                _ => crate::manager::NORMAL,
+            };
+            let standing = if start { crate::manager::Standing::Accept } else { crate::manager::Standing::Propose };
+            let asker = format!("{repo}#{number}");
+            let work = crate::manager::Work {
+                from: crate::manager::Sender::Github,
+                title: &title,
+                text: &brief,
+                asker: &asker,
+                explicit: false,
+                // The work is in the repository's folder.
+                project: Some(home.project.as_str()),
+                priority,
+            };
+            // Whichever bot of that role is free takes it.
+            let Some(ticket) = crate::manager::bring(app, &bot, work, standing, true) else {
+                return error("The work could not be saved.");
+            };
+            let worker = ticket.task_id.clone();
             let saved = app.with_store(|s| {
-                s.link(&bot, &kind, &repo, number)?;
+                s.link(&worker, &kind, &repo, number)?;
                 let mut kept = p.clone();
                 kept["brief"] = json!(brief);
                 s.set_event_payload(&id, &kept.to_string())?;
-                s.set_event_disposition(&id, "created", Some(&bot))
+                s.set_event_disposition(&id, "created", Some(&worker))
             });
             if saved.is_none() {
-                return error("The notification could not be saved.");
+                return error("The item could not be saved.");
             }
-            let standing = if start { crate::manager::Standing::Accept } else { crate::manager::Standing::Propose };
-            let asker = format!("{repo}#{number}");
-            crate::manager::bring(app, &bot, crate::manager::Sender::Github, &title, &brief, &asker, false, standing);
             app.refresh_tasks();
             app.task_revision.update(|revision| *revision += 1);
+            let name = crate::manager::Sender::Bot(worker.clone()).name(app);
             ok(format!(
-                "Gave it to bot {bot} as \"{title}\"; {}.",
+                "Gave it to {name} ({worker}) as \"{title}\"; {}.",
                 if start { "the bot is working on it" } else { "it waits for the person's yes" }
             ))
         }
@@ -222,6 +262,7 @@ pub fn maybe_run(app: AppState) {
     let session = format!("desk-triage-{}", bubble_store::now_ms());
     let turn = HostTurn {
         session_id: session.clone(),
+        home: crate::state::scratch_folder().to_string_lossy().into_owned(),
         cwd: crate::state::scratch_folder().to_string_lossy().into_owned(),
         text: message,
         pictures: Vec::new(),

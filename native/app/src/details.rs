@@ -63,17 +63,21 @@ fn ticket_line(app: AppState, ticket: &Ticket) -> String {
 pub fn panel(app: AppState, bot_id: String) -> impl IntoElement {
     let bot = app.with_store(|s| s.get_task(&bot_id)).flatten();
     let name = signal(bot.as_ref().map(|b| b.title.clone()).unwrap_or_default());
+    let role = signal(app.bot_role(&bot_id));
     let purpose = signal(app.bot_instruction(&bot_id));
-    let saved = signal(false);
+    // "Saved", or why it was not.
+    let saved = signal(None::<String>);
     let id = stored(bot_id.clone());
 
     let save = Rc::new(move || {
-        let chosen = name.get_untracked();
-        if !chosen.trim().is_empty() {
-            app.rename_bot(&id.get(), chosen.trim());
-        }
+        // The name is kept only when no other bot has it; the rest is saved either way.
+        let renamed = app.rename_bot(&id.get(), &name.get_untracked());
+        app.set_bot_role(&id.get(), &role.get_untracked());
         app.set_bot_instruction(&id.get(), &purpose.get_untracked());
-        saved.set(true);
+        saved.set(Some(match renamed {
+            Ok(()) => "Saved".to_owned(),
+            Err(message) => message,
+        }));
     });
     let on_enter = save.clone();
 
@@ -86,7 +90,7 @@ pub fn panel(app: AppState, bot_id: String) -> impl IntoElement {
         spawn(async move {
             if let Ok(Some(paths)) = picked.await {
                 if let Some(path) = paths.into_iter().next() {
-                    app.move_bot(&id.get(), Some(&path.display().to_string()));
+                    app.set_bot_project(&id.get(), Some(&path.display().to_string()));
                 }
             }
         });
@@ -131,6 +135,8 @@ pub fn panel(app: AppState, bot_id: String) -> impl IntoElement {
                             .gap(px(8.0))
                             .child(heading("Name"))
                             .child(input(name, "What you call it", "details-name").h(px(34.0)).on_submit(move |_: &str| on_enter()))
+                            .child(heading("Role"))
+                            .child(input(role, "A word or two: Developer, Researcher", "details-role").h(px(34.0)))
                             .child(heading("What it is for"))
                             .child(
                                 input(purpose, "Its standing instructions, in your words", "details-purpose").multiline(true).min_h(px(96.0)),
@@ -141,17 +147,19 @@ pub fn panel(app: AppState, bot_id: String) -> impl IntoElement {
                                     .items_center()
                                     .gap(px(10.0))
                                     .child(primary_button("Save", move || save()))
-                                    .child(when(move || saved.get(), || text("Saved").text_size(px(SMALL)).text_color(muted()))),
+                                    .child(when(move || saved.with(Option::is_some), move || {
+                                        text(move || saved.get().unwrap_or_default()).text_size(px(SMALL)).text_color(muted())
+                                    })),
                             ),
                     )
                     .child(
                         view()
                             .gap(px(8.0))
-                            .child(heading("Folder"))
+                            .child(heading("Working in"))
                             .child(
                                 text(move || match folder() {
                                     Some(cwd) => cwd,
-                                    None => "No folder: it only talks".to_owned(),
+                                    None => "No folder now: it only talks until work names one".to_owned(),
                                 })
                                 .text_size(px(SMALL))
                                 .text_color(muted())
@@ -162,10 +170,10 @@ pub fn panel(app: AppState, bot_id: String) -> impl IntoElement {
                                     .flex_row()
                                     .gap(px(8.0))
                                     .child(button("Choose a folder", choose_folder))
-                                    .child(when(move || folder().is_some(), move || button("Work without a folder", move || app.move_bot(&id.get(), None)))),
+                                    .child(when(move || folder().is_some(), move || button("Work without a folder", move || app.set_bot_project(&id.get(), None)))),
                             )
                             .child(
-                                text("After a move its conversation goes on in a fresh part that starts in the new folder.")
+                                text("The folder comes with the work: what is sent to it may name another, and its conversation goes on.")
                                     .text_size(px(SMALL))
                                     .text_color(muted()),
                             ),

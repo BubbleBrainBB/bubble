@@ -8,6 +8,7 @@
 2. **桌面端仍用 NSH。** 界面用 Rust 写，Agent 是一个子进程：`bubble host --stdio`（`src/host/`），按行分隔的 JSON-RPC。应用发起会话和回合、读事件；宿主反过来向应用要审批、提问的回答、文件夹信任，以及应用自己执行的工具（Manager 的、GitHub 的）的结果。协议见 `src/host/protocol.ts`，Rust 客户端是 `native/crates/bubble-host`。
 3. **对话记录归 TS。** 每个 Run 是一个 Bubble 会话（`desk-<run id>`，在 `~/.bubble/sessions`），命令行可以续接，压缩、hooks、权限规则、记忆都是核心自己的。`bubble.db` 留任务、Run、GitHub 关联，以及一份显示用的消息日志。
 4. **界面照 Grok Bot。** 聊天软件式：左栏只有搜索、新建和 bot 列表；bot 是长期 Agent（名字、头像、指令、可选的项目文件夹、定时 Routine，一条持续的对话）；Manager 是 Main Bot；"任务"的概念取消；PR 和 issue 的动态作为消息发到对应 bot 的对话；Skills、模型等进设置。
+5. **bot 是角色，不是文件夹（2026-11-12）。** 一个开发 bot 做哪个项目的活都行，文件夹跟着活走；可以有几个同角色的 bot。主 bot 建 bot 或用户手动建，建完 bot 自己打招呼。GitHub 来的事由主 bot 分派：同角色空闲的优先，都忙就复制一个（同角色有上限），到上限排队；需要点头的合成一份。取代第 4 点里"可选的项目文件夹"和下面进度里"交给负责该仓库的 bot"的做法。
 
 不再开发：`bubble-core` 里的 agent 循环、provider、工具、MCP 客户端、记忆管线，`native/cli`（Rust 命令行与 TUI）和 `bubble-term`。它们暂时留在仓库里（应用还用着其中的纯函数：工具行的描述、`@文件` 补全、读配置），功能对齐后删除。
 
@@ -234,6 +235,16 @@ native/
   - 提问：核心的 `question` 工具在对话里显示成带选项的卡片，可回答可跳过；主 bot 也能问。
   - 测试：Rust 全工作区 220 个通过，其中 15 个是对假模型加真实宿主进程的端到端测试。真实模型下主 bot 是否守"派完就安静"、记忆回顾的质量，都还没验证。
   - 没做：谁欠谁回报只在内存里，重启后没答完的工单标为 stopped，但请求方收不到报告；bot 不能主动找主 bot；工单的"授权范围"只有请求原文，没有单独的范围和策略版本；Pull requests 和 Skills 页仍从设置进；Node 还没捆进应用。
+
+- 2026-11-12：bot 改成角色（已提交，分支 feat/native-rust）。参照 github.com/Fei2411/DS-Bot 的做法：只有主 bot 和用户能建 bot，没有任何事件自动建 bot。
+  - 核心：`RunTurnOptions.cwd` 和 `turn/start` 的 `cwd`，一轮可以指定自己干活的文件夹，工具、项目设置、信任、MCP、系统提示里的工作目录都跟着它；会话留在创建它的地方。一条对话因此可以先后在几个项目里干活。
+  - bot：名字（全队唯一）、角色标签、职责、头像；没有文件夹这个属性。`tasks.project_cwd` 现在的意思是"它现在在哪干活"，跟着活变，不再另起一段对话。新建表单和 `create_bot` 都不要文件夹；建完 bot 在自己的对话里打招呼（带第一件活时直接干）。可以复制（"Dev 2"：同角色同职责，自己的对话和笔记）。
+  - 活带文件夹（`bubble-store` schema v6：`tickets.project`、`tickets.priority`）：`message_bot` 和事件带来的活都说在哪个文件夹做，bot 那一轮就在那里跑。用户直接跟 bot 说话时，输入框旁可以选项目，默认是它上次干活的地方。已知的项目记在设置 `projects` 里。
+  - 同一仓库并发（`native/app/src/worktree.rs`）：一个 bot 正在某文件夹里跑，另一个要在同一文件夹干活时，后者在自己的 git worktree 和分支上做；文件夹空出来且 worktree 里没有未提交的改动时回到原文件夹。
+  - 分派（`triage.rs`）：通知（指派、review 请求、提及等）和仓库里新开的 issue / PR 都先交给主 bot 在后台成批评估：忽略、并入已有的活、或作为新活交给按角色选的 bot（没有合适的角色就先建一个）。给的时候按 `manager::worker_for` 选人：本人空闲就给本人，否则同角色里空闲的，否则复制一个（同角色上限在设置里，默认 3），否则给排队最短的。排队按优先级（指派给本人的最先）。主 bot 页有一张汇总卡，列出所有等点头的，可以一次全给或逐条给。
+  - 记忆：多了按项目的一份（`memory/projects/`），谁在那个项目干活谁读；`remember` 加 `project`，回合后的回顾把关于项目的和关于人的分开存。
+  - 测试：Rust 全工作区 227 个通过，新增 `app/tests/roles.rs`（三个 issue 分给一个开发：第二个因为它忙给了复制出来的 bot 并在独立检出里做，第三个等点头后由同一个开发在另一个仓库的文件夹里做，同一条对话）。TS 2528 个通过，新增 `src/sdk/__tests__/turn-folder.test.ts`。
+  - 没做：文件夹的信任确认在桌面端仍是自动同意，没有卡片；worktree 只在上述条件下自动收回，分支不会自动删；Routine 记的是写它时 bot 所在的文件夹；谁欠谁回报仍只在内存里。
 
 ## 修订记录
 

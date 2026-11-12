@@ -1543,6 +1543,55 @@ fn sent_before(conversation: Conversation) -> Vec<String> {
 }
 
 /// A small text menu in the composer's bottom row.
+/// Where a bot works for what the person writes next: a known project,
+/// another folder, or none. Work others send it names its own.
+fn project_picker(app: AppState, bot: String, files: Signal<Option<Vec<String>>>) -> impl IntoElement {
+    let id = stored(bot);
+    let current = move || {
+        app.task_revision.get();
+        app.tasks.with(|tasks| tasks.iter().find(|t| t.task.id == id.get()).and_then(|t| t.task.project_cwd.clone()))
+    };
+    let choose = move |folder: Option<String>| {
+        app.set_bot_project(&id.get(), folder.as_deref());
+        // The files to mention are the new folder's.
+        files.set(None);
+    };
+    composer_menu(
+        "Project",
+        move || current().map(|p| project_name(&p)).unwrap_or_else(|| "No folder".to_owned()),
+        move || {
+            let now = current();
+            let mut options: Vec<(String, bool, Rc<dyn Fn()>)> = app
+                .projects()
+                .into_iter()
+                .filter(|p| std::path::Path::new(p).is_dir())
+                .take(8)
+                .map(|p| {
+                    let chosen = now.as_deref() == Some(p.as_str());
+                    let folder = p.clone();
+                    (project_name(&p), chosen, Rc::new(move || choose(Some(folder.clone()))) as Rc<dyn Fn()>)
+                })
+                .collect();
+            options.push((
+                "Choose a folder…".to_owned(),
+                false,
+                Rc::new(move || {
+                    let picked = pick_paths(nsh_core::file_dialog::OpenDialog::folders().button_label("Work here"));
+                    spawn(async move {
+                        if let Ok(Some(paths)) = picked.await {
+                            if let Some(path) = paths.into_iter().next() {
+                                choose(Some(path.display().to_string()));
+                            }
+                        }
+                    });
+                }),
+            ));
+            options.push(("No folder".to_owned(), now.is_none(), Rc::new(move || choose(None))));
+            options
+        },
+    )
+}
+
 fn composer_menu(
     label: &'static str,
     shown: impl Fn() -> String + 'static,
@@ -1743,13 +1792,14 @@ pub fn composer(
     let focused = signal(false);
     let recall = signal(None::<usize>);
     let files = signal(None::<Vec<String>>);
-    let project = match &target {
-        ComposerFor::Task(id) => app
-            .with_store(|s| s.get_task(id))
-            .flatten()
-            .and_then(|t| t.project_cwd)
-            .filter(|p| std::path::Path::new(p).is_dir()),
+    // Where the bot works now: it can change between messages, with the
+    // work or by the person's choice here.
+    let bot = stored(match &target {
+        ComposerFor::Task(id) => Some(id.clone()),
         ComposerFor::Manager => None,
+    });
+    let project = move || {
+        bot.get().and_then(|id| app.bot_project(&id)).filter(|p| std::path::Path::new(p).is_dir())
     };
     let add_image = move |result: Result<Image, String>| match result {
         Ok(image) => {
@@ -1758,14 +1808,13 @@ pub fn composer(
         }
         Err(message) => problem.set(Some(message)),
     };
-    let project_for_send = project.clone();
     let send: Rc<dyn Fn()> = Rc::new(move || {
         let text = draft.get_untracked();
         let attached = images.get_untracked();
         if (text.trim().is_empty() && attached.is_empty()) || conversation.busy.get_untracked() {
             return;
         }
-        let expanded = project_for_send
+        let expanded = project()
             .as_deref()
             .map(|cwd| mentions::expand(text.trim(), std::path::Path::new(cwd)))
             .filter(|e| e != text.trim());
@@ -1791,11 +1840,10 @@ pub fn composer(
             }
         });
     };
-    let project_for_files = project.clone();
     let on_change = move |value: &str| {
         draft.set(value.to_owned());
         if value.contains('@') && files.with_untracked(Option::is_none) {
-            if let Some(cwd) = project_for_files.clone() {
+            if let Some(cwd) = project() {
                 files.set(Some(Vec::new()));
                 spawn(async move {
                     if let Ok(list) = background(async move { mentions::list(std::path::Path::new(&cwd)) }).await {
@@ -1997,6 +2045,7 @@ pub fn composer(
                             .child(icon(ATTACH_ICON, 16.0).text_color(secondary())),
                     )
                     .child(view().flex_1())
+                    .child(bot.get().map(|id| project_picker(app, id, files)))
                     .child(model_pickers(app, target))
                     .child(dynamic(move || {
                         let send_on_press = send_on_press.clone();

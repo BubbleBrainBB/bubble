@@ -34,6 +34,27 @@ fn model_server() -> String {
             let body = String::from_utf8_lossy(&body);
             let events = if body.contains("\"tool_call_id\"") {
                 text_events("Commented.")
+            } else if body.contains("sorting what came in from GitHub") {
+                // The main bot, handing out what GitHub brought: the
+                // assignment goes to the bot whose role fits.
+                let request: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                let listing = request["messages"].as_array().and_then(|m| m.last()).and_then(|m| m["content"].as_str()).unwrap_or_default().to_owned();
+                let line = listing.lines().find(|l| l.starts_with("evt_")).unwrap_or_default();
+                if !line.contains("assign in acme/demo #7") || !line.ends_with("asked of the person by name") {
+                    text_events(&format!("Unexpected listing: {listing}"))
+                } else {
+                    let arguments = serde_json::json!({
+                        "event_id": line.split(" | ").next().unwrap_or_default(),
+                        "bot": "Set up",
+                        "title": "#7 Login breaks",
+                        "brief": "You were assigned issue #7 in acme/demo: \"Login breaks\". Read it with `gh issue view 7 --repo acme/demo --comments` and fix it."
+                    })
+                    .to_string();
+                    format!(
+                        "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"call_give\",\"function\":{{\"name\":\"give_event_to_bot\",\"arguments\":{}}}}}]}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n",
+                        json_string(&arguments)
+                    )
+                }
             } else if body.contains("empty passwords") {
                 let arguments = "{\"number\":7,\"body\":\"Handled empty passwords too.\"}";
                 format!(
@@ -127,6 +148,7 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
         std::env::set_var("BUBBLE_MEMORY_AUTO", "0");
         std::env::set_var("BUBBLE_GH", &gh);
         std::env::set_var("BUBBLE_GH_POLL_MS", "300");
+        std::env::set_var("BUBBLE_TRIAGE_QUIET_MS", "0");
     }
 
     // New work starts with the Manager; this test starts from a task already made.
@@ -151,9 +173,9 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
     app.press("label:Prepare for acme/demo").unwrap();
     app.wait_for("text:/^Agents work on new issues and reviews/").unwrap();
 
-    // The assignment becomes work proposed to the bot that looks after the
-    // repository, linked to the issue. No bot is made for it, and nothing
-    // starts until the person says so.
+    // The main bot hands the assignment to the bot whose role fits, as
+    // work proposed to it and linked to the issue. No bot is made for it,
+    // and nothing starts until the person says so.
     app.press("id:side-Set up").unwrap();
     app.wait_for_within("#7 Login breaks", long).unwrap();
     // The bot list says first what needs the person, and why.
@@ -166,6 +188,8 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
     app.press("Give it to the bot").unwrap();
     app.wait_for("From GitHub").unwrap();
     app.wait_for_within("Looking into it.", long).unwrap();
+    // The work is done in the repository's folder, which came with it.
+    app.wait_for("demo").unwrap();
     app.wait_for_gone("Give it to the bot", long).unwrap();
 
     // A new comment on the issue reaches the agent; its answer on GitHub

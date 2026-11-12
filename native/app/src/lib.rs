@@ -19,6 +19,7 @@ mod trace;
 mod transcript;
 mod triage;
 mod ui;
+mod worktree;
 
 use nsh_core::element::desktop::{set_title_bar, title_bar};
 use nsh_core::prelude::*;

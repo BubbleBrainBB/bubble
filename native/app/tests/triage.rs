@@ -15,7 +15,7 @@ fn events(body: &str) -> String {
     let messages = request["messages"].as_array().cloned().unwrap_or_default();
     let system = messages.first().and_then(|m| m["content"].as_str()).unwrap_or_default();
     let last = messages.last().cloned().unwrap_or_default();
-    if system.contains("You triage GitHub notifications") {
+    if system.contains("sorting what came in from GitHub") {
         if last["role"] == "tool" {
             return say("Gave the docs mention to the repository's bot.");
         }
@@ -23,6 +23,7 @@ fn events(body: &str) -> String {
         let id = listing.lines().find_map(|l| l.split(" | ").next().filter(|w| w.starts_with("evt_"))).unwrap_or_default();
         let arguments = serde_json::json!({
             "event_id": id,
+            "bot": "Set up",
             "title": "Fix the docs typo",
             "brief": "Someone mentioned you on acme/demo#9 about a typo in the docs. Read it with `gh issue view 9 --repo acme/demo` and fix it.",
             "start": false

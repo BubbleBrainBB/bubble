@@ -133,22 +133,21 @@ pub fn title_bar(app: AppState, route: Route) -> AnyElement {
     }
 }
 
-/// The form that makes a bot: what to call it, what it is for, and the
-/// folder it works in.
+/// The form that makes a bot: what to call it, its role, and what it is
+/// for. No folder: where a bot works comes with its work.
 pub fn new_bot(app: AppState) -> impl IntoElement {
     let name = signal(String::new());
+    let role = signal(String::new());
     let instruction = signal(String::new());
-    let folder = signal(None::<String>);
     let problem = signal(None::<String>);
     let create = Rc::new(move || {
-        let chosen = name.get_untracked();
-        if chosen.trim().is_empty() {
-            problem.set(Some("Give the bot a name.".into()));
-            return;
-        }
-        match app.create_bot(&chosen, &instruction.get_untracked(), folder.get_untracked().as_deref()) {
-            Some(id) => app.route.set(Route::Task(id)),
-            None => problem.set(Some("The bot could not be saved.".into())),
+        match app.create_bot(&name.get_untracked(), &role.get_untracked(), &instruction.get_untracked(), bubble_store::Origin::User) {
+            Ok(id) => {
+                // It says hello itself, in its own conversation.
+                crate::manager::greet(app, &id, None, "", None);
+                app.route.set(Route::Task(id));
+            }
+            Err(message) => problem.set(Some(message)),
         }
     });
     let field = |label: &'static str, hint: &'static str| {
@@ -188,44 +187,27 @@ pub fn new_bot(app: AppState) -> impl IntoElement {
                     .gap(px(4.0))
                     .child(text("New bot").text_size(px(HEADING)).font_weight(FontWeight::SEMIBOLD))
                     .child(
-                        text("A bot is an agent you keep: one conversation that goes on, in a folder of its own if it works with files.")
+                        text("A bot is a role on your team: one conversation that goes on, in whichever project its work is in.")
                             .text_size(px(BODY))
                             .text_color(muted()),
                     ),
             )
             .child(
-                view().gap(px(6.0)).child(field("Name", "What you call it; you can change it later")).child(
-                    input(name, "Docs", "bot-name").auto_focus(true).h(px(36.0)).on_submit(move |_: &str| on_enter()),
+                view().gap(px(6.0)).child(field("Name", "What you call it; no other bot has it")).child(
+                    input(name, "Ada", "bot-name").auto_focus(true).h(px(36.0)).on_submit(move |_: &str| on_enter()),
                 ),
             )
             .child(
                 view()
                     .gap(px(6.0))
-                    .child(field("What is it for?", "Its standing instructions, in your words; leave empty for a general helper"))
-                    .child(input(instruction, "Keep the documentation in step with the code.", "bot-instruction").multiline(true).min_h(px(84.0))),
+                    .child(field("Role", "A word or two, shown by its name; bots of one role share its work"))
+                    .child(input(role, "Developer", "bot-role").h(px(36.0))),
             )
             .child(
-                view().gap(px(6.0)).child(field("Folder", "The project it reads and changes; without one it only talks")).child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(10.0))
-                        .child(button("Choose a folder", move || {
-                            let picked = pick_paths(nsh_core::file_dialog::OpenDialog::folders().button_label("Use folder"));
-                            spawn(async move {
-                                if let Ok(Some(paths)) = picked.await {
-                                    folder.set(paths.into_iter().next().map(|p| p.display().to_string()));
-                                }
-                            });
-                        }))
-                        .child(
-                            text(move || folder.get().unwrap_or_else(|| "No folder".to_owned()))
-                                .flex_1()
-                                .text_size(px(SMALL))
-                                .text_color(muted())
-                                .number_of_lines(1),
-                        ),
-                ),
+                view()
+                    .gap(px(6.0))
+                    .child(field("What is it for?", "Its standing instructions, in your words; leave empty for a general helper"))
+                    .child(input(instruction, "Fix bugs and build features; run the tests before saying it is done.", "bot-instruction").multiline(true).min_h(px(84.0))),
             )
             .child(dynamic(move || problem.get().map(|message| text(message).text_size(px(SMALL)).text_color(failed()))))
             .child(
@@ -373,6 +355,7 @@ pub fn home(app: AppState) -> impl IntoElement {
             "What should we work on?",
             "Tell Bubble what needs doing; it hands the work to your bots.",
         ))
+        .child(digest(app))
         .child(away_row(app))
         .child(composer(app, conversation, Rc::new(|| format!("Message {}", crate::manager::MAIN_BOT)), ComposerFor::Manager))
 }
@@ -387,6 +370,97 @@ fn outcome(disposition: &str) -> &'static str {
         "ignored" => "needed nothing",
         _ => "recorded",
     }
+}
+
+/// Everything that waits for the person's yes, in one place: what it is,
+/// which bot would take it, and one answer for all of it or one each.
+fn digest(app: AppState) -> impl IntoElement {
+    const SHOWN: usize = 8;
+    let count = move || app.proposed.with(Vec::len);
+    let line = move |ticket: &bubble_store::Ticket| {
+        let bot = app.tasks.with(|tasks| tasks.iter().find(|t| t.task.id == ticket.task_id).map(|t| t.task.title.clone())).unwrap_or_default();
+        match &ticket.asker {
+            Some(asker) => format!("{asker}, for {bot}"),
+            None => format!("For {bot}"),
+        }
+    };
+    when(move || count() > 0, move || {
+        view()
+            .w_full()
+            .max_w(px(READING_WIDTH - 48.0))
+            .mx(auto())
+            .px(px(24.0))
+            .pt(px(8.0))
+            .test_id("digest")
+            .child(
+                view()
+                    .p(px(12.0))
+                    .gap(px(8.0))
+                    .rounded(px(12.0))
+                    .border(px(LINE))
+                    .border_color(border())
+                    .bg(pane())
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                text(move || match count() {
+                                    1 => "1 thing wants your yes".to_owned(),
+                                    n => format!("{n} things want your yes"),
+                                })
+                                .flex_1()
+                                .text_size(px(BODY))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(ink()),
+                            )
+                            .child(when(move || count() > 1, move || {
+                                view()
+                                    .flex_row()
+                                    .gap(px(8.0))
+                                    .child(primary_button("Give all to bots", move || {
+                                        for ticket in app.proposed.get_untracked() {
+                                            crate::manager::accept_ticket(app, &ticket.id);
+                                        }
+                                    }))
+                                    .child(button("Dismiss all", move || {
+                                        for ticket in app.proposed.get_untracked() {
+                                            crate::manager::dismiss_ticket(app, &ticket.id);
+                                        }
+                                    }))
+                            })),
+                    )
+                    .child(each(
+                        move || app.proposed.get().into_iter().take(SHOWN).collect::<Vec<_>>(),
+                        |ticket: &bubble_store::Ticket| ticket.id.clone(),
+                        move |ticket, _| {
+                            let id = ticket.get_untracked().id;
+                            let (accept, title) = (id.clone(), ticket.get_untracked().title);
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .pt(px(8.0))
+                                .border_t(px(LINE))
+                                .border_color(hairline())
+                                .child(
+                                    view()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .gap(px(2.0))
+                                        .child(text(move || ticket.get().title).text_size(px(BODY)).text_color(ink()).number_of_lines(1))
+                                        .child(text(move || line(&ticket.get())).text_size(px(SMALL)).text_color(muted()).number_of_lines(1)),
+                                )
+                                .child(button("Give", move || crate::manager::accept_ticket(app, &accept)).label(format!("Give: {title}")))
+                                .child(button("Dismiss", move || crate::manager::dismiss_ticket(app, &id)).label(format!("Dismiss: {title}")))
+                        },
+                    ))
+                    .child(when(move || count() > SHOWN, move || {
+                        text(move || format!("And {} more.", count().saturating_sub(SHOWN))).text_size(px(SMALL)).text_color(muted())
+                    })),
+            )
+    })
 }
 
 /// "While you were away": what GitHub brought since the person last wrote
@@ -907,6 +981,41 @@ pub fn settings(app: AppState) -> impl IntoElement {
                             .child(step_button("+", "More bots at once", move || {
                                 app.set_max_runs(app.max_runs.get_untracked() + 1)
                             })),
+                    ),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(16.0))
+                    .child(
+                        view()
+                            .flex_1()
+                            .gap(px(2.0))
+                            .child(text("Bots of one role").text_size(px(BODY)).text_color(ink()))
+                            .child(
+                                text("When a bot is busy, new work goes to a copy of it, up to this many; beyond that it waits")
+                                    .text_size(px(SMALL))
+                                    .text_color(muted()),
+                            ),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .rounded(px(8.0))
+                            .border(px(LINE))
+                            .border_color(border())
+                            .child(step_button("−", "Fewer bots of one role", move || app.set_max_role_bots(app.max_role_bots().saturating_sub(1))))
+                            .child(
+                                text(move || {
+                                    app.task_revision.get();
+                                    app.max_role_bots().to_string()
+                                })
+                                .min_w(px(24.0))
+                                .text_size(px(BODY)),
+                            )
+                            .child(step_button("+", "More bots of one role", move || app.set_max_role_bots(app.max_role_bots() + 1))),
                     ),
             )
             .child(reasoning_settings(app))

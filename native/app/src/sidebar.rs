@@ -230,11 +230,31 @@ fn bot_row(app: AppState, bot: ReadSignal<TaskSummary>) -> impl IntoElement {
                 .min_w(px(0.0))
                 .gap(px(2.0))
                 .child(
-                    text(move || bot.get().task.title)
-                        .text_size(px(BODY))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(ink())
-                        .number_of_lines(1),
+                    // Its name, and its role on the team beside it.
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            text(move || bot.get().task.title)
+                                .flex_shrink(1.0)
+                                .min_w(px(0.0))
+                                .text_size(px(BODY))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(ink())
+                                .number_of_lines(1),
+                        )
+                        .child({
+                            let id = id.clone();
+                            text(move || {
+                                app.task_revision.get();
+                                app.bot_role(&id)
+                            })
+                            .flex_shrink_0()
+                            .text_size(px(SMALL))
+                            .text_color(muted())
+                            .number_of_lines(1)
+                        }),
                 )
                 .child(
                     text(move || preview_of(app, &bot.get()))

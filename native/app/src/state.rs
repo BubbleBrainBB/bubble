@@ -52,11 +52,16 @@ fn bot_face_key(bot_id: &str) -> String {
     format!("bot_face:{bot_id}")
 }
 
-/// Set when a bot moved to another folder: its next message starts a
-/// fresh part of the conversation there.
-fn bot_moved_key(bot_id: &str) -> String {
-    format!("bot_moved:{bot_id}")
+/// A bot's role, in a word or two: what it is on the team ("Developer").
+fn bot_role_key(bot_id: &str) -> String {
+    format!("bot_role:{bot_id}")
 }
+
+/// The project folders the bots have worked in, newest first, as JSON.
+const PROJECTS: &str = "projects";
+/// How many bots of one role there may be before new work waits its turn.
+pub const MAX_ROLE_BOTS: &str = "max_role_bots";
+pub const DEFAULT_MAX_ROLE_BOTS: u32 = 3;
 
 fn bot_instruction_key(bot_id: &str) -> String {
     format!("bot_instruction:{bot_id}")
@@ -755,12 +760,94 @@ impl AppState {
         self.with_store(|s| s.set_setting(BOTS_SEEN, json.as_deref()));
     }
 
-    /// Makes a bot: a name, what it is for (its standing instructions),
-    /// and the project folder it works in, if any.
-    pub fn create_bot(&self, name: &str, instruction: &str, project: Option<&str>) -> Option<String> {
-        let id = self.create_task(name.trim(), project)?;
-        self.set_bot_instruction(&id, instruction);
+    /// Makes a bot: a name no other bot has, its role in a word or two, and
+    /// what it is for (its standing instructions). A bot is a role, not a
+    /// folder: where it works comes with the work.
+    pub fn create_bot(&self, name: &str, role: &str, instruction: &str, origin: Origin) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("A bot needs a name.".into());
+        }
+        if self.name_taken(name, None) {
+            return Err(format!("A bot called {name} exists. Choose another name."));
+        }
+        let task = self
+            .with_store(|s| s.create_task(NewTask { title: name, project_cwd: None, origin }))
+            .ok_or_else(|| "The bot could not be saved.".to_owned())?;
+        self.set_bot_role(&task.id, role);
+        self.set_bot_instruction(&task.id, instruction);
+        self.refresh_tasks();
+        Ok(task.id)
+    }
+
+    /// Whether a bot at work (not `except`) already goes by `name`.
+    pub fn name_taken(&self, name: &str, except: Option<&str>) -> bool {
+        let name = name.trim().to_lowercase();
+        self.bots_untracked().iter().any(|bot| Some(bot.task.id.as_str()) != except && bot.task.title.trim().to_lowercase() == name)
+    }
+
+    /// A copy of a bot: the same role and instructions under the next free
+    /// name ("Developer 2"), with a conversation and notes of its own.
+    pub fn duplicate_bot(&self, bot_id: &str) -> Option<String> {
+        let original = self.with_store(|s| s.get_task(bot_id)).flatten()?;
+        // "Developer 2" copies to "Developer 3", not "Developer 2 2".
+        let base = match original.title.rsplit_once(' ') {
+            Some((base, number)) if number.parse::<u32>().is_ok() => base.to_owned(),
+            _ => original.title.clone(),
+        };
+        let name = (2..).map(|n| format!("{base} {n}")).find(|name| !self.name_taken(name, None))?;
+        let id = self.create_bot(&name, &self.bot_role(bot_id), &self.bot_instruction(bot_id), original.origin).ok()?;
+        for key in [task_model_key, task_thinking_key, task_access_key] {
+            if let Some(value) = self.with_store(|s| s.setting(&key(bot_id))).flatten() {
+                self.with_store(|s| s.set_setting(&key(&id), Some(&value)));
+            }
+        }
         Some(id)
+    }
+
+    /// A bot's role, in a word or two.
+    pub fn bot_role(&self, bot_id: &str) -> String {
+        self.with_store(|s| s.setting(&bot_role_key(bot_id))).flatten().unwrap_or_default()
+    }
+
+    pub fn set_bot_role(&self, bot_id: &str, role: &str) {
+        let role: String = role.trim().chars().take(24).collect();
+        self.with_store(|s| s.set_setting(&bot_role_key(bot_id), (!role.is_empty()).then_some(role.as_str())));
+        self.task_revision.update(|v| *v += 1);
+    }
+
+    /// How many bots of one role there may be.
+    pub fn max_role_bots(&self) -> u32 {
+        self.with_store(|s| s.setting(MAX_ROLE_BOTS)).flatten().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MAX_ROLE_BOTS).clamp(1, 12)
+    }
+
+    pub fn set_max_role_bots(&self, value: u32) {
+        self.with_store(|s| s.set_setting(MAX_ROLE_BOTS, Some(&value.clamp(1, 12).to_string())));
+        self.task_revision.update(|v| *v += 1);
+    }
+
+    /// The folder a bot works in now, if it is there.
+    pub fn bot_project(&self, bot_id: &str) -> Option<String> {
+        self.with_store(|s| s.get_task(bot_id)).flatten().and_then(|t| t.project_cwd)
+    }
+
+    /// The project folders known beyond the bots' current ones: every one
+    /// a bot was sent to.
+    fn remembered_projects(&self) -> Vec<String> {
+        self.with_store(|s| s.setting(PROJECTS)).flatten().and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default()
+    }
+
+    /// Keeps `folder` among the known projects, newest first.
+    pub fn remember_project(&self, folder: &str) {
+        let mut known = self.remembered_projects();
+        if known.first().map(String::as_str) == Some(folder) {
+            return;
+        }
+        known.retain(|p| p != folder);
+        known.insert(0, folder.to_owned());
+        known.truncate(40);
+        let json = serde_json::to_string(&known).ok();
+        self.with_store(|s| s.set_setting(PROJECTS, json.as_deref()));
     }
 
     /// Who sent the message `message_id` shows, when it came from a bot:
@@ -793,23 +880,32 @@ impl AppState {
         self.task_revision.update(|v| *v += 1);
     }
 
-    pub fn rename_bot(&self, bot_id: &str, name: &str) {
+    /// Renames a bot, unless another bot has the name.
+    pub fn rename_bot(&self, bot_id: &str, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("A bot needs a name.".into());
+        }
+        if self.name_taken(name, Some(bot_id)) {
+            return Err(format!("A bot called {name} exists. Choose another name."));
+        }
         self.with_store(|s| s.rename_task(bot_id, name));
         self.refresh_tasks();
         self.task_revision.update(|v| *v += 1);
+        Ok(())
     }
 
-    /// Moves a bot to another folder, or to none. Its conversation goes on
-    /// in a fresh part there: the agent's session belongs to a folder.
-    pub fn move_bot(&self, bot_id: &str, folder: Option<&str>) {
-        let before = self.with_store(|s| s.get_task(bot_id)).flatten().and_then(|t| t.project_cwd);
-        if before.as_deref() == folder {
+    /// Sends a bot to work in another folder, or in none. Its conversation
+    /// goes on: the folder belongs to the work, a turn at a time.
+    pub fn set_bot_project(&self, bot_id: &str, folder: Option<&str>) {
+        let folder = folder.map(|f| f.trim_end_matches('/')).filter(|f| !f.is_empty());
+        if let Some(folder) = folder {
+            self.remember_project(folder);
+        }
+        if self.bot_project(bot_id).as_deref() == folder {
             return;
         }
-        self.with_store(|s| {
-            s.set_task_project(bot_id, folder)?;
-            s.set_setting(&bot_moved_key(bot_id), Some(folder.unwrap_or("no folder")))
-        });
+        self.with_store(|s| s.set_task_project(bot_id, folder));
         self.refresh_tasks();
         self.task_revision.update(|v| *v += 1);
     }
@@ -975,12 +1071,13 @@ impl AppState {
 
     /// The projects tasks belong to, most recently active first.
     pub fn projects(&self) -> Vec<String> {
-        projects_of(self.tasks.get())
+        self.task_revision.get();
+        projects_of(self.tasks.get(), self.remembered_projects())
     }
 
     /// `projects`, without subscribing to the task list.
     pub fn projects_untracked(&self) -> Vec<String> {
-        projects_of(self.tasks.get_untracked())
+        projects_of(self.tasks.get_untracked(), self.remembered_projects())
     }
 
     /// The Manager's conversation, made once and kept by the app's root.
@@ -1123,9 +1220,11 @@ fn appearance_of(value: Option<&str>) -> nsh_core::platform::Appearance {
     }
 }
 
-fn projects_of(mut tasks: Vec<TaskSummary>) -> Vec<String> {
+/// The known project folders: the ones bots were sent to, newest first,
+/// then the ones conversations are in.
+fn projects_of(mut tasks: Vec<TaskSummary>, remembered: Vec<String>) -> Vec<String> {
     tasks.sort_by(|a, b| b.task.updated_at.cmp(&a.task.updated_at));
-    let mut projects: Vec<String> = Vec::new();
+    let mut projects: Vec<String> = remembered;
     for task in tasks {
         if let Some(cwd) = task.task.project_cwd {
             if !projects.contains(&cwd) {
@@ -1444,6 +1543,12 @@ impl Conversation {
         });
     }
 
+    /// How much stands between this bot and new work: its turn in
+    /// progress, and what waits behind it.
+    pub fn waiting(&self) -> usize {
+        usize::from(self.busy.get_untracked()) + self.inbox.with(|inbox| inbox.len())
+    }
+
     /// Takes a message from another bot: starts on it now, or keeps it
     /// until the running turn ends. `Ok(true)`: a turn started.
     pub fn receive(&self, app: AppState, incoming: Incoming) -> Result<bool, String> {
@@ -1452,6 +1557,15 @@ impl Conversation {
             return Ok(false);
         }
         self.take(app, incoming)
+    }
+
+    /// What waits that wants doing first: the most pressing, and among
+    /// equals the one that came first.
+    fn next_waiting(&self) -> Option<Incoming> {
+        self.inbox.with(|inbox| {
+            let first = inbox.iter().enumerate().min_by_key(|(index, incoming)| (incoming.priority, *index)).map(|(index, _)| index)?;
+            inbox.remove(first)
+        })
     }
 
     fn take(&self, app: AppState, incoming: Incoming) -> Result<bool, String> {
@@ -1470,12 +1584,17 @@ impl Conversation {
             }
             (Some(_), _) => {}
         }
+        // The work says where it is: the bot goes there for it.
+        if let (Some(id), Some(project), None) = (self.task_id.get(), &incoming.project, &incoming.report) {
+            app.set_bot_project(&id, Some(project));
+        }
         let label = incoming.from.name(app);
         // What GitHub brings shows as its own kind of message.
         let role = if incoming.from == Sender::Github { MessageRole::External } else { MessageRole::System };
         // The model is told who it is from; the person sees that as a label.
         let content = ChatMessage::user(manager::framed(app, &incoming));
-        let started = self.post_to(app, incoming.text, role, None, Some(content), Some(label));
+        let shown = incoming.shown.clone().unwrap_or(incoming.text);
+        let started = self.post_to(app, shown, role, None, Some(content), Some(label));
         if started.is_err() {
             self.owes.replace(before);
         }
@@ -1548,7 +1667,7 @@ impl Conversation {
                     None => Sender::Main,
                 };
                 if let Some(asker) = &owed.to {
-                    let report = Incoming { from: me, text, report: Some(outcome), ticket: None };
+                    let report = Incoming::report(me, text, outcome);
                     if let Err(error) = manager::deliver(app, asker, report) {
                         log::warn!("a report could not be delivered: {error}");
                     }
@@ -1556,7 +1675,7 @@ impl Conversation {
             }
         }
         if !self.busy.get_untracked() {
-            if let Some(next) = self.inbox.with(|inbox| inbox.pop_front()) {
+            if let Some(next) = self.next_waiting() {
                 if let Err(error) = self.take(app, next) {
                     log::warn!("a waiting message could not be taken up: {error}");
                 }
@@ -1587,12 +1706,6 @@ impl Conversation {
             return Err("The agent is still on its previous turn; send this when it finishes.".into());
         }
         let task_id = self.task_id.get();
-        // A bot that moved starts a fresh part of its conversation there.
-        let moved = task_id.as_ref().and_then(|id| app.with_store(|s| s.setting(&bot_moved_key(id))).flatten());
-        let fresh = fresh.or_else(|| moved.as_ref().map(|folder| format!("moved to {}", crate::ui::project_name(folder))));
-        if let (Some(id), Some(_)) = (&task_id, &moved) {
-            app.with_store(|s| s.set_setting(&bot_moved_key(id), None));
-        }
         let model_reference = match &task_id {
             Some(id) => app.task_model_of(id),
             None => app.model_for(RunRole::Manager),
@@ -1609,7 +1722,7 @@ impl Conversation {
             match &task_id {
                 None => Ok((s.manager_run(Some(&model_reference))?, None)),
                 Some(task_id) => {
-                    let task = s.get_task(task_id)?.ok_or_else(|| anyhow!("the task is gone"))?;
+                    let task = s.get_task(task_id)?.ok_or_else(|| anyhow!("the bot is gone"))?;
                     let runs = s.runs_for_task(task_id)?;
                     // A bot's conversation is one: a failed turn does not start another.
                     let reusable = runs.last().filter(|_| fresh.is_none()).cloned();
@@ -1620,7 +1733,10 @@ impl Conversation {
                                 task_id: Some(task_id),
                                 role: RunRole::Task,
                                 model: Some(&model_reference),
-                                cwd: task.project_cwd.as_deref(),
+                                // Its session lives in the app's own
+                                // folder: the bot goes from project to
+                                // project, its conversation stays one.
+                                cwd: None,
                                 status: RunStatus::Queued,
                             })?;
                             if let Some(cause) = &fresh {
@@ -1746,7 +1862,7 @@ impl Conversation {
         let (system_prompt, append_system_prompt, cwd, host_tools, agent_name) = match &task_id {
             None => {
                 // The main bot reads the team's notes and keeps them.
-                let notes = crate::memory::prompt(&Sender::Main);
+                let notes = crate::memory::prompt(&Sender::Main, None);
                 let prompt = if notes.is_empty() { manager::PROMPT.to_owned() } else { format!("{}\n\n{notes}", manager::PROMPT) };
                 let mut tools = manager::specs();
                 tools.extend(crate::memory::specs());
@@ -1755,8 +1871,22 @@ impl Conversation {
             Some(id) => {
                 let task = app.with_store(|s| s.get_task(id)).flatten();
                 let title = task.as_ref().map(|t| t.title.clone()).unwrap_or_default();
+                // Where the work at hand is: the folder its ticket named,
+                // or the one the person chose.
                 let project = task.and_then(|t| t.project_cwd);
-                let cwd = project.as_deref().map(PathBuf::from).filter(|p| p.is_dir());
+                // A second bot in one repository works in a checkout of
+                // its own, so neither changes files under the other.
+                let place = project.as_deref().map(PathBuf::from).filter(|p| p.is_dir()).map(|folder| {
+                    let at_work: Vec<String> = app
+                        .bots_untracked()
+                        .into_iter()
+                        .filter(|bot| matches!(bot.state, TaskState::Running | TaskState::NeedsYou))
+                        .map(|bot| bot.task.id)
+                        .collect();
+                    crate::worktree::place_for(app, id, &title, &folder, &at_work)
+                });
+                let apart = place.as_ref().and_then(|place| place.note.clone());
+                let cwd = place.map(|place| place.folder);
                 let mut tools = if cwd.is_some() { github::task_tools(app, project.as_deref()) } else { Vec::new() };
                 tools.extend(manager::bot_specs());
                 tools.extend(crate::automations::specs());
@@ -1765,10 +1895,15 @@ impl Conversation {
                 let instruction = app.bot_instruction(id);
                 // The agent goes by the bot's name, not the main bot's.
                 let name = Some(title.clone()).filter(|t| !t.trim().is_empty());
-                let mut prompt = task_prompt(&title, &instruction, project.as_deref(), cwd.is_some(), full);
+                let here = cwd.as_ref().map(|folder| folder.to_string_lossy().into_owned()).or_else(|| project.clone());
+                let mut prompt = task_prompt(&title, &app.bot_role(id), &instruction, here.as_deref(), cwd.is_some(), full);
+                if let Some(apart) = apart {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&apart);
+                }
                 prompt.push_str("\n\n");
                 prompt.push_str(crate::memory::GUIDANCE);
-                let notes = crate::memory::prompt(&Sender::Bot(id.clone()));
+                let notes = crate::memory::prompt(&Sender::Bot(id.clone()), project.as_deref().filter(|_| cwd.is_some()));
                 if !notes.is_empty() {
                     prompt.push_str("\n\n");
                     prompt.push_str(&notes);
@@ -1800,6 +1935,10 @@ impl Conversation {
                 (Some(_), None) => Some(TALKING_TOOLS.iter().map(|tool| (*tool).to_owned()).collect()),
                 (Some(_), Some(_)) => None,
             },
+            // A conversation's session stays in one place for its whole
+            // life (the folder an earlier run was made in, else the app's
+            // own); each turn works where its work is.
+            home: run.cwd.as_deref().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(scratch_folder).to_string_lossy().into_owned(),
             cwd: cwd.unwrap_or_else(scratch_folder).to_string_lossy().into_owned(),
             text,
             pictures,
@@ -2214,11 +2353,12 @@ fn prompt_of(messages: &[Message]) -> (String, Vec<bubble_host::Picture>, Option
     (text, pictures, engine::recap_of(&history_of(&messages[..index])))
 }
 
-fn task_prompt(name: &str, instruction: &str, project: Option<&str>, has_tools: bool, full: bool) -> String {
+fn task_prompt(name: &str, role: &str, instruction: &str, project: Option<&str>, has_tools: bool, full: bool) -> String {
     let place = match (project, has_tools) {
         (Some(path), true) => format!(
-            "You work in the project folder {path}. Use the tools to read, search, change files and run commands there; \
-             relative paths start in that folder. {}",
+            "Right now you work in the project folder {path}: the work at hand is there. Use the tools to read, search, change \
+             files and run commands there; relative paths start in that folder. You are not tied to it: other work may come \
+             with another folder, and what you did in earlier projects stays in this conversation. {}",
             if full {
                 "The person gave this bot full access: changes and commands go ahead without asking. \
                  Say what a risky step will do before you take it, prefer reversible steps, and never push, \
@@ -2228,14 +2368,21 @@ fn task_prompt(name: &str, instruction: &str, project: Option<&str>, has_tools: 
             }
         ),
         (Some(path), false) => format!("The project folder {path} cannot be found, so you have no tools; say what you would do."),
-        (None, _) => "You have no project folder, so no file or command tools; say what you would do and what you need.".to_owned(),
+        (None, _) => "The work at hand names no project folder, so you have no file or command tools now; when work needs \
+                      files, say which folder it is in and what you need."
+            .to_owned(),
     };
     let purpose = match instruction.trim() {
         "" => String::new(),
-        instruction => format!(" What the person set you up for:\n{instruction}\n"),
+        instruction => format!(" What you are for:\n{instruction}\n"),
+    };
+    let role = match role.trim() {
+        "" => String::new(),
+        role => format!(" Your role on the team: {role}."),
     };
     format!(
-        "You are \"{name}\", one of the person's Bubble bots: a long-lived agent with one continuing conversation.{purpose} {place} \
+        "You are \"{name}\", one of the person's Bubble bots: a long-lived member of their team with one continuing \
+         conversation.{role}{purpose} {place} \
          Messages may come from the person, from the main bot, which coordinates the bots, or from GitHub (reviews, comments, checks). \
          Work until what was asked is done or you need the person, then say briefly what you did and what is left. \
          Answer in the language the person writes in.\n\n{}",

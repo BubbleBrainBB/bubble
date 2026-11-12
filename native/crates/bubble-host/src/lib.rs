@@ -66,6 +66,8 @@ pub struct Picture {
 #[derive(Clone, Debug, Default)]
 pub struct TurnRequest {
     pub session_id: String,
+    /// The folder this turn works in; the session's own when `None`.
+    pub cwd: Option<String>,
     pub text: String,
     pub pictures: Vec<Picture>,
     /// "provider:model"; the configured default when `None`.
@@ -391,6 +393,9 @@ impl Host {
             "hostTools": turn.host_tools,
         });
         let fields = params.as_object_mut().expect("an object");
+        if let Some(cwd) = turn.cwd {
+            fields.insert("cwd".into(), json!(cwd));
+        }
         if let Some(model) = turn.model {
             fields.insert("model".into(), json!(model));
         }

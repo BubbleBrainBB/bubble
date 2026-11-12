@@ -17,7 +17,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 
 /// The schema version this build writes (`PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {
@@ -328,6 +328,10 @@ pub struct Ticket {
     pub status: TicketStatus,
     /// What the bot answered, cut to a few thousand characters.
     pub report: Option<String>,
+    /// The folder the work is done in, when it has one.
+    pub project: Option<String>,
+    /// How soon it wants doing: 0 first, 1 as it comes, 2 when there is time.
+    pub priority: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -340,6 +344,8 @@ pub struct NewTicket<'a> {
     pub asker: Option<&'a str>,
     pub explicit: bool,
     pub status: TicketStatus,
+    pub project: Option<&'a str>,
+    pub priority: i64,
 }
 
 fn ticket_from_row(row: &Row<'_>) -> rusqlite::Result<Ticket> {
@@ -356,6 +362,8 @@ fn ticket_from_row(row: &Row<'_>) -> rusqlite::Result<Ticket> {
         explicit: strength == "explicit",
         status: TicketStatus::parse(&status),
         report: row.get("report")?,
+        project: row.get("project")?,
+        priority: row.get("priority")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -611,8 +619,8 @@ impl Store {
         let id = new_id("ticket");
         let now = now_ms();
         self.conn().execute(
-            "INSERT INTO tickets (id, task_id, title, text, origin, asker, strength, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            "INSERT INTO tickets (id, task_id, title, text, origin, asker, strength, status, created_at, updated_at, project, priority)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, ?11)",
             params![
                 id,
                 new.task_id,
@@ -622,7 +630,9 @@ impl Store {
                 new.asker,
                 if new.explicit { "explicit" } else { "inferred" },
                 new.status.as_str(),
-                now
+                now,
+                new.project,
+                new.priority
             ],
         )?;
         self.get_ticket(&id)?.ok_or_else(|| anyhow::anyhow!("the ticket was not saved"))
@@ -641,6 +651,12 @@ impl Store {
         Ok(())
     }
 
+    /// Gives a ticket to another bot: the one free to take it.
+    pub fn set_ticket_task(&self, id: &str, task_id: &str) -> Result<()> {
+        self.conn().execute("UPDATE tickets SET task_id = ?2, updated_at = ?3 WHERE id = ?1", params![id, task_id, now_ms()])?;
+        Ok(())
+    }
+
     /// A bot's tickets, newest first.
     pub fn tickets_for_task(&self, task_id: &str, limit: usize) -> Result<Vec<Ticket>> {
         let conn = self.conn();
@@ -652,7 +668,7 @@ impl Store {
     /// The tickets that wait for the person's yes, oldest first.
     pub fn proposed_tickets(&self) -> Result<Vec<Ticket>> {
         let conn = self.conn();
-        let mut statement = conn.prepare("SELECT * FROM tickets WHERE status = 'proposed' ORDER BY created_at ASC, rowid ASC")?;
+        let mut statement = conn.prepare("SELECT * FROM tickets WHERE status = 'proposed' ORDER BY priority ASC, created_at ASC, rowid ASC")?;
         let rows = statement.query_map([], ticket_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -666,7 +682,7 @@ impl Store {
         )?)
     }
 
-    /// Moves a bot to another folder (or to none).
+    /// The folder a bot works in now (or none): it follows the work.
     pub fn set_task_project(&self, id: &str, project_cwd: Option<&str>) -> Result<()> {
         self.conn().execute("UPDATE tasks SET project_cwd = ?2, updated_at = ?3 WHERE id = ?1", params![id, project_cwd, now_ms()])?;
         Ok(())
@@ -950,6 +966,16 @@ impl Store {
             params![new_id("link"), task_id, kind, repo, number],
         )?;
         Ok(task_id.to_owned())
+    }
+
+    /// Gives one bot's links to an issue or pull request to another: the
+    /// work on it moved, and what happens there follows it.
+    pub fn move_links(&self, from: &str, to: &str, repo: &str, number: i64) -> Result<()> {
+        self.conn().execute(
+            "UPDATE task_links SET task_id = ?2 WHERE task_id = ?1 AND repo = ?3 AND number = ?4",
+            params![from, to, repo, number],
+        )?;
+        Ok(())
     }
 
     pub fn links_for_task(&self, task_id: &str) -> Result<Vec<Link>> {
@@ -1493,6 +1519,17 @@ fn migrate(conn: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    if version < 6 {
+        // Work carries the folder it is done in, and how soon it wants doing
+        // (0 first, 1 as it comes, 2 when there is time).
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE tickets ADD COLUMN project TEXT;
+             ALTER TABLE tickets ADD COLUMN priority INTEGER NOT NULL DEFAULT 1;
+             PRAGMA user_version = 6;
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -1839,8 +1876,11 @@ mod ticket_tests {
                 asker: None,
                 explicit: true,
                 status: TicketStatus::Accepted,
+                project: Some("/work/docs"),
+                priority: 1,
             })
             .unwrap();
+        assert_eq!((asked.project.as_deref(), asked.priority), (Some("/work/docs"), 1));
         let inferred = store
             .create_ticket(NewTicket {
                 task_id: &bot.id,
@@ -1850,6 +1890,8 @@ mod ticket_tests {
                 asker: Some("acme/demo#12"),
                 explicit: false,
                 status: TicketStatus::Proposed,
+                project: None,
+                priority: 0,
             })
             .unwrap();
         assert!(asked.explicit && !inferred.explicit);

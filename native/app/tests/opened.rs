@@ -17,7 +17,7 @@ fn events(body: &str) -> String {
     let messages = request["messages"].as_array().cloned().unwrap_or_default();
     let system = messages.first().and_then(|m| m["content"].as_str()).unwrap_or_default();
     let last = messages.last().cloned().unwrap_or_default();
-    if system.contains("You triage GitHub notifications") {
+    if system.contains("sorting what came in from GitHub") {
         if last["role"] == "tool" {
             return say("Gave the crash to the repository's bot.");
         }
@@ -30,6 +30,7 @@ fn events(body: &str) -> String {
         let id = lines[0].split(" | ").next().unwrap_or_default();
         let arguments = serde_json::json!({
             "event_id": id,
+            "bot": "Set up",
             "title": "Fix the crash on start",
             "brief": "@alice opened acme/demo#12: the app crashes on start. Read it with `gh issue view 12 --repo acme/demo` and fix it.",
             "start": false

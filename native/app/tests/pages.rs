@@ -11,7 +11,28 @@ use bubble_store::{Lifecycle, NewTask, Origin, Store};
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 
-fn events(_body: &str) -> String {
+fn events(body: &str) -> String {
+    let request: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let messages = request["messages"].as_array().cloned().unwrap_or_default();
+    let system = messages.first().and_then(|m| m["content"].as_str()).unwrap_or_default();
+    let last = messages.last().cloned().unwrap_or_default();
+    let said = last["content"].as_str().unwrap_or_default();
+    // The main bot hands a pull request to the bot that fits, linked to it.
+    if system.contains("the person's main bot") {
+        if last["role"] == "tool" {
+            return say("Gave pull request 7 to Set up.");
+        }
+        if let Some(rest) = said.split("in the project folder ").nth(1).filter(|_| said.contains("pull request #7")) {
+            let project = rest.split(": link it").next().unwrap_or_default();
+            let arguments = serde_json::json!({
+                "bot": "Set up",
+                "message": "Look after pull request #7 in acme/demo: read it and say what it needs.",
+                "project": project,
+                "pull_request": 7
+            });
+            return call("message_bot", &arguments.to_string());
+        }
+    }
     say("On it.")
 }
 
@@ -147,9 +168,14 @@ fn the_sidebar_pages_work() {
     if let Err(e) = app.wait_for_within("text:#7 Add docs", long) {
         panic!("{e}\nTEXTS: {:?}", app.screen().texts());
     }
-    app.press("Give to its bot").unwrap();
-    app.wait_for("PR #7").unwrap();
+    // The main bot is the one who hands work out: it gives the pull
+    // request to the bot that fits, linked so reviews and checks reach it.
+    app.press("Give to a bot").unwrap();
+    app.wait_for_within("Gave pull request 7 to Set up.", long).unwrap();
+    app.press("id:side-Set up").unwrap();
+    app.wait_for_within("PR #7", long).unwrap();
     app.wait_for("text:Message Set up").unwrap();
+    app.wait_for_within("On it.", long).unwrap();
     app.press("id:nav-settings").unwrap();
     app.press("id:nav-pull-requests").unwrap();
     app.wait_for_within("Open bot", long).unwrap();
@@ -198,18 +224,26 @@ fn the_sidebar_pages_work() {
     app.press("label:Found in Set up").unwrap();
     app.wait_for("text:Message Set up").unwrap();
 
-    // A bot is made with a name, what it is for, and the folder it works in.
+    // A bot is a role: made with a name no other bot has, its role, and
+    // what it is for. No folder: that comes with its work.
     app.press("id:nav-new-bot").unwrap();
+    app.type_text("id:bot-name", "Set up").unwrap();
+    app.press("Create bot").unwrap();
+    app.wait_for("A bot called Set up exists. Choose another name.").unwrap();
+    app.clear("id:bot-name").unwrap();
     app.type_text("id:bot-name", "Docs").unwrap();
+    app.type_text("id:bot-role", "Writer").unwrap();
     app.type_text("id:bot-instruction", "Keep the docs in step with the code").unwrap();
-    app.on_pick_paths(vec![project.clone()]).unwrap();
-    app.press("Choose a folder").unwrap();
-    app.wait_for(&project.display().to_string()).unwrap();
+    assert!(!app.shows("Choose a folder"), "a bot is not made in a folder");
     app.press("Create bot").unwrap();
     app.wait_for("id:side-Docs").unwrap();
-    app.wait_for("text:No messages yet").unwrap();
-    // Its conversation is open, named after it.
+    // Its conversation is open, named after it, and it says hello itself.
     app.wait_for("text:Message Docs").unwrap();
+    app.wait_for("Made by you.").unwrap();
+    app.wait_for_within("On it.", long).unwrap();
+    // Its role shows by its name, and it works in no folder until work names one.
+    app.wait_for("Writer").unwrap();
+    app.wait_for("No folder").unwrap();
 
     std::fs::remove_dir_all(&root).ok();
 }

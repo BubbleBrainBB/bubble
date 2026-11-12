@@ -127,23 +127,26 @@ fn update(app: AppState, id: &str, f: impl FnOnce(&mut Automation)) {
 /// person asked for when they wrote the routine.
 pub fn run_now(app: AppState, id: &str) {
     let Some(automation) = app.automations.with_untracked(|l| l.iter().find(|a| a.id == id).cloned()) else { return };
-    let known = automation.bot.clone().filter(|bot| app.bots_untracked().iter().any(|t| &t.task.id == bot));
-    let bot = known.or_else(|| {
-        crate::manager::bot_for_project_or_new(app, &automation.project, &format!("Runs the routine \"{}\".", automation.name))
-    });
-    let Some(bot) = bot else {
-        log::warn!("routine {}: no bot could take it", automation.name);
+    // A routine is its bot's: without the bot there is nobody to run it.
+    let Some(bot) = automation.bot.clone().filter(|bot| app.bots_untracked().iter().any(|t| &t.task.id == bot)) else {
+        log::warn!("routine {}: its bot is gone", automation.name);
         return;
     };
     crate::manager::bring(
         app,
         &bot,
-        crate::manager::Sender::Routine(automation.name.clone()),
-        &automation.name,
-        &automation.prompt,
-        &automation.id,
-        true,
+        crate::manager::Work {
+            from: crate::manager::Sender::Routine(automation.name.clone()),
+            title: &automation.name,
+            text: &automation.prompt,
+            asker: &automation.id,
+            explicit: true,
+            // It runs in the folder its bot worked in when it was written.
+            project: Some(automation.project.as_str()).filter(|p| !p.is_empty()),
+            priority: crate::manager::NORMAL,
+        },
         crate::manager::Standing::Accept,
+        false,
     );
     update(app, id, |a| {
         a.last_run = Some(bubble_store::now_ms());
@@ -355,17 +358,9 @@ fn remove(app: AppState, id: &str) {
     save(app, list);
 }
 
-/// The routines of `bot`: those written for it, and those from before
-/// routines had a bot that run in the folder it looks after.
+/// The routines of `bot`.
 pub fn of_bot(app: AppState, bot: &str) -> Vec<Automation> {
-    let list = app.automations.get();
-    let folder_bot = |project: &str| untracked(|| crate::manager::bot_for_project(app, project));
-    list.into_iter()
-        .filter(|a| match &a.bot {
-            Some(owner) => owner == bot,
-            None => folder_bot(&a.project).as_deref() == Some(bot),
-        })
-        .collect()
+    app.automations.get().into_iter().filter(|a| a.bot.as_deref() == Some(bot)).collect()
 }
 
 /// A bot's routines, in its details: the list, and the form that adds one.

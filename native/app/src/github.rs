@@ -18,7 +18,6 @@ use nsh_core::prelude::*;
 use serde_json::json;
 use tokio::sync::oneshot;
 
-use crate::manager::{self, Sender, Standing};
 use crate::state::{AppState, Conversation};
 
 const SOURCE: &str = "github";
@@ -331,19 +330,27 @@ fn handle_opened(app: AppState, repo: &Repo, level: Level, item: &Opened, me: Op
 
 fn handle_notification(app: AppState, repo: &Repo, level: Level, n: &Notification) {
     let linked = app.with_store(|s| s.task_for_link(n.kind.as_str(), &n.repo, n.number as i64)).flatten();
+    // An assignment or a review request is work the person was asked for
+    // by name: it goes ahead of what merely happened.
     let starts_work = matches!(n.reason.as_str(), "assign" | "review_requested");
-    // Mentions, comments and state changes no rule places go to triage.
-    let triaged = matches!(n.reason.as_str(), "mention" | "team_mention" | "author" | "comment" | "state_change");
-    let disposition = match (&linked, starts_work, level) {
-        (Some(_), _, _) => "attached",
-        (None, true, Level::Prepare | Level::Act) => "created",
-        (None, false, Level::Prepare | Level::Act) if triaged => "untriaged",
-        (None, _, Level::Observe) => "noted",
+    let weighed = starts_work || matches!(n.reason.as_str(), "mention" | "team_mention" | "author" | "comment" | "state_change");
+    // Which bot takes new work is the main bot's to say (the triage): a
+    // bot is a role, not the keeper of one repository.
+    let disposition = match (&linked, level) {
+        (Some(_), _) => "attached",
+        (None, Level::Prepare | Level::Act) if weighed => "untriaged",
+        (None, Level::Observe) => "noted",
         _ => "ignored",
     };
-    let brief = brief_for(n);
-    let payload = json!({ "reason": n.reason, "title": n.title, "brief": brief, "kind": n.kind.as_str() }).to_string();
-    let recorded = app.with_store(|s| {
+    let payload = json!({
+        "reason": n.reason,
+        "title": n.title,
+        "brief": brief_for(n),
+        "kind": n.kind.as_str(),
+        "priority": if starts_work { "first" } else { "normal" },
+    })
+    .to_string();
+    app.with_store(|s| {
         s.record_event(NewEvent {
             source: SOURCE,
             dedupe_key: &n.dedupe_key(),
@@ -356,38 +363,7 @@ fn handle_notification(app: AppState, repo: &Repo, level: Level, n: &Notificatio
             disposition,
         })
     });
-    let Some(Some(event)) = recorded else { return };
-    if !starts_work || linked.is_some() {
-        return;
-    }
-    // New work nobody asked the bot for outright: it goes to the bot that
-    // looks after the repository, as far as the repository's level allows.
-    let standing = match level {
-        Level::Act => Standing::Accept,
-        Level::Prepare => Standing::Propose,
-        _ => Standing::Record,
-    };
-    let bot = match standing {
-        // Only writing down what would be done makes no bot.
-        Standing::Record => manager::bot_for_project(app, &repo.project),
-        _ => manager::bot_for_project_or_new(
-            app,
-            &repo.project,
-            &format!("Looks after the GitHub repository {}: its issues, pull requests and reviews.", n.repo),
-        ),
-    };
-    let Some(bot) = bot else { return };
-    let title = format!("#{} {}", n.number, n.title);
-    if standing != Standing::Record {
-        app.with_store(|s| {
-            s.link(&bot, n.kind.as_str(), &n.repo, n.number as i64)?;
-            s.set_event_disposition(&event.id, "created", Some(&bot))
-        });
-    }
-    manager::bring(app, &bot, Sender::Github, &title, &brief, &format!("{}#{}", n.repo, n.number), false, standing);
-    app.refresh_tasks();
-    // The bot's links changed under a conversation that may be open.
-    app.task_revision.update(|revision| *revision += 1);
+    let _ = repo;
 }
 
 fn brief_for(n: &Notification) -> String {
