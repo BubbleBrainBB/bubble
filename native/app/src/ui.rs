@@ -1105,6 +1105,7 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
         LineKind::Tool { .. } => tool_row(line, project, conversation.opened),
         LineKind::Reasoning => reasoning_row(line, conversation.opened),
         LineKind::Turn { .. } => view().into_element(),
+        LineKind::Question { .. } => question_card(app, conversation, line),
         LineKind::Approval { .. } => {
             let decided = move || matches!(line.get().kind, LineKind::Approval { decided: Some(_), .. });
             let undecided = decided.clone();
@@ -1317,6 +1318,123 @@ fn approval_row(line: ReadSignal<Line>) -> AnyElement {
 }
 
 /// The agent waits for a yes: what it wants to do, and three answers.
+/// What the agent asks the person: each ask with its choices. One ask with
+/// one choice to make is answered by picking it; more than that is picked
+/// and then sent.
+fn question_card(app: AppState, conversation: Conversation, line: ReadSignal<Line>) -> AnyElement {
+    let (asks, id) = match line.get_untracked() {
+        Line { kind: LineKind::Question { asks, .. }, id, .. } => (asks, id),
+        _ => return view().into_element(),
+    };
+    let answered = move || match line.get().kind {
+        LineKind::Question { answers, .. } => answers,
+        _ => None,
+    };
+    let at_once = asks.len() == 1 && !asks[0].multiple;
+    // What is picked so far, per ask.
+    let picked = signal(vec![Vec::<String>::new(); asks.len()]);
+    let complete = move || picked.with(|all| all.iter().all(|one| !one.is_empty()));
+    let send_id = stored(id);
+    let waiting = move || answered().is_none();
+    view()
+        .gap(px(12.0))
+        .p(px(14.0))
+        .rounded(px(12.0))
+        .border(px(LINE))
+        .border_color(border())
+        .bg(pane())
+        .children(
+            asks.iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, ask)| {
+                    let multiple = ask.multiple;
+                    view()
+                        .gap(px(8.0))
+                        .child(when(
+                            {
+                                let shown = !ask.header.trim().is_empty();
+                                move || shown
+                            },
+                            {
+                                let header = ask.header.clone();
+                                move || text(header.clone()).text_size(px(SMALL)).text_color(muted())
+                            },
+                        ))
+                        .child(text(ask.question.clone()).text_size(px(BODY)).font_weight(FontWeight::SEMIBOLD).line_height(px(20.0)))
+                        .child(view().gap(px(6.0)).children(ask.options.iter().cloned().map(move |(label, description)| {
+                            let chosen = {
+                                let label = label.clone();
+                                move || match answered() {
+                                    Some(given) => given.get(index).is_some_and(|g| g.contains(&label)),
+                                    None => picked.with(|all| all[index].contains(&label)),
+                                }
+                            };
+                            let press = label.clone();
+                            let is_chosen = chosen.clone();
+                            view()
+                                .px(px(12.0))
+                                .py(px(8.0))
+                                .gap(px(2.0))
+                                .rounded(px(8.0))
+                                .border(px(LINE))
+                                .border_color(move || if is_chosen() { ink() } else { border() })
+                                .bg(move || if chosen() { tertiary() } else { pane() })
+                                .cursor(Cursor::Pointer)
+                                .hover(|s| s.bg(tertiary()))
+                                .label(format!("Answer {label}"))
+                                .on_press(move || {
+                                    if !waiting() {
+                                        return;
+                                    }
+                                    if at_once {
+                                        conversation.answer_question(app, &send_id.get(), Some(vec![vec![press.clone()]]));
+                                        return;
+                                    }
+                                    picked.update(|all| {
+                                        let mine = &mut all[index];
+                                        if let Some(at) = mine.iter().position(|l| l == &press) {
+                                            mine.remove(at);
+                                        } else {
+                                            if !multiple {
+                                                mine.clear();
+                                            }
+                                            mine.push(press.clone());
+                                        }
+                                    });
+                                })
+                                .child(text(label).text_size(px(BODY)).text_color(ink()))
+                                .child(when(
+                                    {
+                                        let shown = !description.trim().is_empty();
+                                        move || shown
+                                    },
+                                    move || text(description.clone()).text_size(px(SMALL)).text_color(muted()),
+                                ))
+                        })))
+                })
+                .collect::<Vec<_>>(),
+        )
+        .child(dynamic(move || match answered() {
+            None => view()
+                .flex_row()
+                .gap(px(8.0))
+                .child(when(move || !at_once, move || {
+                    primary_button("Send answer", move || {
+                        if complete() {
+                            conversation.answer_question(app, &send_id.get(), Some(picked.get_untracked()));
+                        }
+                    })
+                    .opacity(move || if complete() { 1.0_f32 } else { 0.45_f32 })
+                }))
+                .child(button("Skip", move || conversation.answer_question(app, &send_id.get(), None)))
+                .into_element(),
+            Some(given) if given.iter().all(Vec::is_empty) => text("Not answered").text_size(px(SMALL)).text_color(muted()).into_element(),
+            Some(_) => text("Answered").text_size(px(SMALL)).text_color(muted()).into_element(),
+        }))
+        .into_element()
+}
+
 fn approval_card(app: AppState, conversation: Conversation, line: ReadSignal<Line>) -> AnyElement {
     let parts = move || match line.get().kind {
         LineKind::Approval { summary, detail, decided, .. } => (summary, detail, decided),

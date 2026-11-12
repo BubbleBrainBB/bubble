@@ -72,6 +72,51 @@ pub enum LineKind {
     RunStart(usize),
     Failure,
     Notice,
+    /// The agent asks the person something and waits for the answer.
+    Question {
+        asks: Vec<Ask>,
+        /// `None` while it waits. Then the labels chosen for each ask, in
+        /// order; empty when the person skipped it or the turn ended first.
+        answers: Option<Vec<Vec<String>>>,
+    },
+}
+
+/// One thing the agent asks, with the choices it offers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Ask {
+    /// A word or two naming what is asked.
+    pub header: String,
+    pub question: String,
+    /// Each choice: its label, and what choosing it means.
+    pub options: Vec<(String, String)>,
+    /// More than one choice may be picked.
+    pub multiple: bool,
+}
+
+impl Ask {
+    /// The asks in the agent's `question` request.
+    pub fn from_request(request: &serde_json::Value) -> Vec<Ask> {
+        let text = |value: &serde_json::Value, key: &str| value.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        request
+            .get("questions")
+            .and_then(|q| q.as_array())
+            .map(|questions| {
+                questions
+                    .iter()
+                    .map(|q| Ask {
+                        header: text(q, "header"),
+                        question: text(q, "question"),
+                        options: q
+                            .get("options")
+                            .and_then(|o| o.as_array())
+                            .map(|options| options.iter().map(|o| (text(o, "label"), text(o, "description"))).collect())
+                            .unwrap_or_default(),
+                        multiple: q.get("multiple").and_then(|m| m.as_bool()).unwrap_or(false),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -322,6 +367,8 @@ pub fn finish(lines: &mut [Line], turn: &str, status: TurnStatus, at: i64) {
                 *output = "Interrupted before it finished.".into();
             }
             LineKind::Approval { decided, .. } if decided.is_none() => *decided = Some(Decision::Refuse("Turn ended")),
+            // Nobody can answer a turn that is over.
+            LineKind::Question { answers, .. } if answers.is_none() => *answers = Some(Vec::new()),
             _ => {}
         }
     }

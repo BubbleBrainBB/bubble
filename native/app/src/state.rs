@@ -934,6 +934,7 @@ impl AppState {
             children: stored(children),
             subagents: signal(Vec::new()),
             approvals: stored(HashMap::new()),
+            questions: stored(HashMap::new()),
             pending: stored(String::new()),
             active_turn: stored(String::new()),
             active_run: stored(String::new()),
@@ -1067,6 +1068,8 @@ pub struct Conversation {
     pub following: Signal<bool>,
     /// Questions the agent waits on, by their line's id.
     approvals: Stored<HashMap<String, oneshot::Sender<Decision>>>,
+    /// What the agent asked the person and waits to hear, by line id.
+    questions: Stored<HashMap<String, oneshot::Sender<Option<Vec<Vec<String>>>>>>,
     /// The line the next reply streams into.
     pending: Stored<String>,
     active_turn: Stored<String>,
@@ -1193,6 +1196,60 @@ impl Conversation {
         self.changed();
     }
 
+    /// Shows what the agent asks the person, after the call that asked
+    /// it, and marks the run as waiting on them.
+    fn ask_person(
+        &self,
+        app: AppState,
+        run_id: &str,
+        call_id: Option<&str>,
+        asks: Vec<transcript::Ask>,
+        respond: oneshot::Sender<Option<Vec<Vec<String>>>>,
+    ) {
+        if asks.is_empty() {
+            let _ = respond.send(None);
+            return;
+        }
+        let turn = self.active_turn.get();
+        let number = self.lines.with_untracked(|lines| lines.iter().filter(|l| matches!(l.kind, LineKind::Question { .. })).count() + 1);
+        let id = format!("{turn}:question-{number}");
+        self.questions.with(|map| map.insert(id.clone(), respond));
+        let line = Line::new(id, LineKind::Question { asks, answers: None }, "").in_turn(&turn);
+        self.lines.update(|lines| {
+            let after = call_id.and_then(|call| lines.iter().rposition(|l| l.turn_id.as_deref() == Some(&turn) && l.call_id.as_deref() == Some(call)));
+            match after {
+                Some(index) => lines.insert(index + 1, line),
+                None => lines.push(line),
+            }
+        });
+        self.turn_status(TurnStatus::NeedsInput);
+        self.checkpoint(app, true);
+        app.with_store(|s| s.set_run_status(run_id, RunStatus::NeedsInput, None));
+        app.refresh_tasks();
+        self.changed();
+    }
+
+    /// Gives the agent the person's answer to the question on line `id`:
+    /// the labels chosen for each ask, or `None` to skip it.
+    pub fn answer_question(&self, app: AppState, id: &str, answers: Option<Vec<Vec<String>>>) {
+        let Some(respond) = self.questions.with(|map| map.remove(id)) else { return };
+        let _ = respond.send(answers.clone());
+        self.update_line(id, |line| {
+            if let LineKind::Question { answers: kept, .. } = &mut line.kind {
+                *kept = Some(answers.unwrap_or_default());
+            }
+        });
+        if self.approvals.with(|map| map.is_empty()) && self.questions.with(|map| map.is_empty()) {
+            self.turn_status(TurnStatus::Working);
+            if let Some(run) = self.current_run(app) {
+                app.with_store(|s| s.set_run_status(&run.id, RunStatus::Running, None));
+                app.refresh_tasks();
+            }
+        }
+        self.checkpoint(app, true);
+        self.changed();
+    }
+
     /// Answers the question on line `id`.
     pub fn decide(&self, app: AppState, id: &str, decision: Decision) {
         let Some(respond) = self.approvals.with(|map| map.remove(id)) else { return };
@@ -1207,7 +1264,7 @@ impl Conversation {
                 if let LineKind::Tool { status, .. } = &mut line.kind { *status = ToolStatus::Running; }
             });
         }
-        if self.approvals.with(|map| map.is_empty()) {
+        if self.approvals.with(|map| map.is_empty()) && self.questions.with(|map| map.is_empty()) {
             self.turn_status(TurnStatus::Working);
             if let Some(run) = self.current_run(app) {
                 app.with_store(|s| s.set_run_status(&run.id, RunStatus::Running, None));
@@ -1599,8 +1656,14 @@ impl Conversation {
         let turn = HostTurn {
             session_id: engine::session_of(&run.id),
             // Without a project folder there are no file or command tools,
-            // and the session lives in the app's own folder.
-            allowed_tools: cwd.is_none().then(Vec::new),
+            // and the session lives in the app's own folder. The main bot
+            // only coordinates, and may ask the person; a bot that only
+            // talks can still look things up.
+            allowed_tools: match (&task_id, &cwd) {
+                (None, _) => Some(vec!["question".to_owned()]),
+                (Some(_), None) => Some(TALKING_TOOLS.iter().map(|tool| (*tool).to_owned()).collect()),
+                (Some(_), Some(_)) => None,
+            },
             cwd: cwd.unwrap_or_else(scratch_folder).to_string_lossy().into_owned(),
             text,
             pictures,
@@ -1631,6 +1694,9 @@ impl Conversation {
                         TurnEvent::Agent(event) => conversation.apply(app, &run_id, event, &mut step),
                         TurnEvent::Compacted => conversation.note_compaction(),
                         TurnEvent::Retried => conversation.drop_pending_reply(),
+                        TurnEvent::Question { call_id, asks, respond } => {
+                            conversation.ask_person(app, &run_id, call_id.as_deref(), asks, respond)
+                        }
                         TurnEvent::Subagent { tool, update } => conversation.subagent_update(app, &tool, update),
                     }
                 }
@@ -1684,6 +1750,7 @@ impl Conversation {
                 }
                 conversation.pending.replace(String::new());
                 conversation.approvals.with(|map| map.clear());
+                conversation.questions.with(|map| map.clear());
                 conversation.busy.set(false);
                 app.refresh_tasks();
                 conversation.changed();
@@ -1967,6 +2034,11 @@ fn with_instructions(prompt: String, cwd: Option<&std::path::Path>) -> String {
         None => prompt,
     }
 }
+
+/// What a bot without a project folder may use of the agent's own tools:
+/// asking, looking things up, its memory and skills. Nothing that reads or
+/// changes files or runs commands.
+const TALKING_TOOLS: [&str; 7] = ["question", "web_search", "web_fetch", "memory", "skill", "skill_search", "tool_search"];
 
 /// Where a conversation without a project folder keeps its session.
 pub(crate) fn scratch_folder() -> PathBuf {

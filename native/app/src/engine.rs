@@ -70,6 +70,14 @@ pub enum TurnEvent {
     /// The model's reply broke off and is asked for again: what it had
     /// written of it so far is superseded.
     Retried,
+    /// The agent asks the person something. The answer is the labels
+    /// chosen for each ask, or `None` when the person will not answer.
+    Question {
+        /// The `question` call it belongs to, when the agent said.
+        call_id: Option<String>,
+        asks: Vec<crate::transcript::Ask>,
+        respond: oneshot::Sender<Option<Vec<Vec<String>>>>,
+    },
     /// A subagent moved on; `tool` is the call it reports through
     /// (spawn_agent, wait_agent, run_workflow).
     Subagent { tool: String, update: bubble_host::SubagentUpdate },
@@ -208,9 +216,20 @@ pub async fn run(host: Host, turn: HostTurn, events: mpsc::UnboundedSender<TurnE
                     }
                 });
             }
-            // The app has no card for these yet: the agent is told no, and
-            // asks in its reply instead.
-            SessionMessage::Question { id, .. } => host.answer(&id, serde_json::json!({ "answers": null })),
+            SessionMessage::Question { id, request } => {
+                let asks = crate::transcript::Ask::from_request(&request);
+                let call_id = request.get("tool").and_then(|t| t.get("callID")).and_then(|c| c.as_str()).map(str::to_owned);
+                let (respond, answer) = oneshot::channel();
+                let _ = events.send(TurnEvent::Question { call_id, asks, respond });
+                let host = host.clone();
+                tokio::spawn(async move {
+                    // No answer (skipped, or nobody there) declines the question.
+                    let answers = answer.await.ok().flatten();
+                    host.answer(&id, serde_json::json!({ "answers": answers }));
+                });
+            }
+            // The app has no plan mode: a plan is turned down, and the
+            // agent says what it would do in its reply instead.
             SessionMessage::Plan { id, .. } => host.answer(&id, serde_json::json!({ "approved": false })),
             // The person added this folder as a project: its own settings
             // (MCP servers, allow rules) are theirs.
@@ -395,6 +414,7 @@ mod tests {
                 TurnEvent::Agent(AgentEvent::ToolResults(ChatMessage::Tool { results })) => format!("results:{}", results.len()),
                 TurnEvent::Compacted => "compacted".to_owned(),
                 TurnEvent::Retried => "retried".to_owned(),
+                TurnEvent::Question { .. } => "question".to_owned(),
                 _ => "other".to_owned(),
             });
         }

@@ -205,10 +205,17 @@ fn explicit_turn(header: &Line, body: &[Line], blocks: &mut Vec<Block>) {
     let stays_out = |index: usize, line: &Line| {
         Some(index) == latest
             || is_card(line)
-            || matches!(line.kind, LineKind::Approval { decided: None, .. } | LineKind::Failure | LineKind::Notice | LineKind::RunStart(_))
+            || matches!(
+                line.kind,
+                LineKind::Approval { decided: None, .. }
+                    | LineKind::Question { answers: None, .. }
+                    | LineKind::Failure
+                    | LineKind::Notice
+                    | LineKind::RunStart(_)
+            )
     };
     let shows = |line: &Line| match &line.kind {
-        LineKind::Tool { .. } | LineKind::Approval { .. } => true,
+        LineKind::Tool { .. } | LineKind::Approval { .. } | LineKind::Question { .. } => true,
         LineKind::Reasoning => !line.reasoning.trim().is_empty(),
         LineKind::Message(_) => !line.text.trim().is_empty(),
         _ => false,
@@ -539,6 +546,9 @@ pub fn activity(lines: &[Line], turn: &str, status: TurnStatus, project: Option<
         return ("Queued until another bot finishes".into(), false);
     }
     let mine: Vec<&Line> = lines.iter().filter(|l| l.turn_id.as_deref() == Some(turn) && l.id != turn).collect();
+    if mine.iter().any(|l| matches!(l.kind, LineKind::Question { answers: None, .. })) {
+        return ("Waiting for your answer".into(), true);
+    }
     let waiting = status == TurnStatus::NeedsInput
         || mine.iter().any(|l| matches!(l.kind, LineKind::Approval { decided: None, .. } | LineKind::Tool { status: ToolStatus::NeedsInput, .. }));
     if waiting {
