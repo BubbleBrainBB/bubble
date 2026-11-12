@@ -1564,28 +1564,6 @@ impl Conversation {
         }
     }
 
-    /// Runs the task again from its first message, in a new run on
-    /// `model` (which becomes the task's own).
-    pub fn rerun(&self, app: AppState, model: String) -> Result<bool, String> {
-        let Some(task_id) = self.task_id.get() else { return Err("Only a task can be rerun.".into()) };
-        if self.busy.get_untracked() {
-            return Err("Stop the agent before running the task again.".into());
-        }
-        let first = app
-            .with_store(|s| {
-                let runs = s.runs_for_task(&task_id)?;
-                let Some(run) = runs.first() else { return Ok(None) };
-                Ok(s.messages(&run.id)?
-                    .into_iter()
-                    .find(|m| matches!(m.role, MessageRole::User | MessageRole::External | MessageRole::System)))
-            })
-            .flatten()
-            .ok_or_else(|| "The task has nothing to run again yet.".to_owned())?;
-        app.set_task_model(&task_id, Some(model.clone()));
-        let content = first.content.as_deref().and_then(|c| serde_json::from_str::<ChatMessage>(c).ok());
-        self.post_to(app, first.text, first.role, Some(format!("rerun on {model}")), content, None)
-    }
-
     /// `post`; with `fresh`, in a new run begun for that reason; `content`:
     /// what the model reads, when it is more than the text.
     fn post_to(

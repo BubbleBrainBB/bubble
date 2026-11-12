@@ -283,40 +283,8 @@ fn task_menu(app: AppState, task_id: String) -> impl IntoElement {
                 .child(icon(MORE_ICON, 16.0).text_color(secondary())),
         )
         .child(dynamic(move || {
-            let conversation = app.task_conversation(&task_id);
             let lifecycle = app.tasks.with_untracked(|t| t.iter().find(|t| t.task.id == task_id).map(|t| t.task.lifecycle));
             let mut items: Vec<AnyElement> = Vec::new();
-            if !conversation.busy.get() {
-                let models = app.models.get_untracked();
-                let id = task_id.clone();
-                items.push(
-                    nsh_base::submenu()
-                        .trigger(
-                            view()
-                                .rounded(px(6.0))
-                                .cursor(Cursor::Pointer)
-                                .hover(|s| s.bg(tertiary()))
-                                .child(menu_row("Run again on")),
-                        )
-                        .children(
-                            models
-                                .into_iter()
-                                .map(|model| {
-                                    let id = id.clone();
-                                    let chosen = model.clone();
-                                    menu_item_of(model, move || {
-                                        let conversation = app.task_conversation(&id);
-                                        if let Err(message) = conversation.rerun(app, chosen.clone()) {
-                                            log::warn!("rerun {id}: {message}");
-                                        }
-                                    })
-                                    .into_element()
-                                })
-                                .collect::<Vec<_>>(),
-                        )
-                        .into_element(),
-                );
-            }
             items.push(menu_item_of("Link an issue or PR", move || app.linking.set(true)).into_element());
             if !matches!(lifecycle, Some(Lifecycle::Done | Lifecycle::Canceled)) {
                 items.push(nsh_base::menu_separator().h(px(LINE)).my(px(4.0)).bg(hairline()).into_element());

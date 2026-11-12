@@ -223,6 +223,18 @@ native/
   - 12 个无头测试全部在新引擎上通过；为此改了测试里的假模型（核心会先问 `/models`、工作流在后台跑要 `wait_workflow`、断流用 chunked 模拟）。
   - 顺带修了核心的技能 frontmatter 不认 YAML 块标量（`description: |`）。发现但没修：回复按 `content-length` 截断时核心会一直挂着（已单独立项）。
 
+- 2026-11-11 至 12：界面改成 Grok Bot 式，行为按 DS Bot 和 DeepSeek Super-agent 原型的逻辑做（已提交，分支 feat/native-rust）。参照：`/Applications/Grok Bot.app`（界面）、github.com/Fei2411/DeepSeek-Bot（长期 bot 团队）、github.com/deepseek-ai/dsh-superagent-prototype（事件 → 评估 → 工单 → 执行，少占人的注意力）。
+  - 界面：左栏只有搜索、新建和 bot 列表（头像、名字、最新消息预览、未读点），最上面是主 bot（Bubble）；需要人出面的 bot 排在最前，单独一组"Needs you"。对话区是气泡加时间戳，顶部是名字胶囊，点开是 bot 的详情。重启回到上次的对话。
+  - bot：长期 Agent，一条持续的对话。名字、用途（进系统提示）、头像、文件夹、模型、权限都在详情里改；换文件夹后对话在新文件夹里另起一段。归档后从列表消失。Tasks 列表页、图标栏、Automations 页、"Run again on"都删了。
+  - 团队（`native/app/src/manager.rs`）：主 bot 有 `list_bots` / `get_bot` / `create_bot` / `message_bot` / `update_bot` / `link_github`，只在没有 bot 负责且还会再来的活才新建；每个 bot 有 `list_bots` / `message_bot`。谁请求的活，干完后回复自动作为报告回到请求方（finished / failed / stopped）；还在等别的 bot 时不回报；bot 忙时来的消息排队。每个 bot 在系统提示里用自己的名字（SDK 和宿主加了 `agentName`）。
+  - 工单（`bubble-store` schema v5 的 `tickets` 表）：别人交给 bot 的每件活一条记录：谁要的、明确请求还是从事件推断的、怎么结束的。bot 之间的请求、GitHub 指派和 review 请求、分诊出来的通知、Routine 都建工单。
+  - 事件：不再为每个 issue 新建 bot。GitHub 指派交给负责该仓库的 bot（没有才新建一个）：准备档在 bot 的对话里等人点"Give it to the bot"，执行档直接开始，只看档只记录。合并或关闭不再归档 bot。PR 页的"Make a task"改为交给仓库的 bot。
+  - Routine：属于 bot，在详情里建，或在对话里让 bot 自己建（`list_routines` / `add_routine` / `remove_routine`）；到点后提示词发到这个 bot 的对话里。
+  - 记忆（`native/app/src/memory.rs`）：每个 bot 一份笔记，团队共享一份，都是数据目录下的 Markdown。进系统提示；bot 用 `remember` / `forget` / `recall` 改，人在详情里改；人发起的一轮结束后，用一次短的模型调用把值得长期记住的话留下（`BUBBLE_MEMORY_AUTO=0` 关闭）；像密钥的内容拒收。
+  - 提问：核心的 `question` 工具在对话里显示成带选项的卡片，可回答可跳过；主 bot 也能问。
+  - 测试：Rust 全工作区 220 个通过，其中 15 个是对假模型加真实宿主进程的端到端测试。真实模型下主 bot 是否守"派完就安静"、记忆回顾的质量，都还没验证。
+  - 没做：谁欠谁回报只在内存里，重启后没答完的工单标为 stopped，但请求方收不到报告；bot 不能主动找主 bot；工单的"授权范围"只有请求原文，没有单独的范围和策略版本；Pull requests 和 Skills 页仍从设置进；Node 还没捆进应用。
+
 ## 修订记录
 
 - v2（2026-11-11）：核心留在 TypeScript，桌面经 `bubble host --stdio`；界面改为 Grok Bot 式。

@@ -87,17 +87,6 @@ fn a_task_runs_again_links_a_pr_and_is_canceled() {
     app.submit("text:Do the thing").unwrap();
     app.wait_for_within("Hello from the stand-in model.", long).unwrap();
 
-    // Run again: a second run, from the first message, saying why.
-    app.press("label:Bot actions").unwrap();
-    app.press("Run again on").unwrap();
-    app.press("label:mock:test-model").unwrap();
-    if let Err(e) = app.wait_for_within("text:/^rerun on mock:test-model$/", long) {
-        panic!("{e}\nTEXTS: {:?}", app.screen().texts());
-    }
-    app.wait_for("Run 2").unwrap();
-    app.wait_for_within("label:Send", long).unwrap();
-    assert_eq!(app.screen().count("text:Do the thing"), Ok(2), "the first message, sent again");
-
     // Link a PR by its link.
     app.press("label:Bot actions").unwrap();
     app.press("Link an issue or PR").unwrap();
