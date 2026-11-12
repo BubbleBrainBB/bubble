@@ -16,6 +16,7 @@
 
 import os from "node:os";
 import { rmSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { Agent, AgentAbortError } from "../agent.js";
@@ -123,6 +124,14 @@ export interface TurnHandlers {
 }
 
 export interface RunTurnOptions extends TurnHandlers {
+  /**
+   * The folder this turn works in, when it is not the session's own: tools,
+   * project settings, trust, MCP servers and the prompt's working directory
+   * follow it. The session stays where it was made, so one conversation can
+   * work in several projects, a turn at a time. Follow-up turns the SDK
+   * starts for this turn reuse it.
+   */
+  cwd?: string;
   /**
    * Turn-scoped host capabilities. Never cached globally or given to subagents;
    * follow-up turns the SDK starts for this turn (queued input, pending steers)
@@ -703,7 +712,8 @@ export class BubbleSdk {
     resolved: { manager: SessionManager; cwd: string },
   ): AsyncGenerator<AgentEvent> {
     const { sessionId, reservation, inputController } = runtime;
-    const { manager: session, cwd } = resolved;
+    const { manager: session } = resolved;
+    const cwd = options.cwd?.trim() ? resolvePath(options.cwd.trim()) : resolved.cwd;
     const mode: PermissionMode = options.mode ?? "default";
     const planExitMode: Exclude<PermissionMode, "plan"> =
       options.planExitMode === "bypassPermissions" ? "bypassPermissions" : "default";
@@ -816,7 +826,9 @@ export class BubbleSdk {
 
       const promptCacheKey = session.getOrCreatePromptCacheKey();
       if (!this.turnCoordinator.isDeleted(sessionId)) {
-        session.updateMetadata({ cwd }); // recoverable by cwd after host restart
+        // The session's own folder, not this turn's: a host restart finds
+        // the session where it was made.
+        session.updateMetadata({ cwd: resolved.cwd });
       }
       const { provider, providerId, model } = this.resolveProvider(promptCacheKey, options.model);
       const thinkingLevel =

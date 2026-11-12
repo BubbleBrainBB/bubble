@@ -70,6 +70,8 @@ export interface HostToolSpec {
 export interface TurnStartParams {
   sessionId: string;
   prompt: string | ContentPart[];
+  /** The folder this turn works in; the session's own when absent. */
+  cwd?: string;
   /** "provider:model"; the configured default when absent. */
   model?: string;
   mode?: PermissionMode;
