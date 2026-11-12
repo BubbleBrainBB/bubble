@@ -46,6 +46,12 @@ import type {
 } from "./types.js";
 
 const GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+/**
+ * Per-call channel from buildCallOptions to the fetch wrapper: carries a
+ * thinking level the pinned @ai-sdk/google schema cannot express. Stripped
+ * before the request leaves the process.
+ */
+const THINKING_LEVEL_OVERRIDE_HEADER = "x-bubble-thinking-level";
 
 export interface AiSdkProviderOptions {
   providerId?: string;
@@ -76,7 +82,7 @@ const AI_SDK_PROVIDER_FACTORIES: Record<string, ModelFactory> = {
       apiKey: options.apiKey,
       ...(options.baseURL ? { baseURL: normalizeBaseURL(options.baseURL) } : {}),
       ...(options.headers ? { headers: options.headers } : {}),
-      fetch: (options.fetch ?? createProviderFetch({
+      fetch: withThinkingLevelOverride(options.fetch ?? createProviderFetch({
         providerName: "Google Gemini",
         verboseEnvVar: "BUBBLE_AI_SDK_FETCH_VERBOSE",
       })) as typeof globalThis.fetch,
@@ -193,12 +199,12 @@ function buildCallOptions(
   providerOptions: AiSdkProviderOptions,
 ): LanguageModelV3CallOptions {
   const prompt = convertMessages(messages);
-  const thinking = buildGoogleThinkingOptions(
-    chatOptions.model,
-    chatOptions.thinkingLevel ?? providerOptions.thinkingLevel,
-  );
+  const thinkingLevel = chatOptions.thinkingLevel ?? providerOptions.thinkingLevel;
+  const thinking = buildGoogleThinkingOptions(chatOptions.model, thinkingLevel);
+  const levelOverride = googleThinkingLevelOverride(chatOptions.model, thinkingLevel);
   return {
     prompt,
+    ...(levelOverride ? { headers: { [THINKING_LEVEL_OVERRIDE_HEADER]: levelOverride } } : {}),
     ...(chatOptions.temperature !== undefined ? { temperature: chatOptions.temperature } : {}),
     ...(chatOptions.abortSignal ? { abortSignal: chatOptions.abortSignal } : {}),
     ...(chatOptions.tools?.length
@@ -219,7 +225,8 @@ function buildCallOptions(
 /**
  * Gemini 3+ models take a graded thinking_level; 2.5-era models take a token
  * budget. "off" (budget 0) is only offered in the catalog for models that
- * accept it (2.5 Flash); xhigh/max/ultra clamp to high.
+ * accept it (2.5 Flash); xhigh/max/ultra clamp to high here, and models with
+ * a native xhigh get it back through googleThinkingLevelOverride.
  */
 function buildGoogleThinkingOptions(
   modelId: string,
@@ -238,6 +245,38 @@ function buildGoogleThinkingOptions(
   }
   const budgets: Record<string, number> = { minimal: 512, low: 2048, medium: 8192, high: 24576 };
   return { thinkingConfig: { thinkingBudget: budgets[clamped] ?? 8192, includeThoughts: true } };
+}
+
+/**
+ * The @ai-sdk/google v3 schema only admits minimal/low/medium/high, so a model
+ * with a native xhigh (Gemini 4 Hydrogen) is sent "high" through the SDK and
+ * the real level is written into the request body by the fetch wrapper.
+ */
+function googleThinkingLevelOverride(
+  modelId: string,
+  level: ThinkingLevel | undefined,
+): "xhigh" | undefined {
+  if (level !== "xhigh" && level !== "max" && level !== "ultra") return undefined;
+  return geminiReasoningLevels(modelId).includes("xhigh") ? "xhigh" : undefined;
+}
+
+function withThinkingLevelOverride(fetchImpl: ProviderFetch): ProviderFetch {
+  return async (input, init) => {
+    const headers = new Headers(init?.headers);
+    const level = headers.get(THINKING_LEVEL_OVERRIDE_HEADER);
+    if (!level) return fetchImpl(input, init);
+    headers.delete(THINKING_LEVEL_OVERRIDE_HEADER);
+    let body = init?.body;
+    if (typeof body === "string") {
+      const parsed = JSON.parse(body) as { generationConfig?: { thinkingConfig?: Record<string, unknown> } };
+      parsed.generationConfig = {
+        ...parsed.generationConfig,
+        thinkingConfig: { ...parsed.generationConfig?.thinkingConfig, thinkingLevel: level },
+      };
+      body = JSON.stringify(parsed);
+    }
+    return fetchImpl(input, { ...init, headers: Object.fromEntries(headers), body });
+  };
 }
 
 function convertMessages(messages: ProviderMessage[]): LanguageModelV3Message[] {
@@ -599,8 +638,8 @@ export async function fetchGeminiModels(options: {
 
 /**
  * Ranking: one entry per (version, tier) family — GA ids beat dated previews —
- * then newest version first, flagship (pro/argon) before flash before
- * flash-lite, top N.
+ * then newest version first, pro/argon before carbon before hydrogen before
+ * flash before flash-lite, top N.
  */
 export function selectLatestGeminiModels(
   entries: GeminiModelListEntry[],
@@ -615,16 +654,17 @@ export function selectLatestGeminiModels(
     isPreview: boolean;
   }
 
-  // Gemini 4 introduced named flagship tiers (gemini-4-argon). Unknown names
-  // stay excluded rather than guessing whether they are text models.
-  const TIER_RANK: Record<string, number> = { argon: 0, pro: 0, flash: 1, "flash-lite": 2 };
+  // Gemini 4 introduced named tiers (argon, carbon, hydrogen). Unknown names
+  // stay excluded rather than guessing whether they are text models. Argon
+  // stays ahead of Carbon to match the static catalog's default model.
+  const TIER_RANK: Record<string, number> = { argon: 0, pro: 0, carbon: 1, hydrogen: 2, flash: 3, "flash-lite": 4 };
   const candidates: Candidate[] = [];
   for (const entry of entries) {
     const id = (entry.name ?? "").replace(/^models\//, "");
     if (!id.startsWith("gemini-")) continue;
     if (GEMINI_MODEL_EXCLUDE.test(id)) continue;
     if (entry.supportedGenerationMethods && !entry.supportedGenerationMethods.includes("generateContent")) continue;
-    const match = /^gemini-(\d+(?:\.\d+)?)-(argon|pro|flash)(-lite)?/.exec(id);
+    const match = /^gemini-(\d+(?:\.\d+)?)-(argon|carbon|hydrogen|pro|flash)(-lite)?/.exec(id);
     if (!match) continue;
     const tier = `${match[2]}${match[3] ?? ""}`;
     candidates.push({
@@ -632,7 +672,7 @@ export function selectLatestGeminiModels(
       entry,
       version: Number.parseFloat(match[1]),
       tier,
-      tierRank: TIER_RANK[tier] ?? 3,
+      tierRank: TIER_RANK[tier] ?? 5,
       isPreview: id.includes("preview") || id.includes("exp"),
     });
   }
@@ -659,7 +699,7 @@ export function selectLatestGeminiModels(
       name: candidate.entry.displayName || candidate.id,
       contextWindow: Number.isFinite(candidate.entry.inputTokenLimit) ? candidate.entry.inputTokenLimit : undefined,
       reasoningLevels: geminiReasoningLevels(candidate.id),
-      // Argon defaults to Google's recommended medium via the catalog.
+      // Argon/Carbon (medium) and Hydrogen (high) take Google's defaults from the catalog.
       ...(candidate.tier === "pro" ? { defaultReasoningLevel: "high" as ReasoningEffort } : {}),
     }));
 }
@@ -672,6 +712,8 @@ function geminiVersion(modelId: string): number {
 export function geminiReasoningLevels(modelId: string): ReasoningEffort[] {
   const version = geminiVersion(modelId);
   const isPro = modelId.includes("-pro");
+  // Hydrogen is the only Gemini 4 tier with xhigh; Argon and Carbon return 400 for it.
+  if (version >= 4 && /^gemini-[\d.]+-hydrogen/.test(modelId)) return ["low", "medium", "high", "xhigh"];
   if (version >= 4) return ["low", "medium", "high"];
   // Live probes show 3.7 and 3.8 Flash share this newer ladder. Keep the
   // exception bounded to verified releases instead of guessing for 3.9+.

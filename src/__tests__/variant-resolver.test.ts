@@ -329,4 +329,22 @@ describe("variant resolver", () => {
     expect(normalizeThinkingLevel("off", getAvailableThinkingLevels("google", "gemini-4-argon"))).toBe("low");
     expect(getModelContextWindow("google", "gemini-4-argon")).toBe(1048576);
   });
+
+  it("includes Gemini 4 Carbon with Argon's thinking contract, after Argon", () => {
+    expect(listBuiltinModels("google")[1]?.id).toBe("gemini-4-carbon");
+    expect(getBuiltinModel("google", "gemini-4-carbon")).toMatchObject({ name: "Gemini 4 Carbon", tier: "strong" });
+    expect(getAvailableThinkingLevels("google", "gemini-4-carbon")).toEqual(["low", "medium", "high"]);
+    expect(getDefaultThinkingLevel("google", "gemini-4-carbon")).toBe("medium");
+    expect(normalizeThinkingLevel("xhigh", getAvailableThinkingLevels("google", "gemini-4-carbon"))).toBe("high");
+    expect(getModelContextWindow("google", "gemini-4-carbon")).toBe(1048576);
+  });
+
+  it("includes Gemini 4 Hydrogen with xhigh and Google's high default", () => {
+    expect(listBuiltinModels("google")[2]?.id).toBe("gemini-4-hydrogen");
+    expect(getBuiltinModel("google", "gemini-4-hydrogen")).toMatchObject({ name: "Gemini 4 Hydrogen", tier: "balanced" });
+    expect(getAvailableThinkingLevels("google", "gemini-4-hydrogen")).toEqual(["low", "medium", "high", "xhigh"]);
+    expect(getDefaultThinkingLevel("google", "gemini-4-hydrogen")).toBe("high");
+    expect(normalizeThinkingLevel("off", getAvailableThinkingLevels("google", "gemini-4-hydrogen"))).toBe("low");
+    expect(getModelContextWindow("google", "gemini-4-hydrogen")).toBe(1048576);
+  });
 });

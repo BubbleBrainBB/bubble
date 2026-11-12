@@ -140,6 +140,10 @@ const GROK_45_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 // Gemini 4 documents only low/medium (default)/high. Verified live on
 // 2026-10-13: thinkingLevel=minimal returns 400, so there is no off/minimal.
 const GEMINI_4_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
+// Gemini 4 Hydrogen adds xhigh above the Gemini 4 ladder and defaults to high.
+// Verified live on 2026-11-12: xhigh returns 200, minimal still returns 400
+// (Argon rejects xhigh).
+const GEMINI_4_HYDROGEN_LEVELS: ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
 const GEMINI_3_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_3_FLASH_LEVELS: ReasoningEffort[] = ["minimal", "low", "medium", "high"];
 // Verified against the native API on 2026-09-02: Gemini 3.7/3.8 Flash reject
@@ -211,6 +215,14 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   // Gemini 4 Argon: 1,048,576-token window shared by input, thinking and output.
   // https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
   { id: "gemini-4-argon", name: "Gemini 4 Argon", providerId: "google", tier: "strong", reasoningLevels: GEMINI_4_LEVELS, defaultReasoningLevel: "medium", contextWindow: 1048576 },
+  // Gemini 4 Carbon (2026-11-10): Google's most capable reasoning model, same
+  // window, levels and medium default as Argon (xhigh verified 400 on 2026-11-12).
+  // Listed after Argon so the provider's default model does not change.
+  // https://ai.google.dev/gemini-api/docs/models/gemini-4-carbon
+  { id: "gemini-4-carbon", name: "Gemini 4 Carbon", providerId: "google", tier: "strong", reasoningLevels: GEMINI_4_LEVELS, defaultReasoningLevel: "medium", contextWindow: 1048576 },
+  // Gemini 4 Hydrogen (2026-11-12): same shared 1,048,576-token window, 65,536
+  // output by default. https://ai.google.dev/gemini-api/docs/models/gemini-4-hydrogen
+  { id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen", providerId: "google", tier: "balanced", reasoningLevels: GEMINI_4_HYDROGEN_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_37_38_FLASH_LEVELS, contextWindow: 1048576 },
   { id: "gemini-3.7-flash", name: "Gemini 3.7 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_37_38_FLASH_LEVELS, contextWindow: 1048576 },
   { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_3_FLASH_LEVELS, contextWindow: 1048576 },

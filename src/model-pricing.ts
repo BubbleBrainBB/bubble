@@ -115,12 +115,13 @@ export const MODEL_PRICING_OVERRIDES: ModelPricing[] = [
       outputPerMillion: 7.5,
     },
   })),
-  // Gemini 4 Argon introductory pricing through 2026-11-30; standard rates from
-  // 2026-12-01. Implicit caching only (95% off input), so no cache-write rate.
+  // Gemini 4 Argon and Carbon share one tariff: introductory pricing through
+  // 2026-11-30, standard rates from 2026-12-01. Implicit caching only (95% off
+  // input), so no cache-write rate.
   // https://ai.google.dev/gemini-api/docs/pricing
-  {
+  ...["gemini-4-argon", "gemini-4-carbon"].map((modelId): ModelPricing => ({
     providerId: "google",
-    modelId: "gemini-4-argon",
+    modelId,
     currency: "USD",
     inputCacheHitPerMillion: 0.1,
     inputCacheMissPerMillion: 2,
@@ -131,6 +132,17 @@ export const MODEL_PRICING_OVERRIDES: ModelPricing[] = [
       inputCacheMissPerMillion: 4,
       outputPerMillion: 20,
     },
+  })),
+  // Gemini 4 Hydrogen: one flat rate for all context lengths, implicit caching
+  // only (95% off input). Not yet on models.dev at launch (2026-11-12).
+  // https://ai.google.dev/gemini-api/docs/pricing
+  {
+    providerId: "google",
+    modelId: "gemini-4-hydrogen",
+    currency: "USD",
+    inputCacheHitPerMillion: 0.075,
+    inputCacheMissPerMillion: 1.5,
+    outputPerMillion: 7.5,
   },
   {
     providerId: "deepseek",
