@@ -22,7 +22,7 @@ import {
 } from "./model-catalog.js";
 import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
-import { fetchGeminiModels, geminiReasoningLevels } from "./provider-ai-sdk.js";
+import { GEMINI_MODEL_SELECTION_SCOPE, fetchGeminiModels, geminiReasoningLevels } from "./provider-ai-sdk.js";
 import { extractChatGptAccountId, fetchOpenAICodexModelCatalog, getCodexClientVersion, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
 import { fetchGrokSubscriptionModels, type GrokAuthAdapter } from "./provider-grok.js";
 import { refreshOpenAICodex } from "./oauth/openai-codex.js";
@@ -1152,7 +1152,11 @@ export class ProviderRegistry {
         // build's discovery.
         : provider.id === "openai"
           ? `remote-only-v1:${provider.authType === "oauth" ? `codex-client:${getCodexClientVersion()}` : "api"}`
-          : undefined,
+          // The Gemini list is the remote catalog filtered by the tiers this
+          // build knows, so it is only valid for builds with the same rules.
+          : provider.id === "google" && provider.protocol === "ai-sdk"
+            ? GEMINI_MODEL_SELECTION_SCOPE
+            : undefined,
     ]);
   }
 
