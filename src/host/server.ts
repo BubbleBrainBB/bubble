@@ -283,6 +283,7 @@ export class HostServer {
     this.watch(sessionId);
     const options: RunTurnOptions = {
       prompt,
+      cwd: typeof params.cwd === "string" ? params.cwd : undefined,
       model: params.model,
       mode: params.mode,
       planExitMode: params.planExitMode,
