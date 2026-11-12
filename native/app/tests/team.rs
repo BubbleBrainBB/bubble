@@ -142,17 +142,28 @@ fn bots_ask_each_other_and_answers_go_back_to_whoever_asked() {
     // Writer asked Checker and waits; Checker's answer comes back to it, and
     // only then does the main bot hear from Writer, once.
     app.wait_for_within("Writer reported: Checker says: Checked: fine. You asked: Check x", long).unwrap();
-    assert_eq!(app.screen().count("text:From Writer").unwrap(), 1, "the main bot heard from Writer once, when it was done");
+    // The main bot's conversation marks, in passing, that it wrote to
+    // Writer and that Writer's answer came, once, when it was done.
+    app.wait_for("label:Message from Writer").unwrap();
+    assert_eq!(app.screen().count("text:Message from").unwrap(), 1, "the main bot heard from Writer once, when it was done");
+    assert_eq!(app.screen().count("text:Messaged").unwrap(), 1);
     assert!(!app.shows("text:/Writer reported: Waiting/"), "a bot still waiting on another has nothing to report yet");
+    // The answer itself is Writer's to show; a press on the mark shows it here.
+    assert!(!app.shows("text:/^Checker says: Checked: fine/"));
+    app.press("label:Message from Writer").unwrap();
+    app.wait_for("text:/^Checker says: Checked: fine/").unwrap();
 
-    // Each conversation shows who wrote to it.
+    // What is asked of a bot shows where the person's own words would,
+    // with who asked; an answer that came back to it is a mark.
     app.press("id:side-Checker").unwrap();
     app.wait_for("From Writer").unwrap();
     app.wait_for("Check x").unwrap();
     app.press("id:side-Writer").unwrap();
     app.wait_for("From Bubble").unwrap();
     app.wait_for("Consult the checker about x").unwrap();
-    app.wait_for("From Checker").unwrap();
+    // It wrote to Checker, and Checker's answer came back to it.
+    app.wait_for("text:Messaged").unwrap();
+    app.wait_for("label:Message from Checker").unwrap();
     app.wait_for("Checker says: Checked: fine. You asked: Check x").unwrap();
 
     std::fs::remove_dir_all(&root).ok();

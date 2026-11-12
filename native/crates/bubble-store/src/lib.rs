@@ -925,6 +925,12 @@ impl Store {
     }
 
     /// Replaces a message's text (a streamed reply saved as it grows).
+    /// What the model was given for the message `id`, when that is more
+    /// than its text.
+    pub fn message_content(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.conn().query_row("SELECT content FROM messages WHERE id = ?1", [id], |row| row.get::<_, Option<String>>(0)).optional()?.flatten())
+    }
+
     pub fn set_message_text(&self, id: &str, text: &str) -> Result<()> {
         self.conn()
             .execute("UPDATE messages SET text = ?2 WHERE id = ?1", params![id, text])?;

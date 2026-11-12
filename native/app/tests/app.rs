@@ -178,7 +178,7 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
 
     // The bot's answer goes back to the main bot, which tells the person.
     app.press("id:nav-home").unwrap();
-    app.wait_for_within("From Ship the notes", long).unwrap();
+    app.wait_for_within("label:Message from Ship the notes", long).unwrap();
     app.wait_for_within("The notes are shipped: All done.", long).unwrap();
 
     app.press("id:side-Second task").unwrap();

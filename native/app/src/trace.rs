@@ -52,8 +52,17 @@ fn shown(line: &Line) -> bool {
         LineKind::Question { .. } | LineKind::Failure => true,
         // That older messages were summarized is the agent's housekeeping.
         LineKind::Notice => line.text != crate::state::CHECKPOINT_NOTE,
-        LineKind::Tool { .. } | LineKind::Reasoning | LineKind::Turn { .. } | LineKind::RunStart(_) => false,
+        // Of everything a bot does, one thing shows as a mark in passing:
+        // that it wrote to another bot, or made one, since that is where
+        // the work went.
+        LineKind::Tool { name, status, .. } => *status == ToolStatus::Done && went_to_a_bot(name),
+        LineKind::Reasoning | LineKind::Turn { .. } | LineKind::RunStart(_) => false,
     }
+}
+
+/// A call that hands work to another bot.
+pub fn went_to_a_bot(name: &str) -> bool {
+    matches!(name, "message_bot" | "create_bot")
 }
 
 /// Lays the lines out; `busy` while the last turn is still running.
@@ -253,6 +262,8 @@ mod tests {
             line("r", LineKind::Reasoning, ""),
             said("c", "I'll look at the code first."),
             tool("t1", "read", "Read a.rs", ToolStatus::Done),
+            tool("m", "message_bot", "Messaged Dev", ToolStatus::Done),
+            tool("m2", "message_bot", "Messaged Dev", ToolStatus::Failed),
             tool("t2", "bash", "Ran cargo test", ToolStatus::Done),
             line("a", LineKind::Approval { summary: "Run".into(), detail: "cargo test".into(), rememberable: false, decided: Some(Decision::AllowOnce) }, ""),
             line("n", LineKind::Notice, crate::state::CHECKPOINT_NOTE),
@@ -260,10 +271,13 @@ mod tests {
             said("f", "Done: the tests pass."),
         ];
         let blocks = layout(&lines, false);
-        assert_eq!(ids(&blocks), ["u", "c", "f"]);
+        // Of the calls, only the one that reached another bot leaves a mark.
+        assert_eq!(ids(&blocks), ["u", "c", "m", "f"]);
         // What a bot says after something it said sits close to it.
         assert_eq!(blocks[1], Block::Line { id: "c".into(), close: false });
-        assert_eq!(blocks[2], Block::Line { id: "f".into(), close: true });
+        assert_eq!(blocks[3], Block::Line { id: "f".into(), close: false });
+        let twice = vec![header(TurnStatus::Completed), said("a", "One."), said("b", "Two.")];
+        assert_eq!(layout(&twice, false)[1], Block::Line { id: "b".into(), close: true });
     }
 
     #[test]

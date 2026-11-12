@@ -47,6 +47,12 @@ fn from_key(message_id: &str) -> String {
     format!("from:{message_id}")
 }
 
+/// Set on a message that is a bot's answer coming back to the one who
+/// asked, not something asked of this bot.
+fn reply_key(message_id: &str) -> String {
+    format!("reply:{message_id}")
+}
+
 /// The shape and color a person picked for a bot, as "shape:color".
 fn bot_face_key(bot_id: &str) -> String {
     format!("bot_face:{bot_id}")
@@ -864,6 +870,20 @@ impl AppState {
     /// the main bot unless another is recorded.
     pub fn sender_label(&self, message_id: &str) -> String {
         self.with_store(|s| s.setting(&from_key(message_id))).flatten().unwrap_or_else(|| manager::MAIN_BOT.to_owned())
+    }
+
+    /// Whether the message `message_id` is a bot's answer coming back to
+    /// the one who asked it for something (and not something asked of this
+    /// bot). Messages from before this was written down say so in what the
+    /// model was given.
+    pub fn is_reply(&self, message_id: &str) -> bool {
+        self.with_store(|s| {
+            if s.setting(&reply_key(message_id))?.is_some() {
+                return Ok(true);
+            }
+            Ok(s.message_content(message_id)?.is_some_and(|content| content.contains("[Report from ")))
+        })
+        .unwrap_or(false)
     }
 
     /// The shape and color of a bot's face.
@@ -1689,7 +1709,7 @@ impl Conversation {
         // The model is told who it is from; the person sees that as a label.
         let content = ChatMessage::user(manager::framed(app, &incoming));
         let shown = incoming.shown.clone().unwrap_or(incoming.text);
-        let started = self.post_to(app, shown, role, None, Some(content), Some(label));
+        let started = self.post_to(app, shown, role, None, Some(content), Some((label, incoming.report.is_some())));
         if started.is_err() {
             self.owes.replace(before);
         }
@@ -1787,7 +1807,9 @@ impl Conversation {
         role: MessageRole,
         fresh: Option<String>,
         content: Option<ChatMessage>,
-        from: Option<String>,
+        // Who it is from, when not the person, and whether it is their
+        // answer to something this bot asked.
+        from: Option<(String, bool)>,
     ) -> Result<bool, String> {
         let text = text.trim().to_owned();
         let images = match &content {
@@ -1852,8 +1874,11 @@ impl Conversation {
         let saved = app
             .with_store(|s| s.append_message_with(&run.id, role, &text, content.as_deref()))
             .ok_or_else(|| "The message could not be saved.".to_owned())?;
-        if let Some(label) = &from {
-            app.with_store(|s| s.set_setting(&from_key(&saved.id), Some(label)));
+        if let Some((label, reply)) = &from {
+            app.with_store(|s| {
+                s.set_setting(&from_key(&saved.id), Some(label))?;
+                s.set_setting(&reply_key(&saved.id), reply.then_some("1"))
+            });
         }
 
         if let Some(index) = new_run_index.filter(|&i| i > 1) {
