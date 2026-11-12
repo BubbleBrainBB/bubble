@@ -1,9 +1,28 @@
 //! A bot's face: a soft shape in one color with two eyes, as a messenger
 //! shows who you are talking to. Until a person picks a look, a bot's id
 //! picks one, so it is the same everywhere and after every restart.
+//!
+//! A face is still where it only says who the bot is. Where it says what
+//! the bot is doing (in its row of the list, at the end of its
+//! conversation while it works) its eyes move with it: see [`Mood`].
 
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
+
+/// What a bot is doing, as its face shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mood {
+    /// Nothing: a still face.
+    Still,
+    /// Writing back: it looks down at what it writes.
+    Typing,
+    /// Between steps: it looks up, and from side to side slowly.
+    Thinking,
+    /// Using a tool: it looks from one side to the other.
+    Working,
+    /// Waiting for the person or its turn: it looks ahead, and blinks.
+    Waiting,
+}
 
 /// The outlines, in a 48 by 48 box.
 const SHAPES: [&str; 5] = [
@@ -20,6 +39,15 @@ const SHAPES: [&str; 5] = [
 ];
 
 const COLORS: [&str; 8] = ["#F26B3A", "#3DBE9F", "#4CC26E", "#F0464B", "#B5763E", "#4C8DF6", "#8B6CF0", "#E7A93A"];
+
+/// Where a bot's eyes are in the 48 by 48 box: left, top, width, height.
+const EYE_BOXES: [(f32, f32, f32, f32); 2] = [(18.5, 15.0, 4.2, 9.5), (26.5, 15.0, 4.2, 9.5)];
+/// How far they lean, in degrees.
+const EYE_TILT: f32 = -16.0;
+/// The main bot's.
+const MAIN_EYE_BOXES: [(f32, f32, f32, f32); 2] = [(18.5, 13.0, 5.0, 12.0), (28.0, 13.0, 5.0, 12.0)];
+const MAIN_EYE_TILT: f32 = -24.0;
+const MAIN_SHAPE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><circle cx="24" cy="24" r="22" fill="#0B0B0B"/></svg>"##;
 
 const EYES: &str = r##"<rect x="18.500" y="15" width="4.200" height="9.500" rx="2.100" fill="#FFFFFF" transform="rotate(-16 20.600 19.750)"/><rect x="26.500" y="15" width="4.200" height="9.500" rx="2.100" fill="#FFFFFF" transform="rotate(-16 28.600 19.750)"/>"##;
 
@@ -72,6 +100,103 @@ pub fn bot(app: crate::state::AppState, id: &str, size: f32) -> Svg {
 /// The main bot's face.
 pub fn main(size: f32) -> Svg {
     svg(ImageSrc::svg_markup(MAIN)).size(px(size)).flex_shrink_0()
+}
+
+/// A face without its eyes, as SVG: the eyes are drawn over it, to move.
+fn shape_markup(shape: usize, color: usize) -> String {
+    let (shape, color) = (shape % SHAPES.len(), color % COLORS.len());
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><g fill="{}">{}</g></svg>"#, COLORS[color], SHAPES[shape])
+}
+
+/// A face whose eyes show `mood`: a shape, and two eyes over it that look
+/// about and blink. A still mood runs nothing.
+fn alive(size: f32, shape: &str, eyes: [(f32, f32, f32, f32); 2], tilt: f32, mood: Mood) -> View {
+    let scale = size / 48.0;
+    // How far a glance goes.
+    let reach = size * 0.045;
+    let (across, down, lids) = (animated_value(0.0), animated_value(0.0), animated_value(1.0));
+    let glide = |ms: f32| Timing::new(ms, Easing::EaseInOut);
+    let blink_every = |rest: f32| {
+        let _ = Animation::sequence([
+            Animation::delay(rest),
+            Animation::timing(&lids, 0.1, Timing::new(80.0, Easing::EaseInOut)),
+            Animation::timing(&lids, 1.0, Timing::new(140.0, Easing::EaseInOut)),
+        ])
+        .looped(None)
+        .start();
+    };
+    match mood {
+        Mood::Still => {}
+        Mood::Waiting => blink_every(2600.0),
+        Mood::Typing => {
+            let _ = Animation::timing(&down, reach * 0.9, glide(260.0)).start();
+            blink_every(3200.0);
+        }
+        Mood::Thinking => {
+            let _ = Animation::timing(&down, -reach, glide(360.0)).start();
+            let _ = Animation::sequence([
+                Animation::timing(&across, -reach * 0.7, glide(1300.0)),
+                Animation::delay(500.0),
+                Animation::timing(&across, reach * 0.7, glide(1300.0)),
+                Animation::delay(500.0),
+            ])
+            .looped(None)
+            .start();
+            blink_every(3600.0);
+        }
+        Mood::Working => {
+            let _ = Animation::sequence([
+                Animation::timing(&across, reach, glide(420.0)),
+                Animation::delay(700.0),
+                Animation::timing(&across, -reach, glide(560.0)),
+                Animation::delay(700.0),
+            ])
+            .looped(None)
+            .start();
+            blink_every(4200.0);
+        }
+    }
+    view()
+        .size(px(size))
+        .flex_shrink_0()
+        .child(svg(ImageSrc::svg_markup(shape)).absolute().top(px(0.0)).left(px(0.0)).size(px(size)))
+        .child(
+            view()
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .size(px(size))
+                .bind_translate_x(&across)
+                .bind_translate_y(&down)
+                .children(eyes.map(|(left, top, width, height)| {
+                    // The lid closes over the eye; the eye leans inside it.
+                    view()
+                        .absolute()
+                        .left(px(left * scale))
+                        .top(px(top * scale))
+                        .w(px(width * scale))
+                        .h(px(height * scale))
+                        .bind_transform(nsh_core::TransformKind::ScaleY, &lids)
+                        .child(view().w_full().h_full().rounded(px(width * scale / 2.0)).bg(rgb(0xFFFFFF)).rotate(deg(tilt)))
+                })),
+        )
+}
+
+/// A bot's face showing what it is doing; it follows a change of look and
+/// of mood.
+pub fn bot_doing(app: crate::state::AppState, id: &str, size: f32, mood: impl Fn() -> Mood + 'static) -> impl IntoElement {
+    let id = id.to_owned();
+    let mood = computed(mood);
+    view().size(px(size)).flex_shrink_0().child(dynamic(move || {
+        let (shape, color) = app.face_of(&id);
+        alive(size, &shape_markup(shape, color), EYE_BOXES, EYE_TILT, mood.get())
+    }))
+}
+
+/// The main bot's face showing what it is doing.
+pub fn main_doing(size: f32, mood: impl Fn() -> Mood + 'static) -> impl IntoElement {
+    let mood = computed(mood);
+    view().size(px(size)).flex_shrink_0().child(dynamic(move || alive(size, MAIN_SHAPE, MAIN_EYE_BOXES, MAIN_EYE_TILT, mood.get())))
 }
 
 #[cfg(test)]

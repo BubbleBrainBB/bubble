@@ -6,6 +6,7 @@
 
 use bubble_store::MessageRole;
 
+use crate::avatar::Mood;
 use crate::state::{Line, LineKind, ToolStatus, TurnStatus};
 
 /// One thing the conversation shows.
@@ -17,12 +18,15 @@ pub enum Block {
     Line { id: String, close: bool },
     /// What the running turn does now, at the end of the conversation.
     Status { id: String, turn: String, status: TurnStatus, started_at: i64 },
+    /// A turn that ended before its bot was done: the person stopped it,
+    /// or the app closed. A word at its end says so.
+    Ended { id: String, status: TurnStatus },
 }
 
 impl Block {
     pub fn id(&self) -> &str {
         match self {
-            Block::Line { id, .. } | Block::Status { id, .. } => id,
+            Block::Line { id, .. } | Block::Status { id, .. } | Block::Ended { id, .. } => id,
         }
     }
 }
@@ -56,11 +60,27 @@ fn shown(line: &Line) -> bool {
 pub fn layout(lines: &[Line], busy: bool) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut after_reply = false;
-    for line in lines.iter().filter(|line| shown(line)) {
-        let reply = says_something(line);
-        blocks.push(Block::Line { id: line.id.clone(), close: reply && after_reply });
-        after_reply = reply;
+    // The turn being laid out, when it ended before its bot was done.
+    let mut cut_short: Option<(String, TurnStatus)> = None;
+    let close_turn = |cut_short: &mut Option<(String, TurnStatus)>, blocks: &mut Vec<Block>| {
+        if let Some((turn, status)) = cut_short.take() {
+            blocks.push(Block::Ended { id: format!("ended:{turn}"), status });
+        }
+    };
+    for line in lines {
+        match line.kind {
+            // What sets a bot going begins the next turn.
+            LineKind::Message(MessageRole::User | MessageRole::System | MessageRole::External) => close_turn(&mut cut_short, &mut blocks),
+            LineKind::Turn { status: status @ (TurnStatus::Stopped | TurnStatus::Interrupted), .. } => cut_short = Some((line.id.clone(), status)),
+            _ => {}
+        }
+        if shown(line) {
+            let reply = says_something(line);
+            blocks.push(Block::Line { id: line.id.clone(), close: reply && after_reply });
+            after_reply = reply;
+        }
     }
+    close_turn(&mut cut_short, &mut blocks);
     if !busy {
         return blocks;
     }
@@ -89,12 +109,18 @@ pub fn near_bottom(offset: f32, viewport: f32, content: f32) -> bool {
     content - viewport - offset <= 48.0
 }
 
-/// What a bot is doing, in a few words, and whether it is the person it
-/// waits for (then nothing moves).
+/// What a bot is doing, in a few words, and how it looks doing it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Activity {
     pub phrase: String,
-    pub waiting: bool,
+    pub mood: Mood,
+}
+
+impl Activity {
+    /// It is the person it waits for (or a free slot): nothing moves.
+    pub fn waiting(&self) -> bool {
+        self.mood == Mood::Waiting
+    }
 }
 
 const THINKING: [&str; 3] = ["Thinking it over", "Working it out", "Putting it together"];
@@ -135,8 +161,7 @@ fn doing(name: &str, title: &str, key: &str) -> String {
 
 /// What the running turn `turn` does now.
 pub fn activity(lines: &[Line], turn: &str, status: TurnStatus) -> Activity {
-    let waits = |phrase: &str| Activity { phrase: phrase.to_owned(), waiting: true };
-    let does = |phrase: String| Activity { phrase, waiting: false };
+    let waits = |phrase: &str| Activity { phrase: phrase.to_owned(), mood: Mood::Waiting };
     if status == TurnStatus::Queued {
         return waits("Waiting for a free slot");
     }
@@ -153,15 +178,23 @@ pub fn activity(lines: &[Line], turn: &str, status: TurnStatus) -> Activity {
     let step = mine.iter().rev().find(|l| matches!(l.kind, LineKind::Tool { status: ToolStatus::Running, .. }));
     if let Some(step) = step {
         let LineKind::Tool { name, .. } = &step.kind else { unreachable!("a tool line") };
-        return does(doing(name, &step.text, &step.id));
+        return Activity { phrase: doing(name, &step.text, &step.id), mood: Mood::Working };
     }
-    match mine.last() {
-        // Between steps: thinking about the next one.
-        Some(last) if matches!(last.kind, LineKind::Reasoning) || (last.kind == LineKind::Message(MessageRole::Assistant) && last.pending) => {
-            does(pick(&THINKING, &last.id).to_owned())
-        }
-        Some(last) => does(pick(&WORKING, &last.id).to_owned()),
-        None => does(pick(&THINKING, turn).to_owned()),
+    // It has used no tool yet: it read the message and is writing back, as
+    // far as anyone can tell. Once it has, the pauses between its steps
+    // are thinking.
+    if !mine.iter().any(|l| matches!(l.kind, LineKind::Tool { .. })) {
+        return Activity { phrase: "Typing".to_owned(), mood: Mood::Typing };
+    }
+    let key = mine.last().map_or(turn, |last| last.id.as_str());
+    Activity { phrase: pick(&THINKING, key).to_owned(), mood: Mood::Thinking }
+}
+
+/// What a turn that was cut short says at its end.
+pub fn ended(status: TurnStatus) -> &'static str {
+    match status {
+        TurnStatus::Interrupted => "Interrupted: Bubble closed while it worked.",
+        _ => "You stopped it.",
     }
 }
 
@@ -248,6 +281,26 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_cut_short_says_so_at_its_end() {
+        let lines = vec![
+            Line::new("u", LineKind::Message(MessageRole::User), "do it"),
+            header(TurnStatus::Stopped),
+            said("p", "I had got this far."),
+            Line::new("u2", LineKind::Message(MessageRole::User), "go on"),
+            Line { at: 2_000, ..Line::new("turn-u2", LineKind::Turn { status: TurnStatus::Interrupted, completed_at: None }, "") },
+        ];
+        let blocks = layout(&lines, false);
+        // After what the bot had said, before what the person wrote next.
+        assert_eq!(ids(&blocks), ["u", "p", "ended:turn-u", "u2", "ended:turn-u2"]);
+        assert_eq!(blocks[2], Block::Ended { id: "ended:turn-u".into(), status: TurnStatus::Stopped });
+        assert_eq!(ended(TurnStatus::Stopped), "You stopped it.");
+        assert!(ended(TurnStatus::Interrupted).starts_with("Interrupted"));
+        // A turn that finished, or failed with its reason shown, says nothing more.
+        let done = vec![Line::new("u", LineKind::Message(MessageRole::User), "do it"), header(TurnStatus::Completed), said("f", "Done.")];
+        assert_eq!(ids(&layout(&done, false)), ["u", "f"]);
+    }
+
+    #[test]
     fn what_a_bot_does_is_said_as_a_person_would() {
         let at = |lines: &[Line], status| activity(lines, "turn-u", status);
         let working = |name: &str, text: &str| at(&[header(TurnStatus::Working), tool("t", name, text, ToolStatus::Running)], TurnStatus::Working);
@@ -260,7 +313,7 @@ mod tests {
         assert_eq!(working("github_comment", "Commented").phrase, "Working on GitHub");
         assert_eq!(working("mcp__linear__list", "Listed").phrase, "Using a connected app");
         assert!(WORKING.contains(&working("something_new", "Did it").phrase.as_str()));
-        assert!(!working("bash", "Ran x").waiting);
+        assert_eq!(working("bash", "Ran x").mood, Mood::Working);
 
         // Nothing of the command, the path or the query is in the words.
         assert!(!working("bash", "Ran rm -rf build").phrase.contains("rm"));
@@ -269,12 +322,18 @@ mod tests {
         let thinking = [header(TurnStatus::Working), tool("t", "read", "Read a", ToolStatus::Done), line("r", LineKind::Reasoning, "")];
         let first = at(&thinking, TurnStatus::Working);
         assert!(THINKING.contains(&first.phrase.as_str()));
+        assert_eq!(first.mood, Mood::Thinking);
         assert_eq!(first, at(&thinking, TurnStatus::Working));
+
+        // Before its first step it is writing back, as a person would be.
+        let fresh = [header(TurnStatus::Working), line("r", LineKind::Reasoning, "")];
+        assert_eq!(at(&fresh, TurnStatus::Working), Activity { phrase: "Typing".into(), mood: Mood::Typing });
+        assert_eq!(at(&[header(TurnStatus::Working)], TurnStatus::Working).mood, Mood::Typing);
 
         // It waits for the person: nothing moves.
         let asked = [header(TurnStatus::Working), line("a", LineKind::Approval { summary: "Run".into(), detail: "x".into(), rememberable: false, decided: None }, "")];
-        assert_eq!(at(&asked, TurnStatus::Working), Activity { phrase: "Waiting for you".into(), waiting: true });
-        assert_eq!(at(&[header(TurnStatus::Queued)], TurnStatus::Queued), Activity { phrase: "Waiting for a free slot".into(), waiting: true });
+        assert_eq!(at(&asked, TurnStatus::Working), Activity { phrase: "Waiting for you".into(), mood: Mood::Waiting });
+        assert_eq!(at(&[header(TurnStatus::Queued)], TurnStatus::Queued), Activity { phrase: "Waiting for a free slot".into(), mood: Mood::Waiting });
     }
 
     #[test]

@@ -203,6 +203,7 @@ fn a_turn_shows_what_was_said_through_its_states_and_restores_as_it_was() {
     // waiting. The calls themselves do not show.
     app.wait_for("text:Waiting for you").unwrap();
     app.wait_for("id:activity").unwrap();
+    assert!(!app.shows("label:Typing"), "it waits; it is not writing");
     ordered(&app, &["I will inspect", "Run a command", "printf first"]);
     assert!(!app.shows("text:/Ran printf/") && !app.shows("label:Show work"));
     app.press("Allow once").unwrap();
@@ -231,6 +232,7 @@ fn a_turn_shows_what_was_said_through_its_states_and_restores_as_it_was() {
     // Stopped: the bot is free, and what it had said stays.
     app.wait_for_within("label:Send", long).unwrap();
     app.wait_for("Keep this stopped reply.").unwrap();
+    app.wait_for("text:You stopped it.").unwrap();
     app.type_text("id:composer", "Fail this").unwrap();
     app.submit("id:composer").unwrap();
     // The agent asked for the broken-off reply once more and was turned
@@ -249,6 +251,7 @@ fn a_turn_shows_what_was_said_through_its_states_and_restores_as_it_was() {
     app.press("id:side-Trace regression").unwrap();
     app.wait_for_within("Keep this stopped reply.", long).unwrap();
     app.wait_for("text:/The model is not available/").unwrap();
+    app.wait_for("text:You stopped it.").unwrap();
     assert_eq!(
         stored(&home),
         before,
@@ -262,6 +265,7 @@ fn a_turn_shows_what_was_said_through_its_states_and_restores_as_it_was() {
             "I will inspect",
             "The final answer starts",
             "Keep this stopped reply",
+            "You stopped it.",
             "The model is not available",
         ],
     );

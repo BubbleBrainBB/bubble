@@ -205,8 +205,10 @@ fn earlier_answers_stay_above_the_next_prompt_in_layout() {
     app.wait_for("Original final answer").unwrap();
     app.type_text("id:composer", "New follow-up request").unwrap();
     app.submit("id:composer").unwrap();
-    // The new turn is at work: one row at the end says so.
+    // The new turn is at work: one row at the end says so. It has used no
+    // tool, so it is writing back: the dots a messenger shows.
     app.wait_for_within("id:activity", Duration::from_secs(10)).unwrap();
+    app.wait_for("label:Typing").unwrap();
     let assert_order = |app: &Headless| {
         let texts = app.screen().texts();
         let snippets = ["Original request", "Original final answer", "New follow-up request"];

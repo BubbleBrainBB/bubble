@@ -198,6 +198,8 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
     // the middle of is left in the conversation.
     app.wait_for_within("label:Send", long).unwrap();
     assert!(started.elapsed() < Duration::from_secs(10), "stopping does not wait for the command");
+    // A word where it ended says why it ended.
+    app.wait_for("text:You stopped it.").unwrap();
     assert!(!app.shows("text:/sleep 20/"), "how the bot worked is not the conversation's to show");
 
     std::fs::remove_dir_all(&root).ok();

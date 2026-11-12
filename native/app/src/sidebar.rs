@@ -127,7 +127,16 @@ pub fn sidebar(app: AppState) -> impl IntoElement {
                         .p(px(4.0))
                         .rounded_full()
                         .bg(move || if home_current.get() { item_active() } else { side() })
-                        .child(avatar::main(56.0))
+                        // Its eyes follow what it does.
+                        .child(avatar::main_doing(56.0, move || {
+                            if !main_busy() {
+                                avatar::Mood::Still
+                            } else if main_waits() {
+                                avatar::Mood::Waiting
+                            } else {
+                                avatar::Mood::Working
+                            }
+                        }))
                         .child(when(main_busy, move || {
                             view()
                                 .absolute()
@@ -227,7 +236,12 @@ fn bot_row(app: AppState, bot: ReadSignal<TaskSummary>) -> impl IntoElement {
             app.mark_seen(&open);
             app.route.set(Route::Task(open.clone()));
         })
-        .child(avatar::bot(app, &id, 38.0))
+        // A face that shows what the bot is doing.
+        .child(avatar::bot_doing(app, &id, 38.0, move || match bot.get().state {
+            TaskState::Running => avatar::Mood::Working,
+            TaskState::NeedsYou | TaskState::Queued => avatar::Mood::Waiting,
+            _ => avatar::Mood::Still,
+        }))
         .child(
             view()
                 .flex_1()

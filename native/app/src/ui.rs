@@ -226,6 +226,7 @@ fn stamp_line(line: ReadSignal<Line>) -> impl IntoElement {
 fn block_view(app: AppState, conversation: Conversation, block: ReadSignal<Block>) -> AnyElement {
     let (content, gap) = match block.get_untracked() {
         Block::Status { .. } => (activity_row(app, conversation, block).into_element(), 14.0),
+        Block::Ended { status, .. } => (text(crate::trace::ended(status)).text_size(px(SMALL)).text_color(muted()).into_element(), 10.0),
         Block::Line { id, close } => {
             // The line itself, kept live as it streams or finishes.
             let line = each(
@@ -284,6 +285,29 @@ fn shimmer(phrase: String, waiting: bool) -> AnyElement {
         .into_element()
 }
 
+/// Three dots that rise one after another: someone is writing back.
+fn typing_dots() -> impl IntoElement {
+    let beat = animated_value(0.0);
+    let _ = Animation::timing(&beat, 1.0, Timing::new(1400.0, Easing::Linear)).looped(None).start();
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .h(px(30.0))
+        .px(px(12.0))
+        .rounded(px(15.0))
+        .bg(bot_bubble())
+        .accessible(true)
+        .label("Typing")
+        // Each a little behind the one before it.
+        .children([0.229_f32, 0.114, 0.0].map(|lead| {
+            let at = beat.add(lead).modulo(1.0);
+            let rise = at.interpolate(&[0.0, 0.3, 0.6, 1.0], &[0.0, -2.0, 0.0, 0.0]);
+            let glow = at.interpolate(&[0.0, 0.3, 0.6, 1.0], &[0.35, 1.0, 0.35, 0.35]);
+            view().size(px(6.0)).rounded_full().bg(secondary()).bind_translate_y(&rise).bind_opacity(&glow)
+        }))
+}
+
 /// What the bot is doing now, at the end of its conversation while a turn
 /// runs: its face, a few words, and how long it has been at it.
 fn activity_row(app: AppState, conversation: Conversation, block: ReadSignal<Block>) -> impl IntoElement {
@@ -293,11 +317,13 @@ fn activity_row(app: AppState, conversation: Conversation, block: ReadSignal<Blo
     // bot writes or command line it prints, so the light is not restarted.
     let doing = computed(move || match block.get() {
         Block::Status { turn, status, .. } => conversation.lines.with(|lines| crate::trace::activity(lines, &turn, status)),
-        Block::Line { .. } => crate::trace::Activity { phrase: String::new(), waiting: true },
+        _ => crate::trace::Activity { phrase: String::new(), mood: crate::avatar::Mood::Waiting },
     });
+    // Its eyes follow what it does.
+    let mood = move || doing.get().mood;
     let face = match conversation.task_id.get() {
-        Some(id) => crate::avatar::bot(app, &id, 28.0).into_element(),
-        None => crate::avatar::main(28.0).into_element(),
+        Some(id) => crate::avatar::bot_doing(app, &id, 28.0, mood).into_element(),
+        None => crate::avatar::main_doing(28.0, mood).into_element(),
     };
     view()
         .flex_row()
@@ -307,12 +333,13 @@ fn activity_row(app: AppState, conversation: Conversation, block: ReadSignal<Blo
         .child(face)
         .child(dynamic(move || {
             let doing = doing.get();
-            shimmer(doing.phrase, doing.waiting)
+            // Writing back shows as dots, as a messenger shows it.
+            if doing.mood == crate::avatar::Mood::Typing { typing_dots().into_element() } else { shimmer(doing.phrase.clone(), doing.waiting()) }
         }))
         .child(
             text(move || match block.get() {
                 Block::Status { started_at, .. } => crate::trace::elapsed(now.get() - started_at).unwrap_or_default(),
-                Block::Line { .. } => String::new(),
+                _ => String::new(),
             })
             .text_size(px(SMALL))
             .text_color(muted()),
