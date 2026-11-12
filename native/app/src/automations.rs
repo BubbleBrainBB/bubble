@@ -1,8 +1,9 @@
-//! Automations: a prompt that starts a task in a project on a schedule
-//! (each day at a time, each week on a day, or every so many minutes), as
-//! the Electron app's scheduler had them. They are kept in the store's
-//! settings; a loop looks every half minute and starts the ones due, each
-//! as a new task whose first message is the prompt.
+//! Routines: recurring work a bot does on a schedule (each day at a time,
+//! each week on a day, or every so many minutes). A routine belongs to a
+//! bot; when it is due its prompt goes to that bot's conversation, as a
+//! piece of work the person asked for when the routine was written. They
+//! are kept in the store's settings; a loop looks every half minute. A bot
+//! can also set its own up when asked in chat.
 
 use std::time::Duration;
 
@@ -11,7 +12,10 @@ use nsh_core::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::palette::*;
-use crate::state::{AppState, Route};
+use bubble_core::{ToolCall, ToolOutput, ToolSpec};
+use serde_json::json;
+
+use crate::state::AppState;
 use crate::ui::*;
 
 /// The settings key the list is kept under (JSON).
@@ -215,10 +219,10 @@ fn field(placeholder: &'static str, value: Signal<String>, multiline: bool) -> i
         .on_change(move |v: &str| value.set(v.to_owned()))
 }
 
-fn form(app: AppState, composing: Signal<bool>) -> impl IntoElement {
+fn form(app: AppState, composing: Signal<bool>, bot: String) -> impl IntoElement {
     let name = signal(String::new());
     let prompt = signal(String::new());
-    let project = signal(app.projects_untracked().into_iter().next());
+    let project = app.with_store(|s| s.get_task(&bot)).flatten().and_then(|t| t.project_cwd).unwrap_or_default();
     let kind = signal("daily");
     let time = signal("09:00".to_owned());
     let day = signal(0u32);
@@ -234,9 +238,7 @@ fn form(app: AppState, composing: Signal<bool>) -> impl IntoElement {
         let problem_text = if name.is_empty() {
             Some("Give it a name.")
         } else if prompt.is_empty() {
-            Some("Write what the agent should do.")
-        } else if project.get_untracked().is_none() {
-            Some("Choose a project folder.")
+            Some("Write what the bot should do.")
         } else if schedule.is_none() {
             Some(if kind.get_untracked() == "every" { "Write a number of minutes." } else { "Write the time as 09:00." })
         } else {
@@ -249,60 +251,31 @@ fn form(app: AppState, composing: Signal<bool>) -> impl IntoElement {
         list.push(Automation {
             id: format!("auto_{}", bubble_core::time::unique_id()),
             name,
-            project: project.get_untracked().unwrap_or_default(),
+            project: project.clone(),
             prompt,
             schedule: schedule.unwrap_or(Schedule::Every { minutes: 60 }),
             enabled: true,
             created_at: bubble_store::now_ms(),
             last_run: None,
             last_task: None,
-            bot: None,
+            bot: Some(bot.clone()),
         });
         save(app, list);
         composing.set(false);
     };
-    let choose_folder = move || {
-        let picked = pick_paths(nsh_core::file_dialog::OpenDialog::folders().button_label("Use folder"));
-        spawn(async move {
-            if let Ok(Some(paths)) = picked.await {
-                if let Some(path) = paths.into_iter().next() {
-                    project.set(Some(path.to_string_lossy().into_owned()));
-                }
-            }
-        });
-    };
     view()
-        .w_full()
-        .max_w(px(READING_WIDTH))
-        .mx(auto())
-        .mt(px(16.0))
-        .p(px(16.0))
-        .gap(px(12.0))
+        .p(px(12.0))
+        .gap(px(10.0))
         .rounded(px(12.0))
         .border(px(LINE))
         .border_color(border())
         .bg(paper())
         .child(field("Name", name, false))
-        .child(field("What should the agent do each time?", prompt, true))
+        .child(field("What should the bot do each time?", prompt, true))
         .child(
             view()
                 .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    text(move || match project.get() {
-                        Some(cwd) => project_name(&cwd),
-                        None => "No project folder".into(),
-                    })
-                    .flex_1()
-                    .text_size(px(BODY))
-                    .text_color(secondary()),
-                )
-                .child(button("Choose a project folder", choose_folder)),
-        )
-        .child(
-            view()
-                .flex_row()
+                .flex_wrap()
                 .gap(px(6.0))
                 .child(choice("Daily".into(), move || kind.get() == "daily", move || kind.set("daily")))
                 .child(choice("Weekly".into(), move || kind.get() == "weekly", move || kind.set("weekly")))
@@ -341,7 +314,7 @@ fn form(app: AppState, composing: Signal<bool>) -> impl IntoElement {
                 .justify_end()
                 .gap(px(8.0))
                 .child(button("Cancel", move || composing.set(false)))
-                .child(primary_button("Save automation", create)),
+                .child(primary_button("Save routine", create)),
         )
 }
 
@@ -354,82 +327,211 @@ fn row(app: AppState, automation: ReadSignal<Automation>) -> impl IntoElement {
         } else {
             ", off".into()
         };
-        format!("{}, in {}{next}", a.schedule.describe(), project_name(&a.project))
+        format!("{}{next}", a.schedule.describe())
     };
     view()
-        .flex_row()
-        .items_center()
-        .gap(px(10.0))
-        .px(px(12.0))
-        .py(px(10.0))
+        .gap(px(6.0))
+        .py(px(8.0))
         .border_b(px(LINE))
         .border_color(hairline())
+        .child(text(move || automation.get().name).text_size(px(BODY)).text_color(ink()).number_of_lines(1))
+        .child(text(detail).text_size(px(SMALL)).text_color(muted()).number_of_lines(1))
         .child(
             view()
-                .flex_1()
-                .min_w(px(0.0))
-                .gap(px(2.0))
-                .child(text(move || automation.get().name).text_size(px(BODY)).text_color(ink()).number_of_lines(1))
-                .child(text(detail).text_size(px(SMALL)).text_color(muted()).number_of_lines(1)),
+                .flex_row()
+                .flex_wrap()
+                .gap(px(6.0))
+                .child(button("Run now", move || run_now(app, &id())))
+                .child(dynamic(move || {
+                    let on = automation.get().enabled;
+                    button(if on { "Turn off" } else { "Turn on" }, move || update(app, &id(), |a| a.enabled = !on))
+                }))
+                .child(button("Delete", move || remove(app, &id()))),
         )
-        .child(when(move || automation.get().last_task.is_some(), move || {
-            button("Open its bot", move || {
-                if let Some(task) = automation.get_untracked().last_task {
-                    app.route.set(Route::Task(task));
-                }
-            })
-        }))
-        .child(button("Run now", move || run_now(app, &id())))
-        .child(dynamic(move || {
-            let on = automation.get().enabled;
-            button(if on { "Turn off" } else { "Turn on" }, move || update(app, &id(), |a| a.enabled = !on))
-        }))
-        .child(button("Delete", move || {
-            let gone = id();
-            let list = app.automations.get_untracked().into_iter().filter(|a| a.id != gone).collect();
-            save(app, list);
-        }))
 }
 
-pub fn page(app: AppState) -> impl IntoElement {
+fn remove(app: AppState, id: &str) {
+    let list = app.automations.get_untracked().into_iter().filter(|a| a.id != id).collect();
+    save(app, list);
+}
+
+/// The routines of `bot`: those written for it, and those from before
+/// routines had a bot that run in the folder it looks after.
+pub fn of_bot(app: AppState, bot: &str) -> Vec<Automation> {
+    let list = app.automations.get();
+    let folder_bot = |project: &str| untracked(|| crate::manager::bot_for_project(app, project));
+    list.into_iter()
+        .filter(|a| match &a.bot {
+            Some(owner) => owner == bot,
+            None => folder_bot(&a.project).as_deref() == Some(bot),
+        })
+        .collect()
+}
+
+/// A bot's routines, in its details: the list, and the form that adds one.
+pub fn section(app: AppState, bot: String) -> impl IntoElement {
     let composing = signal(false);
-    scroll().flex_1().child(
-        view()
-            .w_full()
-            .max_w(px(READING_WIDTH + 80.0))
-            .mx(auto())
-            .px(px(20.0))
-            .pt(px(12.0))
-            .pb(px(24.0))
-            .child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .px(px(12.0))
-                    .pt(px(8.0))
-                    .child(
-                        text("Prompts that start a task on a schedule, in a project of yours.")
-                            .flex_1()
-                            .text_size(px(BODY))
-                            .text_color(muted()),
-                    )
-                    .child(when(move || !composing.get(), move || primary_button("New automation", move || composing.set(true)))),
-            )
-            .child(when(move || composing.get(), move || form(app, composing)))
-            .child(when(move || app.automations.with(|l| l.is_empty()) && !composing.get(), move || {
-                view().pt(px(100.0)).items_center().child(text("No automations yet.").text_size(px(BODY)).text_color(muted()))
-            }))
-            .child(view().mt(px(12.0)).child(each(
-                move || app.automations.get(),
-                |a: &Automation| a.id.clone(),
-                move |automation, _| row(app, automation),
-            ))),
-    )
+    let list_bot = bot.clone();
+    let empty_bot = bot.clone();
+    view()
+        .gap(px(8.0))
+        .child(
+            text("Recurring work this bot does on a schedule. You can also ask it in chat to set one up.")
+                .text_size(px(SMALL))
+                .text_color(muted()),
+        )
+        .child(when(move || of_bot(app, &empty_bot).is_empty() && !composing.get(), || {
+            text("No routines yet.").text_size(px(SMALL)).text_color(muted())
+        }))
+        .child(each(move || of_bot(app, &list_bot), |a: &Automation| a.id.clone(), move |automation, _| row(app, automation)))
+        .child(when(move || !composing.get(), move || button("Add a routine", move || composing.set(true))))
+        .child(when(move || composing.get(), move || form(app, composing, bot.clone())))
+}
+
+// --- The bot's own tools --------------------------------------------------------
+
+/// The tools a bot sets its routines up with.
+pub fn specs() -> Vec<ToolSpec> {
+    vec![
+        ToolSpec {
+            name: "list_routines".into(),
+            description: "Your routines: recurring work you do on a schedule, with each one's id, schedule and next run.".into(),
+            parameters: json!({ "type": "object", "properties": {} }),
+        },
+        ToolSpec {
+            name: "add_routine".into(),
+            description: "Set up a routine for yourself: when it is due, its prompt comes to you as a message and you do the work. Only when the person asks for recurring work.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Short, in the person's language" },
+                    "prompt": { "type": "string", "description": "What to do each time, self-contained" },
+                    "every": { "type": "string", "enum": ["day", "week", "minutes"], "description": "day: each day at `at`; week: each week on `day` at `at`; minutes: every `minutes` minutes" },
+                    "at": { "type": "string", "description": "Local time as HH:MM, for day and week" },
+                    "day": { "type": "string", "description": "The weekday in English, for week" },
+                    "minutes": { "type": "integer", "description": "How many minutes between runs, for minutes" }
+                },
+                "required": ["name", "prompt", "every"]
+            }),
+        },
+        ToolSpec {
+            name: "remove_routine".into(),
+            description: "Remove one of your routines by its id.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }),
+        },
+    ]
+}
+
+pub fn is_routine_tool(name: &str) -> bool {
+    matches!(name, "list_routines" | "add_routine" | "remove_routine")
+}
+
+/// The schedule a bot described, or what is wrong with it.
+pub fn schedule_from(args: &serde_json::Value) -> Result<Schedule, String> {
+    let text = |key: &str| args.get(key).and_then(|v| v.as_str()).map(str::trim).unwrap_or_default();
+    let at = || clock_time(text("at")).ok_or_else(|| "Give the time as HH:MM in `at`, such as 09:00.".to_owned());
+    match text("every") {
+        "day" => Ok(Schedule::Daily { time: at()? }),
+        "week" => {
+            let day = DAYS
+                .iter()
+                .position(|d| d.eq_ignore_ascii_case(text("day")))
+                .ok_or_else(|| "Give the weekday in `day`, such as Monday.".to_owned())?;
+            Ok(Schedule::Weekly { day: day as u32, time: at()? })
+        }
+        "minutes" => match args.get("minutes").and_then(|m| m.as_u64()) {
+            Some(minutes) if minutes >= 5 => Ok(Schedule::Every { minutes: minutes as u32 }),
+            Some(_) => Err("A routine runs at most every 5 minutes.".into()),
+            None => Err("Give the number of minutes in `minutes`.".into()),
+        },
+        other => Err(format!("Unknown `every` {other:?}; use day, week or minutes.")),
+    }
+}
+
+/// Answers a routine call made by the bot `bot`.
+pub fn execute(app: AppState, bot: &str, call: &ToolCall) -> ToolOutput {
+    let args = call.arguments_json();
+    let text = |key: &str| args.get(key).and_then(|v| v.as_str()).map(str::trim).unwrap_or_default().to_owned();
+    let ok = |content: String| ToolOutput { content, is_error: false };
+    let error = |content: String| ToolOutput { content, is_error: true };
+    match call.name.as_str() {
+        "list_routines" => {
+            let mine = untracked(|| of_bot(app, bot));
+            if mine.is_empty() {
+                return ok("You have no routines.".into());
+            }
+            ok(format!(
+                "id | name | schedule | next run\n{}",
+                mine.iter()
+                    .map(|a| {
+                        let next = if a.enabled { a.next_run().map(when_label).unwrap_or_default() } else { "off".into() };
+                        format!("{} | {} | {} | {next}", a.id, a.name, a.schedule.describe())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ))
+        }
+        "add_routine" => {
+            let (name, prompt) = (text("name"), text("prompt"));
+            if name.is_empty() || prompt.is_empty() {
+                return error("A routine needs a name and a prompt.".into());
+            }
+            let schedule = match schedule_from(&args) {
+                Ok(schedule) => schedule,
+                Err(message) => return error(message),
+            };
+            let project = app.with_store(|s| s.get_task(bot)).flatten().and_then(|t| t.project_cwd).unwrap_or_default();
+            let automation = Automation {
+                id: format!("auto_{}", bubble_core::time::unique_id()),
+                name: name.clone(),
+                project,
+                prompt,
+                schedule,
+                enabled: true,
+                created_at: bubble_store::now_ms(),
+                last_run: None,
+                last_task: None,
+                bot: Some(bot.to_owned()),
+            };
+            let said = format!("Set up routine {} \"{name}\": {}.", automation.id, automation.schedule.describe().to_lowercase());
+            let mut list = app.automations.get_untracked();
+            list.push(automation);
+            save(app, list);
+            ok(said)
+        }
+        "remove_routine" => {
+            let id = text("id");
+            if !untracked(|| of_bot(app, bot)).iter().any(|a| a.id == id) {
+                return error(format!("You have no routine {id}. Call list_routines for the ids."));
+            }
+            remove(app, &id);
+            ok(format!("Removed routine {id}."))
+        }
+        other => error(format!("There is no tool called {other}.")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bot_describes_a_schedule_in_words() {
+        assert_eq!(schedule_from(&json!({ "every": "day", "at": "9:05" })), Ok(Schedule::Daily { time: "09:05".into() }));
+        assert_eq!(
+            schedule_from(&json!({ "every": "week", "day": "friday", "at": "17:00" })),
+            Ok(Schedule::Weekly { day: 4, time: "17:00".into() })
+        );
+        assert_eq!(schedule_from(&json!({ "every": "minutes", "minutes": 30 })), Ok(Schedule::Every { minutes: 30 }));
+        assert!(schedule_from(&json!({ "every": "minutes", "minutes": 1 })).unwrap_err().contains("5 minutes"));
+        assert!(schedule_from(&json!({ "every": "day" })).unwrap_err().contains("HH:MM"));
+        assert!(schedule_from(&json!({ "every": "week", "day": "someday", "at": "09:00" })).unwrap_err().contains("weekday"));
+        assert!(schedule_from(&json!({ "every": "fortnight" })).is_err());
+    }
 
     fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
         Local.with_ymd_and_hms(y, mo, d, h, mi, 0).earliest().unwrap().timestamp_millis()

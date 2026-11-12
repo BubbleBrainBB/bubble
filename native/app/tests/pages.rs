@@ -158,25 +158,26 @@ fn the_sidebar_pages_work() {
     app.wait_for_within("text:/Merged/", long).unwrap();
     assert!(root.join("merged").exists(), "gh pr merge ran");
 
-    // Automations: made, then run now: a task with the prompt as its first message.
-    app.press("id:nav-settings").unwrap();
-    app.press("id:nav-automations").unwrap();
-    app.wait_for("No automations yet.").unwrap();
-    app.press("New automation").unwrap();
+    // Routines live with the bot that runs them: made in its details, then
+    // run now. The prompt goes to that bot's conversation as its routine's;
+    // no bot is made for a run.
+    app.press("id:side-Set up").unwrap();
+    app.press("id:bot-details-toggle").unwrap();
+    app.wait_for("No routines yet.").unwrap();
+    app.press("Add a routine").unwrap();
     app.type_text("text:Name", "Nightly check").unwrap();
-    app.type_text("text:What should the agent do each time?", "Check the nightly build").unwrap();
+    app.type_text("text:What should the bot do each time?", "Check the nightly build").unwrap();
     app.press("Every few minutes").unwrap();
-    app.press("Save automation").unwrap();
-    app.wait_for("text:/^Every hour, in demo, next /").unwrap();
-    // Run now: the prompt goes to the bot that looks after the project, as
-    // its routine's; no bot is made for a run.
+    app.press("Save routine").unwrap();
+    app.wait_for("text:/^Every hour, next /").unwrap();
     app.press("Run now").unwrap();
-    app.press("Open its bot").unwrap();
-    app.wait_for("text:Message Set up").unwrap();
     app.wait_for("From your routine Nightly check").unwrap();
     app.wait_for("text:Check the nightly build").unwrap();
     app.wait_for_within("On it.", long).unwrap();
     assert!(!app.shows("id:side-Nightly check"), "a routine's run is not a bot");
+    // The run is on record with the work the bot was given.
+    app.wait_for_within("text:From its routine; finished", long).unwrap();
+    app.press("id:bot-details-toggle").unwrap();
 
     // Skills: listed, and found by what they do.
     app.press("id:nav-settings").unwrap();

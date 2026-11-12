@@ -32,18 +32,41 @@ fn pick(seed: &str) -> (usize, usize) {
     ((hash % SHAPES.len() as u64) as usize, ((hash / 7) % COLORS.len() as u64) as usize)
 }
 
+/// How many shapes and colors there are to choose from.
+pub const SHAPE_COUNT: usize = SHAPES.len();
+pub const COLOR_COUNT: usize = COLORS.len();
+
+/// The shape and color a bot has until a person picks others.
+pub fn default_face(seed: &str) -> (usize, usize) {
+    pick(seed)
+}
+
 /// The face of the bot `seed` names (its id), as SVG.
+#[cfg(test)]
 pub fn markup(seed: &str) -> String {
     let (shape, color) = pick(seed);
+    face_markup(shape, color)
+}
+
+/// A face of a given shape and color, as SVG.
+pub fn face_markup(shape: usize, color: usize) -> String {
+    let (shape, color) = (shape % SHAPES.len(), color % COLORS.len());
     format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><g fill="{}">{}</g>{EYES}</svg>"#,
         COLORS[color], SHAPES[shape]
     )
 }
 
-/// A bot's face, `size` points wide.
-pub fn bot(seed: &str, size: f32) -> Svg {
-    svg(ImageSrc::svg_markup(&markup(seed))).size(px(size)).flex_shrink_0()
+/// A bot's face, `size` points wide: the look the person picked for it,
+/// or the one its id gives it. It follows a change of look.
+pub fn bot(app: crate::state::AppState, id: &str, size: f32) -> Svg {
+    let id = id.to_owned();
+    svg(move || {
+        let (shape, color) = app.face_of(&id);
+        ImageSrc::svg_markup(&face_markup(shape, color))
+    })
+    .size(px(size))
+    .flex_shrink_0()
 }
 
 /// The main bot's face.

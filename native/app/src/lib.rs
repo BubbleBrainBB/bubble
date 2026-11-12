@@ -5,9 +5,11 @@
 mod automations;
 mod avatar;
 mod changes;
+mod details;
 mod engine;
 mod github;
 mod manager;
+mod memory;
 mod pages;
 mod palette;
 mod prs;
@@ -70,7 +72,6 @@ pub fn App() -> impl IntoElement {
                         Route::Task(id) => pages::task(app, id).into_element(),
                         Route::NewBot => pages::new_bot(app).into_element(),
                         Route::PullRequests => prs::page(app).into_element(),
-                        Route::Automations => automations::page(app).into_element(),
                         Route::Skills => pages::skills(app).into_element(),
                         Route::Search => pages::search(app).into_element(),
                         Route::Settings => pages::settings(app).into_element(),

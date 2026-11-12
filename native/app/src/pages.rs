@@ -53,7 +53,6 @@ pub fn title_bar(app: AppState, route: Route) -> AnyElement {
             .child(side())
             .into_element(),
         Route::PullRequests => page("Pull requests"),
-        Route::Automations => page("Routines"),
         Route::Skills => page("Skills"),
         Route::Search => page("Search"),
         Route::Settings => page("Settings"),
@@ -86,10 +85,15 @@ pub fn title_bar(app: AppState, route: Route) -> AnyElement {
                         .child(icon(FOLDER_ICON, 14.0).text_color(muted()))
                         .child(text(folder.clone()).text_size(px(SMALL)).text_color(muted()).number_of_lines(1))
                 })))
-                .child(who(
-                    crate::avatar::bot(&id, 22.0),
-                    move || SharedString::from(for_title().map(|s| s.task.title).unwrap_or_default()),
-                ))
+                // The pill opens who the bot is: its details.
+                .child(
+                    who(crate::avatar::bot(app, &id, 22.0), move || SharedString::from(for_title().map(|s| s.task.title).unwrap_or_default()))
+                        .cursor(Cursor::Pointer)
+                        .window_drag(false)
+                        .label("Bot details")
+                        .test_id("bot-details-toggle")
+                        .on_press(move || app.details_open.update(|open| *open = !*open)),
+                )
                 .child(
                     side()
                         .justify_end()
@@ -402,7 +406,7 @@ pub fn home(app: AppState) -> impl IntoElement {
             "Tell Bubble what needs doing; it hands the work to your bots.",
         ))
         .child(away_row(app))
-        .child(composer(app, conversation, format!("Message {}", crate::manager::MAIN_BOT), ComposerFor::Manager))
+        .child(composer(app, conversation, Rc::new(|| format!("Message {}", crate::manager::MAIN_BOT)), ComposerFor::Manager))
 }
 
 /// What a GitHub event became, in a few words.
@@ -604,9 +608,14 @@ pub fn tasks(app: AppState) -> impl IntoElement {
 pub fn task(app: AppState, task_id: String) -> impl IntoElement {
     let conversation = app.task_conversation(&task_id);
     app.mark_seen(&task_id);
-    let bot_name = app.with_store(|s| s.get_task(&task_id)).flatten().map(|t| t.title).unwrap_or_else(|| "this bot".to_owned());
+    // The name follows a rename while the conversation is open.
+    let name_id = task_id.clone();
+    let bot_name = move || {
+        app.tasks.with(|tasks| tasks.iter().find(|t| t.task.id == name_id).map(|t| t.task.title.clone())).unwrap_or_else(|| "this bot".to_owned())
+    };
     let link_id = task_id.clone();
     let proposals_id = task_id.clone();
+    let details_id = task_id.clone();
     app.linking.set(false);
     let panel_id = task_id.clone();
     view()
@@ -624,9 +633,10 @@ pub fn task(app: AppState, task_id: String) -> impl IntoElement {
                     "Describe what the agent should do, then send.",
                 ))
                 .child(proposals(app, proposals_id))
-                .child(composer(app, conversation, format!("Message {bot_name}"), ComposerFor::Task(task_id))),
+                .child(composer(app, conversation, Rc::new(move || format!("Message {}", bot_name())), ComposerFor::Task(task_id))),
         )
         .child(when(move || app.changes_open.get(), move || crate::changes::panel(app, panel_id.clone())))
+        .child(when(move || app.details_open.get(), move || crate::details::panel(app, details_id.clone())))
 }
 
 /// Work that was brought to this bot and waits for the person's yes: each
@@ -956,14 +966,13 @@ fn more_pages(app: AppState) -> impl IntoElement {
             view()
                 .gap(px(2.0))
                 .child(text("More").text_size(px(BODY)).text_color(ink()))
-                .child(text("Skills the bots can load, routines that start work on a schedule, and open pull requests").text_size(px(SMALL)).text_color(muted())),
+                .child(text("Skills the bots can load, and open pull requests").text_size(px(SMALL)).text_color(muted())),
         )
         .child(
             view()
                 .flex_row()
                 .gap(px(8.0))
                 .child(link("Skills", "nav-skills", Route::Skills))
-                .child(link("Routines", "nav-automations", Route::Automations))
                 .child(link("Pull requests", "nav-pull-requests", Route::PullRequests)),
         )
 }

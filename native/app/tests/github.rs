@@ -123,6 +123,7 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
     // SAFETY: the only test in this binary, before the engine starts.
     unsafe {
         std::env::set_var("BUBBLE_HOME", &home);
+        std::env::set_var("BUBBLE_MEMORY_AUTO", "0");
         std::env::set_var("BUBBLE_GH", &gh);
         std::env::set_var("BUBBLE_GH_POLL_MS", "300");
     }

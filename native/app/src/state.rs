@@ -47,6 +47,17 @@ fn from_key(message_id: &str) -> String {
     format!("from:{message_id}")
 }
 
+/// The shape and color a person picked for a bot, as "shape:color".
+fn bot_face_key(bot_id: &str) -> String {
+    format!("bot_face:{bot_id}")
+}
+
+/// Set when a bot moved to another folder: its next message starts a
+/// fresh part of the conversation there.
+fn bot_moved_key(bot_id: &str) -> String {
+    format!("bot_moved:{bot_id}")
+}
+
 fn bot_instruction_key(bot_id: &str) -> String {
     format!("bot_instruction:{bot_id}")
 }
@@ -123,7 +134,6 @@ pub enum Route {
     /// The form that makes a bot.
     NewBot,
     PullRequests,
-    Automations,
     Skills,
     Search,
     Settings,
@@ -188,6 +198,12 @@ pub struct AppState {
     pub previews: Signal<HashMap<String, bubble_store::Preview>>,
     /// Work brought to a bot that waits for the person's yes.
     pub proposed: Signal<Vec<bubble_store::Ticket>>,
+    /// Bumped when a ticket is made or moves on.
+    pub tickets_revision: Signal<u32>,
+    /// Bumped when a bot's or the team's notes change.
+    pub memory_revision: Signal<u32>,
+    /// The open bot's details show beside its conversation.
+    pub details_open: Signal<bool>,
     /// When the person last looked at each bot's conversation.
     seen: Signal<HashMap<String, i64>>,
     /// GitHub events since the person last wrote to the Manager (Home's
@@ -270,6 +286,9 @@ impl AppState {
             tasks: signal(Vec::new()),
             previews: signal(HashMap::new()),
             proposed: signal(Vec::new()),
+            tickets_revision: signal(0),
+            memory_revision: signal(0),
+            details_open: signal(false),
             seen: signal(setting(BOTS_SEEN).and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default()),
             away: signal(Vec::new()),
             linking: signal(false),
@@ -689,6 +708,7 @@ impl AppState {
         if let Some(proposed) = self.with_store(|s| s.proposed_tickets()) {
             self.proposed.set(proposed);
         }
+        self.tickets_revision.update(|revision| *revision += 1);
     }
 
     /// [`Self::bots`], without following changes.
@@ -747,6 +767,51 @@ impl AppState {
     /// the main bot unless another is recorded.
     pub fn sender_label(&self, message_id: &str) -> String {
         self.with_store(|s| s.setting(&from_key(message_id))).flatten().unwrap_or_else(|| manager::MAIN_BOT.to_owned())
+    }
+
+    /// The shape and color of a bot's face.
+    pub fn face_of(&self, bot_id: &str) -> (usize, usize) {
+        self.task_revision.get();
+        self.with_store(|s| s.setting(&bot_face_key(bot_id)))
+            .flatten()
+            .and_then(|saved| {
+                let (shape, color) = saved.split_once(':')?;
+                Some((shape.parse().ok()?, color.parse().ok()?))
+            })
+            .unwrap_or_else(|| crate::avatar::default_face(bot_id))
+    }
+
+    /// Gives a bot the next shape, or the next color.
+    pub fn cycle_face(&self, bot_id: &str, shape: bool) {
+        let (now_shape, now_color) = untracked(|| self.face_of(bot_id));
+        let next = if shape {
+            ((now_shape + 1) % crate::avatar::SHAPE_COUNT, now_color)
+        } else {
+            (now_shape, (now_color + 1) % crate::avatar::COLOR_COUNT)
+        };
+        self.with_store(|s| s.set_setting(&bot_face_key(bot_id), Some(&format!("{}:{}", next.0, next.1))));
+        self.task_revision.update(|v| *v += 1);
+    }
+
+    pub fn rename_bot(&self, bot_id: &str, name: &str) {
+        self.with_store(|s| s.rename_task(bot_id, name));
+        self.refresh_tasks();
+        self.task_revision.update(|v| *v += 1);
+    }
+
+    /// Moves a bot to another folder, or to none. Its conversation goes on
+    /// in a fresh part there: the agent's session belongs to a folder.
+    pub fn move_bot(&self, bot_id: &str, folder: Option<&str>) {
+        let before = self.with_store(|s| s.get_task(bot_id)).flatten().and_then(|t| t.project_cwd);
+        if before.as_deref() == folder {
+            return;
+        }
+        self.with_store(|s| {
+            s.set_task_project(bot_id, folder)?;
+            s.set_setting(&bot_moved_key(bot_id), Some(folder.unwrap_or("no folder")))
+        });
+        self.refresh_tasks();
+        self.task_revision.update(|v| *v += 1);
     }
 
     /// What a bot was told it is for.
@@ -1417,6 +1482,24 @@ impl Conversation {
         started
     }
 
+    /// What the person said in the turn that just ended and what the bot
+    /// answered, when it was the person who started the turn.
+    fn last_exchange_with_person(&self) -> Option<(String, String)> {
+        let turn = self.active_turn.get();
+        self.lines.with_untracked(|lines| {
+            let opener_id = turn.strip_prefix("turn-")?;
+            let opener = lines.iter().find(|l| l.id == opener_id)?;
+            if !matches!(opener.kind, LineKind::Message(MessageRole::User)) {
+                return None;
+            }
+            let answered = lines
+                .iter()
+                .rev()
+                .find(|l| l.turn_id.as_deref() == Some(&turn) && matches!(l.kind, LineKind::Message(MessageRole::Assistant)) && !l.text.trim().is_empty())?;
+            Some((opener.text.clone(), answered.text.clone()))
+        })
+    }
+
     /// A turn is over: whoever asked for the work hears how it went, and
     /// the next message that waited is taken up.
     fn after_turn(&self, app: AppState, ending: TurnStatus, failure: Option<String>) {
@@ -1526,6 +1609,12 @@ impl Conversation {
             return Err("The agent is still on its previous turn; send this when it finishes.".into());
         }
         let task_id = self.task_id.get();
+        // A bot that moved starts a fresh part of its conversation there.
+        let moved = task_id.as_ref().and_then(|id| app.with_store(|s| s.setting(&bot_moved_key(id))).flatten());
+        let fresh = fresh.or_else(|| moved.as_ref().map(|folder| format!("moved to {}", crate::ui::project_name(folder))));
+        if let (Some(id), Some(_)) = (&task_id, &moved) {
+            app.with_store(|s| s.set_setting(&bot_moved_key(id), None));
+        }
         let model_reference = match &task_id {
             Some(id) => app.task_model_of(id),
             None => app.model_for(RunRole::Manager),
@@ -1677,7 +1766,14 @@ impl Conversation {
         // The Manager has a role of its own and only the app's tools; a task
         // is Bubble's coding agent in its project, told what the task is.
         let (system_prompt, append_system_prompt, cwd, host_tools, agent_name) = match &task_id {
-            None => (Some(with_instructions(manager::PROMPT.to_owned(), None)), None, None, manager::specs(), None),
+            None => {
+                // The main bot reads the team's notes and keeps them.
+                let notes = crate::memory::prompt(&Sender::Main);
+                let prompt = if notes.is_empty() { manager::PROMPT.to_owned() } else { format!("{}\n\n{notes}", manager::PROMPT) };
+                let mut tools = manager::specs();
+                tools.extend(crate::memory::specs());
+                (Some(with_instructions(prompt, None)), None, None, tools, None)
+            }
             Some(id) => {
                 let task = app.with_store(|s| s.get_task(id)).flatten();
                 let title = task.as_ref().map(|t| t.title.clone()).unwrap_or_default();
@@ -1685,11 +1781,21 @@ impl Conversation {
                 let cwd = project.as_deref().map(PathBuf::from).filter(|p| p.is_dir());
                 let mut tools = if cwd.is_some() { github::task_tools(app, project.as_deref()) } else { Vec::new() };
                 tools.extend(manager::bot_specs());
+                tools.extend(crate::automations::specs());
+                tools.extend(crate::memory::specs());
                 let full = app.task_full_access(id) && self.driven_by_person(app, &run.id);
                 let instruction = app.bot_instruction(id);
                 // The agent goes by the bot's name, not the main bot's.
                 let name = Some(title.clone()).filter(|t| !t.trim().is_empty());
-                (None, Some(task_prompt(&title, &instruction, project.as_deref(), cwd.is_some(), full)), cwd, tools, name)
+                let mut prompt = task_prompt(&title, &instruction, project.as_deref(), cwd.is_some(), full);
+                prompt.push_str("\n\n");
+                prompt.push_str(crate::memory::GUIDANCE);
+                let notes = crate::memory::prompt(&Sender::Bot(id.clone()));
+                if !notes.is_empty() {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&notes);
+                }
+                (None, Some(prompt), cwd, tools, name)
             }
         };
         // The newest message is what the agent answers; it keeps the rest
@@ -1806,6 +1912,15 @@ impl Conversation {
                 conversation.busy.set(false);
                 app.refresh_tasks();
                 conversation.changed();
+                // What the person said that should last is kept in the bot's notes.
+                if ending == TurnStatus::Completed {
+                    if let Some(bot) = conversation.task_id.get() {
+                        if let Some((said, answered)) = conversation.last_exchange_with_person() {
+                            let model = app.task_model_of(&bot);
+                            crate::memory::review(app, bot, said, answered, model);
+                        }
+                    }
+                }
                 conversation.after_turn(app, ending, failure);
                 app.pump_queue();
             });
@@ -2002,7 +2117,12 @@ impl Conversation {
                         Some(id) => Sender::Bot(id),
                         None => Sender::Main,
                     };
-                    let _ = respond.send(manager::execute(app, &caller, &call));
+                    let output = match &caller {
+                        _ if crate::memory::is_memory_tool(&call.name) => crate::memory::execute(app, &caller, &call),
+                        Sender::Bot(id) if crate::automations::is_routine_tool(&call.name) => crate::automations::execute(app, id, &call),
+                        _ => manager::execute(app, &caller, &call),
+                    };
+                    let _ = respond.send(output);
                 }
             }
             AgentEvent::ApprovalNeeded { call, permission, respond } => {

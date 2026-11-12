@@ -223,7 +223,7 @@ fn bot_row(app: AppState, bot: ReadSignal<TaskSummary>) -> impl IntoElement {
             app.mark_seen(&open);
             app.route.set(Route::Task(open.clone()));
         })
-        .child(avatar::bot(&id, 38.0))
+        .child(avatar::bot(app, &id, 38.0))
         .child(
             view()
                 .flex_1()

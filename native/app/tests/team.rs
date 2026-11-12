@@ -119,6 +119,7 @@ fn bots_ask_each_other_and_answers_go_back_to_whoever_asked() {
     // thread that reads the environment.
     unsafe {
         std::env::set_var("BUBBLE_HOME", &home);
+        std::env::set_var("BUBBLE_MEMORY_AUTO", "0");
         std::env::set_var("BUBBLE_NO_SHELL_ENV", "1");
         std::env::set_var("BUBBLE_GH", root.join("no-gh"));
     }

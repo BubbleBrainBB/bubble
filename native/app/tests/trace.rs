@@ -262,7 +262,7 @@ fn live_order_disclosures_terminal_states_and_restart_agree() {
     drop(app);
 
     let mut app = start();
-    app.press("text:Trace regression").unwrap();
+    app.press("id:side-Trace regression").unwrap();
     app.wait_for_within("Keep this stopped reply.", long).unwrap();
     app.wait_for("text:/The model is not available/").unwrap();
     app.wait_for("text:/^You stopped/").unwrap();

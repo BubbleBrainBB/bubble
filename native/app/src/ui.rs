@@ -1701,7 +1701,7 @@ fn access_menu(app: AppState, task_id: String) -> impl IntoElement {
 pub fn composer(
     app: AppState,
     conversation: Conversation,
-    placeholder: String,
+    placeholder: Rc<dyn Fn() -> String>,
     target: ComposerFor,
 ) -> impl IntoElement {
     use bubble_core::Image;
@@ -1909,7 +1909,10 @@ pub fn composer(
             .child(
                 nsh_base::input()
                     .value(draft)
-                    .placeholder(placeholder.clone())
+                    .placeholder({
+                        let placeholder = placeholder.clone();
+                        move || placeholder()
+                    })
                     .placeholder_color(move || color(muted()))
                     .multiline(true)
                     .submit_behavior(SubmitBehavior::Submit)

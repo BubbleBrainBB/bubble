@@ -120,7 +120,10 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
     .unwrap();
     // SAFETY: this is the only test in the binary, set before the engine
     // starts any thread that reads the environment.
-    unsafe { std::env::set_var("BUBBLE_HOME", &home) };
+    unsafe {
+        std::env::set_var("BUBBLE_HOME", &home);
+        std::env::set_var("BUBBLE_MEMORY_AUTO", "0");
+    }
 
     // New work starts with the Manager; this test starts from a task already made.
     bubble_store::Store::open(home.join("native/bubble.db"))

@@ -134,6 +134,7 @@ fn tasks_use_mcp_tools_and_settings_show_what_is_there() {
     // thread that reads the environment.
     unsafe {
         std::env::set_var("BUBBLE_HOME", &home);
+        std::env::set_var("BUBBLE_MEMORY_AUTO", "0");
         std::env::set_var("BUBBLE_NO_SHELL_ENV", "1");
     }
 
