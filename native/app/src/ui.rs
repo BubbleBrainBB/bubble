@@ -101,16 +101,47 @@ pub fn primary_button(label: &str, on_press: impl Fn() + 'static) -> View {
         .child(text(label.to_owned()).text_size(px(BODY)).font_weight(FontWeight::MEDIUM).text_color(paper()))
 }
 
+/// How the conversation sets a document's parts.
+fn reading_classes() -> TextViewClasses {
+    TextViewClasses {
+        root: Some("text-[13px] leading-[22px] text-[#1A1A1A] dark:text-[#ECECEC]".into()),
+        heading: Some("text-[15px] font-semibold".into()),
+        // An item is as wide as what it says, not what is left of its row:
+        // a bubble sized by its content then makes room for its lists too.
+        list_item_content: Some("flex-auto".into()),
+        ..Default::default()
+    }
+}
+
 /// Markdown in the conversation's type.
 fn markdown(source: String) -> AnyElement {
-    nsh_base::text_view::text_view()
-        .markdown(SharedString::from(source))
-        .selectable(true)
-        .classes(TextViewClasses {
-            root: Some("text-[13px] leading-[22px] text-[#1A1A1A] dark:text-[#ECECEC]".into()),
-            heading: Some("text-[15px] font-semibold".into()),
-            ..Default::default()
-        })
+    nsh_base::text_view::text_view().markdown(SharedString::from(source)).selectable(true).classes(reading_classes()).into_element()
+}
+
+/// Whether some block of `blocks` takes the width it is given and asks for
+/// none of its own: an alert's and a folded section's text sit in what is
+/// left of a row.
+fn takes_given_width(blocks: &[nsh_base::text_view::Block]) -> bool {
+    use nsh_base::text_view::Block;
+    blocks.iter().any(|block| match block {
+        Block::Blockquote { alert: Some(_), .. } | Block::Details { .. } => true,
+        Block::Blockquote { children, .. } => takes_given_width(children),
+        Block::List { items, .. } => items.iter().any(|item| takes_given_width(&item.children)),
+        _ => false,
+    })
+}
+
+/// What a bot said, in its bubble: as wide as what it says, up to the
+/// column. A reply with a block that asks for no width of its own, or with
+/// footnotes (set the same way), gets the whole column instead, since a
+/// bubble sized by such content would be sized without it.
+fn reply_bubble(source: &str) -> AnyElement {
+    let document = nsh_base::text_view::Parser::new().markdown(source);
+    let fits = !takes_given_width(&document.blocks) && document.footnotes.is_empty();
+    let bubble = view().px(px(14.0)).py(px(10.0)).rounded(px(18.0)).bg(bot_bubble());
+    let bubble = if fits { bubble.self_start().max_w(percentage(1.0)) } else { bubble.w_full() };
+    bubble
+        .child(nsh_base::text_view::text_view().document(document).selectable(true).classes(reading_classes()))
         .into_element()
 }
 
@@ -1167,7 +1198,7 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
                 // the work above it, not of the reply.
                 view()
                     .child((!current.text.trim().is_empty()).then(|| {
-                        view().self_start().max_w(percentage(1.0)).px(px(14.0)).py(px(10.0)).rounded(px(18.0)).bg(bot_bubble()).child(markdown(current.text.clone()))
+                        reply_bubble(&current.text)
                     }))
                     .into_element()
             }
