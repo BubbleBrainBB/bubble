@@ -27,7 +27,7 @@ import { buildToolPromptOptions, createAllTools, type PlanController, type ToolS
 import { getProcessManager } from "./tasks/manager.js";
 import { PromotionChannel } from "./tasks/promotion.js";
 import { runStreamJsonSession } from "./stream-json.js";
-import { PrintRunCollector, formatPrintJson, formatPrintJsonError, type PrintChangeSummary } from "./print-output.js";
+import { PrintRunCollector, formatPrintJson, formatPrintJsonError, watchForStalledTurn, type PrintChangeSummary } from "./print-output.js";
 import { FileStateTracker } from "./tools/file-state.js";
 import { GoalStore } from "./goal/store.js";
 import { PermissionAwareApprovalController } from "./approval/controller.js";
@@ -732,8 +732,29 @@ async function main() {
       const printSessionId = sessionManager
         ? basename(sessionManager.getSessionFile())
         : undefined;
+      let printedTurnText = false;
+      // A turn that can no longer settle must not read as a success: without
+      // this the process exits 0 with a partial answer (plain) or no output
+      // at all (json).
+      const turnSettled = watchForStalledTurn(() => {
+        const message = "The turn stopped before the model's reply was complete: nothing was left running that could finish it.";
+        process.exitCode = 1;
+        if (!jsonOutput) {
+          if (printedTurnText) process.stdout.write("\n");
+          console.error(chalk.red(`Error: ${message}`));
+          return;
+        }
+        void collectChanges().catch(() => undefined).then((changes) => {
+          process.stdout.write(formatPrintJsonError({
+            message,
+            summary: collector.summary(),
+            sessionId: printSessionId,
+            compaction: agent.getCompactionStats(),
+            changes,
+          }) + "\n");
+        });
+      });
       try {
-        let printedTurnText = false;
         for await (const event of agent.run(prompt, args.cwd)) {
           traceEvent("print_agent_event", summarizeAgentEventForTrace(event));
           collector.onEvent(event);
@@ -787,6 +808,8 @@ async function main() {
           changes: await collectChanges(),
         }) + "\n");
         process.exitCode = 1;
+      } finally {
+        turnSettled();
       }
 
       return;

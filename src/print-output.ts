@@ -196,3 +196,29 @@ export function formatPrintJsonError(input: {
     ...(input.changes ? { changes: input.changes } : {}),
   });
 }
+
+/**
+ * Print mode ends when its turn settles. When nothing is left on the event
+ * loop that could settle it (a reply stream that neither ends nor fails),
+ * Node exits on its own with code 0, and the run would pass for a success
+ * with whatever partial text it had printed.
+ *
+ * `onStalled` runs once if the loop drains before the returned function is
+ * called. Call the returned function as soon as the turn settles either way.
+ */
+export function watchForStalledTurn(
+  onStalled: () => void,
+  proc: {
+    on(event: "beforeExit", listener: () => void): unknown;
+    off(event: "beforeExit", listener: () => void): unknown;
+  } = process,
+): () => void {
+  const onBeforeExit = () => {
+    proc.off("beforeExit", onBeforeExit);
+    onStalled();
+  };
+  proc.on("beforeExit", onBeforeExit);
+  return () => {
+    proc.off("beforeExit", onBeforeExit);
+  };
+}
