@@ -620,6 +620,7 @@ fn link_github(app: AppState, task_id: &str, args: &Value, project: Option<&str>
         }
     }
     app.refresh_tasks();
+    crate::github::first_look(app);
     ok(format!("Linked {} in {repo}.", linked.join(" and ")))
 }
 

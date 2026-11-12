@@ -173,6 +173,34 @@ async fn follow_links(app: AppState, gh: &Gh, repos: &[&Repo]) {
     }
 }
 
+/// Takes the first look at the issues and pull requests that were just
+/// linked to a bot, now rather than at the loop's next turn: what is said
+/// there from this moment on is new, and reaches the bot.
+pub fn first_look(app: AppState) {
+    let Some(gh) = app.gh() else { return };
+    spawn(async move {
+        let links = app.with_store(|s| s.watched_links()).unwrap_or_default();
+        for link in links.into_iter().filter(|link| link.snapshot.is_none()) {
+            let Some(kind) = Kind::parse(&link.kind) else { continue };
+            let fetched = background({
+                let (gh, repo, number) = (gh.clone(), link.repo.clone(), link.number as u64);
+                async move { gh.snapshot(kind, &repo, number).await }
+            })
+            .await;
+            let Ok(Ok(now)) = fetched else { continue };
+            // The loop may have looked meanwhile; its look stands.
+            let still_unseen = app
+                .with_store(|s| s.watched_links())
+                .unwrap_or_default()
+                .iter()
+                .any(|other| other.id == link.id && other.snapshot.is_none());
+            if let (true, Ok(text)) = (still_unseen, serde_json::to_string(&now)) {
+                app.with_store(|s| s.set_link_snapshot(&link.id, &text));
+            }
+        }
+    });
+}
+
 /// Records a change on a linked item and decides what it means for the task.
 fn route_change(app: AppState, task_id: &str, repo: &str, kind: Kind, number: u64, change: &Change, level: Level) {
     let item = kind.label(number);

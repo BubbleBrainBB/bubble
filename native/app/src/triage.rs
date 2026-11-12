@@ -19,11 +19,14 @@ use crate::engine::{self, HostTurn, TurnEvent};
 use crate::github::{self, Level};
 use crate::state::AppState;
 
-/// A batch waits this long after its newest event before triage starts.
-const QUIET_MS: i64 = 30_000;
+/// A batch waits this long after its newest event before triage starts,
+/// so what comes in together is sorted together.
+const QUIET_MS: i64 = 15_000;
 
 thread_local! {
     static RUNNING: Cell<bool> = const { Cell::new(false) };
+    /// A look is due when the batch has been quiet long enough.
+    static DUE: Cell<bool> = const { Cell::new(false) };
 }
 
 pub const PROMPT: &str = "You are Bubble, the person's main bot, sorting what came in from GitHub while they were busy. They do not \
@@ -166,6 +169,7 @@ fn execute(app: AppState, call: &ToolCall, batch: &[Event]) -> ToolOutput {
             if done.is_none() {
                 return error("The notification could not be saved.");
             }
+            github::first_look(app);
             github::deliver_pending(app);
             ok(format!("Gave {id} to bot {task_id}."))
         }
@@ -221,6 +225,7 @@ fn execute(app: AppState, call: &ToolCall, batch: &[Event]) -> ToolOutput {
             if saved.is_none() {
                 return error("The item could not be saved.");
             }
+            github::first_look(app);
             app.refresh_tasks();
             app.task_revision.update(|revision| *revision += 1);
             let name = crate::manager::Sender::Bot(worker.clone()).name(app);
@@ -251,7 +256,17 @@ pub fn maybe_run(app: AppState) {
     let batch = app.with_store(|s| s.untriaged_events()).unwrap_or_default();
     let Some(newest) = batch.iter().map(|e| e.created_at).max() else { return };
     let quiet = std::env::var("BUBBLE_TRIAGE_QUIET_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(QUIET_MS);
-    if bubble_store::now_ms() - newest < quiet {
+    let wait = quiet - (bubble_store::now_ms() - newest);
+    if wait > 0 {
+        // Sorted as soon as the batch is quiet, not at the next look at
+        // GitHub, which may be a minute away.
+        if !DUE.with(|due| due.replace(true)) {
+            spawn(async move {
+                timer(std::time::Duration::from_millis(wait as u64 + 50)).await;
+                DUE.with(|due| due.set(false));
+                maybe_run(app);
+            });
+        }
         return;
     }
     let Some(reference) = app.model_for(RunRole::Triage) else { return };
