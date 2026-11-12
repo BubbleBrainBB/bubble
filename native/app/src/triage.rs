@@ -1,5 +1,6 @@
 //! The triage session (design §4.4): GitHub notifications no rule placed
-//! (mentions, comments, state changes) are decided by a hidden turn of the
+//! (mentions, comments, state changes, newly opened issues and pull
+//! requests) are decided by a hidden turn of the
 //! main bot's model with five tools: list_bots, get_bot, attach_event,
 //! create_task_from_event and ignore_event. It appears in no list; its
 //! decisions are written to the events, where the "while you were away"
@@ -25,7 +26,9 @@ thread_local! {
 }
 
 pub const PROMPT: &str = "You triage GitHub notifications for the person, on Bubble's behalf. Each notification below is \
-something on GitHub that mentions them or a thread they take part in; no rule placed it. Decide each one, with a tool call per notification:\n\
+something on GitHub that mentions them, a thread they take part in, or an issue or pull request newly opened in a repository \
+they have Bubble watch (reason `opened`, with who opened it; the person's own issue is them asking for it); no rule placed \
+it. Decide each one, with a tool call per notification:\n\
 - attach_event when it adds to work a bot already has (call list_bots and get_bot to see what exists); that bot gets it.\n\
 - give_event_to_bot when it asks for new work: a short title and a self-contained brief (what is asked, where to read it with \
 `gh`, what done means). Leave bot out to give it to the bot that looks after the repository. The work waits for the person's \
@@ -81,8 +84,9 @@ fn payload(event: &Event) -> Value {
 /// A notification as the triage model reads it.
 fn describe(event: &Event) -> String {
     let p = payload(event);
+    let by = p["author"].as_str().map(|author| format!(" by @{author}")).unwrap_or_default();
     format!(
-        "{} | {} in {} #{} | \"{}\"",
+        "{} | {}{by} in {} #{} | \"{}\"",
         event.id,
         event.kind,
         event.repo.as_deref().unwrap_or("?"),
@@ -158,6 +162,12 @@ fn execute(app: AppState, call: &ToolCall, batch: &[Event]) -> ToolOutput {
                 },
             };
             let Some(bot) = bot else { return error("No bot could take it.") };
+            // A bot was given it in the meantime (an assignment came in
+            // after it was opened): one piece of work, not two.
+            if let Some(holder) = app.with_store(|s| s.task_for_link(&kind, &repo, number)).flatten() {
+                app.with_store(|s| s.set_event_disposition(&id, "attached", Some(&holder)));
+                return ok(format!("Bot {holder} already has {repo}#{number}; nothing was added."));
+            }
             let start = args["start"] == true && home.level == Some(Level::Act);
             let saved = app.with_store(|s| {
                 s.link(&bot, &kind, &repo, number)?;

@@ -347,6 +347,44 @@ pub fn parse_notifications(json: &str) -> Result<Vec<Notification>> {
         .collect())
 }
 
+/// An issue or a pull request someone opened, as the repository lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opened {
+    pub kind: Kind,
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    /// Opened by an app (a dependency updater, a workflow), not a person.
+    pub by_app: bool,
+    /// When, as GitHub writes it (RFC 3339, UTC).
+    pub created_at: String,
+}
+
+impl Opened {
+    pub fn dedupe_key(&self, repo: &str) -> String {
+        format!("gh:opened:{repo}#{}", self.number)
+    }
+}
+
+/// Reads `GET /repos/{repo}/issues`, which lists pull requests as well.
+pub fn parse_opened(json: &str) -> Result<Vec<Opened>> {
+    let value: Value = serde_json::from_str(json).context("the repository's issues cannot be read")?;
+    let items = value.as_array().ok_or_else(|| anyhow!("the repository's issues are not a list"))?;
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            Some(Opened {
+                kind: if item["pull_request"].is_object() { Kind::PullRequest } else { Kind::Issue },
+                number: item["number"].as_u64()?,
+                title: item["title"].as_str().unwrap_or_default().to_owned(),
+                author: item["user"]["login"].as_str().unwrap_or_default().to_owned(),
+                by_app: item["user"]["type"].as_str() == Some("Bot"),
+                created_at: item["created_at"].as_str()?.to_owned(),
+            })
+        })
+        .collect())
+}
+
 /// The number at the end of a pull request or issue URL.
 pub fn number_in_url(url: &str) -> Option<u64> {
     url.trim().trim_end_matches('/').rsplit('/').next()?.parse().ok()
@@ -434,6 +472,16 @@ impl Gh {
             path.push_str(&format!("&since={since}"));
         }
         parse_notifications(&self.run(&["api", &path], None).await?)
+    }
+
+    /// The open issues and pull requests of `repo` opened after `since`
+    /// (RFC 3339, UTC), oldest first. The API's own `since` is about
+    /// updates, so what was only touched since is left out here.
+    pub async fn opened_since(&self, repo: &str, since: &str) -> Result<Vec<Opened>> {
+        let path = format!("repos/{repo}/issues?state=open&sort=created&direction=asc&per_page=50&since={since}");
+        let mut opened = parse_opened(&self.run(&["api", &path], None).await?)?;
+        opened.retain(|item| item.created_at.as_str() > since);
+        Ok(opened)
     }
 
     /// Comments on an issue or a pull request.
@@ -563,6 +611,21 @@ mod tests {
         fixed.checks[0].conclusion = "SUCCESS".into();
         assert_eq!(changes(Some(&failing), &fixed), [Change::ChecksPassed { sha: "def".into() }]);
         assert!(changes(Some(&fixed), &fixed).is_empty());
+    }
+
+    #[test]
+    fn opened_items_tell_issues_from_pull_requests_and_people_from_apps() {
+        let json = r#"[
+          {"number": 12, "title": "Crash on start", "created_at": "2026-11-12T08:00:00Z",
+           "user": {"login": "alice", "type": "User"}},
+          {"number": 13, "title": "Bump serde", "created_at": "2026-11-12T08:05:00Z",
+           "user": {"login": "dependabot[bot]", "type": "Bot"}, "pull_request": {"url": "x"}}
+        ]"#;
+        let found = parse_opened(json).unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!((found[0].kind, found[0].number, found[0].by_app), (Kind::Issue, 12, false));
+        assert_eq!((found[1].kind, found[1].by_app), (Kind::PullRequest, true));
+        assert_eq!(found[0].dedupe_key("acme/demo"), "gh:opened:acme/demo#12");
     }
 
     #[test]

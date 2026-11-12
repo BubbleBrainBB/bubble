@@ -83,6 +83,7 @@ fn fake_gh(dir: &Path) -> std::path::PathBuf {
             r#"#!/bin/sh
 case "$*" in
   "api user --jq .login") echo tester ;;
+  api\ repos/acme/demo/issues\?state=open*) echo '[]' ;;
   api\ notifications*)
     if [ -f "{d}/notified" ]; then echo '[]'; else
       touch "{d}/notified"

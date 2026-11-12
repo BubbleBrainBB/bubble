@@ -1,6 +1,7 @@
 //! GitHub in the app: a loop that follows the issues and pull requests
-//! tasks are linked to and the person's notifications, routes what changed
-//! to the tasks, and the GitHub tools a task's agent may use.
+//! bots are linked to, the person's notifications, and what is newly
+//! opened in the watched repositories; it routes what changed to the bots.
+//! Also the GitHub tools a bot may use.
 //!
 //! Each repository has a level, set in Settings: off (not watched),
 //! observe (record only), prepare (agents work; anything published asks
@@ -11,7 +12,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bubble_core::{Permission, ToolCall, ToolOutput, ToolSpec};
-use bubble_github::{Change, Gh, Kind, Notification, Snapshot, changes, number_in_url};
+use bubble_github::{Change, Gh, Kind, Notification, Opened, Snapshot, changes, number_in_url};
 use bubble_store::{Event, MessageRole, NewEvent};
 use nsh_core::prelude::*;
 use serde_json::json;
@@ -97,25 +98,31 @@ pub fn start(app: AppState) {
         return;
     };
     spawn(async move {
+        // Who the person is on GitHub: what they open there themselves is
+        // told from what others do.
+        let mut me = None;
         match background({
             let gh = gh.clone();
             async move { gh.login().await }
         })
         .await
         {
-            Ok(Ok(login)) => app.github_status.set(Some(format!("Signed in with GitHub CLI as {login}"))),
+            Ok(Ok(login)) => {
+                app.github_status.set(Some(format!("Signed in with GitHub CLI as {login}")));
+                me = Some(login);
+            }
             Ok(Err(error)) => app.github_status.set(Some(format!("{error:#}"))),
             Err(_) => {}
         }
         loop {
-            tick(app, &gh).await;
+            tick(app, &gh, me.as_deref()).await;
             timer(poll_interval()).await;
         }
     });
 }
 
 /// One look at GitHub.
-async fn tick(app: AppState, gh: &Gh) {
+async fn tick(app: AppState, gh: &Gh, me: Option<&str>) {
     let repos = app.github_repos();
     let watched: Vec<&Repo> = repos.iter().filter(|r| r.level.is_some()).collect();
     if watched.is_empty() {
@@ -125,6 +132,7 @@ async fn tick(app: AppState, gh: &Gh) {
     // tick: what changes after it reaches the agent, even when the task
     // starts before the next tick.
     discover(app, gh, &watched).await;
+    discover_opened(app, gh, &watched, me).await;
     follow_links(app, gh, &watched).await;
     deliver_pending(app);
     crate::triage::maybe_run(app);
@@ -236,6 +244,89 @@ async fn discover(app: AppState, gh: &Gh, repos: &[&Repo]) {
         let Some(level) = repo.level else { continue };
         handle_notification(app, repo, level, &notification);
     }
+}
+
+/// Where a repository's look at what was newly opened has got to.
+fn opened_cursor(repo: &str) -> String {
+    format!("github-opened:{repo}")
+}
+
+/// Finds the issues and pull requests opened in the watched repositories
+/// since the last look. GitHub tells the person nothing of what they open
+/// themselves, or of what is opened and neither assigned to them nor
+/// mentions them, so the notifications alone miss these.
+async fn discover_opened(app: AppState, gh: &Gh, repos: &[&Repo], me: Option<&str>) {
+    for repo in repos {
+        let Some(level) = repo.level else { continue };
+        let key = opened_cursor(&repo.name);
+        let since = match app.with_store(|s| s.cursor(&key)).flatten() {
+            Some(since) => since,
+            // A repository watched from now on: what was open before stays
+            // where it was.
+            None => {
+                let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                app.with_store(|s| s.set_cursor(&key, &now));
+                now
+            }
+        };
+        let fetched = background({
+            let gh = gh.clone();
+            let (name, since) = (repo.name.clone(), since.clone());
+            async move { gh.opened_since(&name, &since).await }
+        })
+        .await;
+        let opened = match fetched {
+            Ok(Ok(opened)) => opened,
+            Ok(Err(error)) => {
+                log::warn!("github: what was opened in {}: {error:#}", repo.name);
+                continue;
+            }
+            Err(_) => continue,
+        };
+        if let Some(latest) = opened.iter().map(|o| o.created_at.clone()).max() {
+            app.with_store(|s| s.set_cursor(&key, &latest));
+        }
+        for item in &opened {
+            handle_opened(app, repo, level, item, me);
+        }
+    }
+}
+
+/// Records something newly opened and says what becomes of it: work a bot
+/// already has is left alone; an app's own (a dependency update) and the
+/// person's own pull request are only written down; the rest is for the
+/// triage to weigh, where the repository lets bots work.
+fn handle_opened(app: AppState, repo: &Repo, level: Level, item: &Opened, me: Option<&str>) {
+    // A bot that opened it, or was given it, linked it already.
+    if app.with_store(|s| s.task_for_link(item.kind.as_str(), &repo.name, item.number as i64)).flatten().is_some() {
+        return;
+    }
+    let own_pr = item.kind == Kind::PullRequest && me == Some(item.author.as_str());
+    let disposition = match level {
+        Level::Prepare | Level::Act if !item.by_app && !own_pr => "untriaged",
+        _ => "noted",
+    };
+    let what = item.kind.label(item.number);
+    let read = match item.kind {
+        Kind::Issue => format!("gh issue view {} --repo {} --comments", item.number, repo.name),
+        Kind::PullRequest => format!("gh pr view {} --repo {} --comments", item.number, repo.name),
+    };
+    let brief = format!("@{} opened {what} in {}: \"{}\". Read it with `{read}`.", item.author, repo.name, item.title);
+    let payload =
+        json!({ "reason": "opened", "title": item.title, "brief": brief, "kind": item.kind.as_str(), "author": item.author }).to_string();
+    app.with_store(|s| {
+        s.record_event(NewEvent {
+            source: SOURCE,
+            dedupe_key: &item.dedupe_key(&repo.name),
+            kind: "opened",
+            repo: Some(&repo.name),
+            number: Some(item.number as i64),
+            actor: Some(&item.author),
+            payload: &payload,
+            task_id: None,
+            disposition,
+        })
+    });
 }
 
 fn handle_notification(app: AppState, repo: &Repo, level: Level, n: &Notification) {
