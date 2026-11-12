@@ -49,7 +49,7 @@ pub fn title_bar(app: AppState, route: Route) -> AnyElement {
             .flex_row()
             .items_center()
             .child(side())
-            .child(who(crate::avatar::main(22.0), crate::sidebar::MAIN_BOT))
+            .child(who(crate::avatar::main(22.0), crate::manager::MAIN_BOT))
             .child(side())
             .into_element(),
         Route::PullRequests => page("Pull requests"),
@@ -415,7 +415,7 @@ pub fn home(app: AppState) -> impl IntoElement {
             "Tell Bubble what needs doing; it hands the work to your bots.",
         ))
         .child(away_row(app))
-        .child(composer(app, conversation, format!("Message {}", crate::sidebar::MAIN_BOT), ComposerFor::Manager))
+        .child(composer(app, conversation, format!("Message {}", crate::manager::MAIN_BOT), ComposerFor::Manager))
 }
 
 /// What a GitHub event became, in a few words.

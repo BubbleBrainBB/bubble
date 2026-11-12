@@ -47,6 +47,8 @@ pub struct HostTurn {
     /// "provider:model".
     pub model: String,
     pub thinking: String,
+    /// What the agent's own system prompt calls it: the bot's name.
+    pub agent_name: Option<String>,
     /// After the agent's own system prompt.
     pub append_system_prompt: Option<String>,
     /// Instead of the agent's own system prompt.
@@ -135,6 +137,7 @@ pub async fn run(host: Host, turn: HostTurn, events: mpsc::UnboundedSender<TurnE
         // The app decides each question itself (a task's full access is
         // read at every call), so the agent always asks.
         full_access: false,
+        agent_name: turn.agent_name,
         append_system_prompt: turn.append_system_prompt,
         system_prompt: turn.system_prompt,
         allowed_tools: turn.allowed_tools,

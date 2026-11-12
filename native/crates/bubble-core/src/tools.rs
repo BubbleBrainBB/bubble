@@ -196,6 +196,11 @@ pub fn describe(call: &ToolCall) -> String {
             let path = path.trim().trim_end_matches('/');
             format!("Listed {}", if path.is_empty() || path == "." { "the project" } else { path })
         }
+        "list_bots" => "Checked the bots".to_owned(),
+        "get_bot" => "Looked at a bot".to_owned(),
+        "create_bot" => format!("Made a bot: {}", arg("name")),
+        "message_bot" => format!("Messaged {}", if arg("bot").is_empty() { "a bot".to_owned() } else { arg("bot") }),
+        "update_bot" => "Updated a bot".to_owned(),
         "list_tasks" => "Checked the tasks".to_owned(),
         "get_task" => "Looked at a task".to_owned(),
         "list_projects" => "Checked the projects".to_owned(),

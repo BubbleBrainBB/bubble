@@ -287,6 +287,7 @@ export class HostServer {
       mode: params.mode,
       planExitMode: params.planExitMode,
       thinkingLevel: params.thinkingLevel,
+      agentName: typeof params.agentName === "string" ? params.agentName : undefined,
       appendSystemPrompt: params.appendSystemPrompt,
       systemPrompt: params.systemPrompt,
       allowedTools: params.allowedTools,

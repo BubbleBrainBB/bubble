@@ -1,6 +1,6 @@
 //! The triage session (design §4.4): GitHub notifications no rule placed
 //! (mentions, comments, state changes) are decided by a hidden turn of the
-//! Manager's model with five tools: list_tasks, get_task, attach_event,
+//! main bot's model with five tools: list_bots, get_bot, attach_event,
 //! create_task_from_event and ignore_event. It appears in no list; its
 //! decisions are written to the events, where the "while you were away"
 //! row and the tasks show them.
@@ -26,7 +26,7 @@ thread_local! {
 
 pub const PROMPT: &str = "You triage GitHub notifications for the person, on Bubble's behalf. Each notification below is \
 something on GitHub that mentions them or a thread they take part in; no rule placed it. Decide each one, with a tool call per notification:\n\
-- attach_event when it belongs to an existing task (call list_tasks and get_task to see what exists); the task's agent gets it.\n\
+- attach_event when it belongs to an existing task (call list_bots and get_bot to see what exists); the task's agent gets it.\n\
 - create_task_from_event when it asks for work no task covers: a short title and a self-contained brief (what is asked, \
 where to read it with `gh`, what done means). Set start to true only when the work is clear and safe to begin without the person.\n\
 - ignore_event when it needs nothing (a thank-you, a bot, news that changes no work), with a short reason.\n\
@@ -34,7 +34,7 @@ Decide every notification; then answer with one line saying what you did.";
 
 pub fn specs() -> Vec<ToolSpec> {
     let manager = crate::manager::specs();
-    let mut specs: Vec<ToolSpec> = manager.into_iter().filter(|s| s.name == "list_tasks" || s.name == "get_task").collect();
+    let mut specs: Vec<ToolSpec> = manager.into_iter().filter(|s| s.name == "list_bots" || s.name == "get_bot").collect();
     specs.extend([
         ToolSpec {
             name: "attach_event".into(),
@@ -101,8 +101,8 @@ fn error(text: impl Into<String>) -> ToolOutput {
 fn execute(app: AppState, call: &ToolCall, batch: &[Event]) -> ToolOutput {
     let args = call.arguments_json();
     let text = |key: &str| args[key].as_str().map(str::trim).unwrap_or_default().to_owned();
-    if matches!(call.name.as_str(), "list_tasks" | "get_task") {
-        return crate::manager::execute(app, call);
+    if matches!(call.name.as_str(), "list_bots" | "get_bot") {
+        return crate::manager::execute(app, &crate::manager::Sender::Main, call);
     }
     let id = text("event_id");
     let Some(event) = batch.iter().find(|e| e.id == id) else {
@@ -119,7 +119,7 @@ fn execute(app: AppState, call: &ToolCall, batch: &[Event]) -> ToolOutput {
         "attach_event" => {
             let task_id = text("task_id");
             if app.tasks.with_untracked(|t| !t.iter().any(|t| t.task.id == task_id)) {
-                return error(format!("There is no task {task_id}. Call list_tasks for the ids."));
+                return error(format!("There is no task {task_id}. Call list_bots for the ids."));
             }
             // The task's agent reads what happened; it goes out when the
             // task can take it.
@@ -205,6 +205,7 @@ pub fn maybe_run(app: AppState) {
         pictures: Vec::new(),
         model: reference,
         thinking: bubble_core::Level::Low.as_str().to_owned(),
+        agent_name: None,
         append_system_prompt: None,
         system_prompt: Some(PROMPT.to_owned()),
         // Only the triage tools: it decides, it does not work.

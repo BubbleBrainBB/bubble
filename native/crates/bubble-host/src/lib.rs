@@ -74,6 +74,8 @@ pub struct TurnRequest {
     pub thinking: Option<String>,
     /// Every tool call goes ahead without asking.
     pub full_access: bool,
+    /// What the agent is called in its own system prompt; "Bubble" when `None`.
+    pub agent_name: Option<String>,
     /// Added after the agent's own system prompt.
     pub append_system_prompt: Option<String>,
     /// Instead of the agent's own system prompt.
@@ -394,6 +396,9 @@ impl Host {
         }
         if let Some(thinking) = turn.thinking {
             fields.insert("thinkingLevel".into(), json!(thinking));
+        }
+        if let Some(name) = turn.agent_name {
+            fields.insert("agentName".into(), json!(name));
         }
         if let Some(prompt) = turn.append_system_prompt {
             fields.insert("appendSystemPrompt".into(), json!(prompt));

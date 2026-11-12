@@ -25,7 +25,7 @@ use tokio::sync::oneshot;
 
 use crate::engine::{self, Ending, HostTurn, Hosts, TurnEvent};
 use crate::github::{self, Level, Repo};
-use crate::manager;
+use crate::manager::{self, Incoming, Sender};
 
 const MANAGER_KEY: &str = "manager";
 
@@ -41,6 +41,11 @@ pub const APPEARANCE: &str = "appearance";
 const OPEN_BOT: &str = "open_bot";
 /// When each bot's conversation was last looked at, as JSON.
 const BOTS_SEEN: &str = "bots_seen";
+
+/// Which bot a message in a conversation came from, by the message's id.
+fn from_key(message_id: &str) -> String {
+    format!("from:{message_id}")
+}
 
 fn bot_instruction_key(bot_id: &str) -> String {
     format!("bot_instruction:{bot_id}")
@@ -718,6 +723,12 @@ impl AppState {
         Some(id)
     }
 
+    /// Who sent the message `message_id` shows, when it came from a bot:
+    /// the main bot unless another is recorded.
+    pub fn sender_label(&self, message_id: &str) -> String {
+        self.with_store(|s| s.setting(&from_key(message_id))).flatten().unwrap_or_else(|| manager::MAIN_BOT.to_owned())
+    }
+
     /// What a bot was told it is for.
     pub fn bot_instruction(&self, bot_id: &str) -> String {
         self.with_store(|s| s.setting(&bot_instruction_key(bot_id))).flatten().unwrap_or_default()
@@ -931,6 +942,9 @@ impl AppState {
             following: signal(true),
             abort: stored(None),
             on_change: stored(None),
+            owes: stored(None),
+            awaiting: stored(HashSet::new()),
+            inbox: stored(VecDeque::new()),
         });
         self.conversations.with(|map| map.insert(key.to_owned(), conversation));
         // Subagents from before show at once: those the agent reported in an
@@ -1062,6 +1076,12 @@ pub struct Conversation {
     abort: Stored<Option<Arc<tokio::sync::Notify>>>,
     /// Called after the lines change, to keep the newest in view.
     on_change: Stored<Option<Rc<dyn Fn()>>>,
+    /// Who asked for the work in progress and is owed word of how it went.
+    owes: Stored<Option<Sender>>,
+    /// The bots this one asked and has not heard back from.
+    awaiting: Stored<HashSet<String>>,
+    /// What other bots sent while a turn ran, in order.
+    inbox: Stored<VecDeque<Incoming>>,
 }
 
 impl Conversation {
@@ -1246,7 +1266,7 @@ impl Conversation {
     pub fn send_with(&self, app: AppState, text: String, expanded: Option<String>, images: Vec<bubble_core::Image>) {
         let content = (expanded.is_some() || !images.is_empty())
             .then(|| ChatMessage::user_with_images(expanded.unwrap_or_else(|| text.trim().to_owned()), images));
-        if let Err(message) = self.post_to(app, text, MessageRole::User, None, content) {
+        if let Err(message) = self.post_to(app, text, MessageRole::User, None, content, None) {
             self.fail_now(&message);
         }
     }
@@ -1255,7 +1275,101 @@ impl Conversation {
     /// Manager) and starts the turn, or queues it when the limit is
     /// reached. `Ok(true)`: started; `Ok(false)`: queued.
     pub fn post(&self, app: AppState, text: String, role: MessageRole) -> Result<bool, String> {
-        self.post_to(app, text, role, None, None)
+        self.post_to(app, text, role, None, None, None)
+    }
+
+    /// This bot asked `bot_id` for something and waits for its answer.
+    pub fn awaits(&self, bot_id: &str) {
+        self.awaiting.with(|waiting| {
+            waiting.insert(bot_id.to_owned());
+        });
+    }
+
+    /// Takes a message from another bot: starts on it now, or keeps it
+    /// until the running turn ends. `Ok(true)`: a turn started.
+    pub fn receive(&self, app: AppState, incoming: Incoming) -> Result<bool, String> {
+        if self.busy.get_untracked() {
+            self.inbox.with(|inbox| inbox.push_back(incoming));
+            return Ok(false);
+        }
+        self.take(app, incoming)
+    }
+
+    fn take(&self, app: AppState, incoming: Incoming) -> Result<bool, String> {
+        let before = self.owes.get();
+        match (&incoming.report, &incoming.from) {
+            // A request: its sender is owed the answer.
+            (None, from) => {
+                self.owes.replace(Some(from.clone()));
+            }
+            // The answer to something this bot asked.
+            (Some(_), Sender::Bot(id)) => {
+                self.awaiting.with(|waiting| {
+                    waiting.remove(id);
+                });
+            }
+            (Some(_), Sender::Main) => {}
+        }
+        let label = incoming.from.name(app);
+        // The model is told who it is from; the person sees that as a label.
+        let content = ChatMessage::user(manager::framed(app, &incoming));
+        let started = self.post_to(app, incoming.text, MessageRole::System, None, Some(content), Some(label));
+        if started.is_err() {
+            self.owes.replace(before);
+        }
+        started
+    }
+
+    /// A turn is over: whoever asked for the work hears how it went, and
+    /// the next message that waited is taken up.
+    fn after_turn(&self, app: AppState, ending: TurnStatus, failure: Option<String>) {
+        if self.awaiting.with(|waiting| waiting.is_empty()) {
+            if let Some(asker) = self.owes.replace(None) {
+                let turn = self.active_turn.get();
+                let said = self
+                    .lines
+                    .with_untracked(|lines| {
+                        lines
+                            .iter()
+                            .rev()
+                            .find(|l| {
+                                l.turn_id.as_deref() == Some(&turn)
+                                    && matches!(l.kind, LineKind::Message(MessageRole::Assistant))
+                                    && !l.text.trim().is_empty()
+                            })
+                            .map(|l| l.text.clone())
+                    })
+                    .unwrap_or_default();
+                let (outcome, text) = match (ending, failure) {
+                    (TurnStatus::Failed, Some(error)) => ("failed", format!("{error}\n\n{said}").trim().to_owned()),
+                    (TurnStatus::Failed, None) => ("failed", said),
+                    (TurnStatus::Stopped, _) if said.is_empty() => ("stopped by the person", "It was stopped before it answered.".to_owned()),
+                    (TurnStatus::Stopped, _) => ("stopped by the person", said),
+                    _ if said.is_empty() => ("finished", "It finished without a reply.".to_owned()),
+                    _ => ("finished", said),
+                };
+                // The whole answer is in this bot's own conversation.
+                let text: String = if text.chars().count() > 6000 {
+                    format!("{}\n(cut short; the rest is in the bot's conversation)", text.chars().take(6000).collect::<String>())
+                } else {
+                    text
+                };
+                let me = match self.task_id.get() {
+                    Some(id) => Sender::Bot(id),
+                    None => Sender::Main,
+                };
+                if let Err(error) = manager::deliver(app, &asker, Incoming { from: me, text, report: Some(outcome) }) {
+                    log::warn!("a report could not be delivered: {error}");
+                }
+            }
+        }
+        if !self.busy.get_untracked() {
+            if let Some(next) = self.inbox.with(|inbox| inbox.pop_front()) {
+                if let Err(error) = self.take(app, next) {
+                    log::warn!("a waiting message could not be taken up: {error}");
+                }
+            }
+        }
     }
 
     /// Runs the task again from its first message, in a new run on
@@ -1277,7 +1391,7 @@ impl Conversation {
             .ok_or_else(|| "The task has nothing to run again yet.".to_owned())?;
         app.set_task_model(&task_id, Some(model.clone()));
         let content = first.content.as_deref().and_then(|c| serde_json::from_str::<ChatMessage>(c).ok());
-        self.post_to(app, first.text, first.role, Some(format!("rerun on {model}")), content)
+        self.post_to(app, first.text, first.role, Some(format!("rerun on {model}")), content, None)
     }
 
     /// `post`; with `fresh`, in a new run begun for that reason; `content`:
@@ -1289,6 +1403,7 @@ impl Conversation {
         role: MessageRole,
         fresh: Option<String>,
         content: Option<ChatMessage>,
+        from: Option<String>,
     ) -> Result<bool, String> {
         let text = text.trim().to_owned();
         let images = match &content {
@@ -1350,6 +1465,9 @@ impl Conversation {
         let saved = app
             .with_store(|s| s.append_message_with(&run.id, role, &text, content.as_deref()))
             .ok_or_else(|| "The message could not be saved.".to_owned())?;
+        if let Some(label) = &from {
+            app.with_store(|s| s.set_setting(&from_key(&saved.id), Some(label)));
+        }
 
         if let Some(index) = new_run_index.filter(|&i| i > 1) {
             let cause = fresh.clone().unwrap_or_else(|| cause_of(role).to_owned());
@@ -1443,22 +1561,26 @@ impl Conversation {
                 self.fail_now(&format!("{error:#}"));
                 self.checkpoint(app, true);
                 app.refresh_tasks();
+                self.after_turn(app, TurnStatus::Failed, Some(format!("{error:#}")));
                 return;
             }
         };
         // The Manager has a role of its own and only the app's tools; a task
         // is Bubble's coding agent in its project, told what the task is.
-        let (system_prompt, append_system_prompt, cwd, host_tools) = match &task_id {
-            None => (Some(with_instructions(manager::PROMPT.to_owned(), None)), None, None, manager::specs()),
+        let (system_prompt, append_system_prompt, cwd, host_tools, agent_name) = match &task_id {
+            None => (Some(with_instructions(manager::PROMPT.to_owned(), None)), None, None, manager::specs(), None),
             Some(id) => {
                 let task = app.with_store(|s| s.get_task(id)).flatten();
                 let title = task.as_ref().map(|t| t.title.clone()).unwrap_or_default();
                 let project = task.and_then(|t| t.project_cwd);
                 let cwd = project.as_deref().map(PathBuf::from).filter(|p| p.is_dir());
-                let tools = if cwd.is_some() { github::task_tools(app, project.as_deref()) } else { Vec::new() };
+                let mut tools = if cwd.is_some() { github::task_tools(app, project.as_deref()) } else { Vec::new() };
+                tools.extend(manager::bot_specs());
                 let full = app.task_full_access(id) && self.driven_by_person(app, &run.id);
                 let instruction = app.bot_instruction(id);
-                (None, Some(task_prompt(&title, &instruction, project.as_deref(), cwd.is_some(), full)), cwd, tools)
+                // The agent goes by the bot's name, not the main bot's.
+                let name = Some(title.clone()).filter(|t| !t.trim().is_empty());
+                (None, Some(task_prompt(&title, &instruction, project.as_deref(), cwd.is_some(), full)), cwd, tools, name)
             }
         };
         // The newest message is what the agent answers; it keeps the rest
@@ -1484,6 +1606,7 @@ impl Conversation {
             pictures,
             model,
             thinking: thinking.as_str().to_owned(),
+            agent_name,
             append_system_prompt,
             system_prompt,
             host_tools,
@@ -1531,6 +1654,7 @@ impl Conversation {
                     })
                 } else { None };
                 let ending = if stopped { TurnStatus::Stopped } else if result.is_err() { TurnStatus::Failed } else { TurnStatus::Completed };
+                let failure = result.as_ref().err().map(|error| format!("{error:#}"));
                 let turn = conversation.active_turn.get();
                 conversation.lines.update(|lines| transcript::finish(lines, &turn, ending, bubble_store::now_ms()));
                 match result {
@@ -1563,6 +1687,7 @@ impl Conversation {
                 conversation.busy.set(false);
                 app.refresh_tasks();
                 conversation.changed();
+                conversation.after_turn(app, ending, failure);
                 app.pump_queue();
             });
         });
@@ -1754,7 +1879,11 @@ impl Conversation {
                 if github::is_task_tool(&call.name) {
                     github::handle_call(app, *self, run_id, self.task_id.get(), call, respond);
                 } else {
-                    let _ = respond.send(manager::execute(app, &call));
+                    let caller = match self.task_id.get() {
+                        Some(id) => Sender::Bot(id),
+                        None => Sender::Main,
+                    };
+                    let _ = respond.send(manager::execute(app, &caller, &call));
                 }
             }
             AgentEvent::ApprovalNeeded { call, permission, respond } => {
@@ -1887,7 +2016,8 @@ fn task_prompt(name: &str, instruction: &str, project: Option<&str>, has_tools: 
         "You are \"{name}\", one of the person's Bubble bots: a long-lived agent with one continuing conversation.{purpose} {place} \
          Messages may come from the person, from the main bot, which coordinates the bots, or from GitHub (reviews, comments, checks). \
          Work until what was asked is done or you need the person, then say briefly what you did and what is left. \
-         Answer in the language the person writes in."
+         Answer in the language the person writes in.\n\n{}",
+        manager::BOT_TEAMWORK
     )
 }
 

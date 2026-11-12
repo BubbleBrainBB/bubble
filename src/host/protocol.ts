@@ -75,6 +75,8 @@ export interface TurnStartParams {
   mode?: PermissionMode;
   planExitMode?: Exclude<PermissionMode, "plan">;
   thinkingLevel?: ThinkingLevel;
+  /** What the agent is called in its own system prompt; "Bubble" when absent. */
+  agentName?: string;
   appendSystemPrompt?: string;
   systemPrompt?: string;
   allowedTools?: string[];

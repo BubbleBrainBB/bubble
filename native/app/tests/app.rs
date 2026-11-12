@@ -12,8 +12,9 @@ const COMMAND: &str = "echo shipped > out.txt";
 
 /// A stand-in model, streaming OpenAI's format.
 ///
-/// The Manager (offered `create_task`): asked to "ship", it creates a task in
-/// `project`; given the result, it says "Started it."; otherwise it greets.
+/// The main bot (offered `create_bot`): asked to "ship", it makes a bot in
+/// `project`; given the result, it says "Started it."; given the bot's
+/// report, it tells the person; otherwise it greets.
 /// A task's agent (offered `bash`): it asks to run `COMMAND`, then says
 /// "All done." once the result comes back.
 fn model_server(project: &Path) -> String {
@@ -45,15 +46,18 @@ fn model_server(project: &Path) -> String {
             let last = request["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or_default();
             let answered = last["role"] == "tool";
             let asked = last["content"].as_str().unwrap_or_default().to_owned();
-            let events = if body.contains("\"create_task\"") {
-                if answered {
+            let events = if body.contains("\"create_bot\"") {
+                if asked.starts_with("[Report from the bot Ship the notes: finished]") {
+                    // The bot's answer came back: the person hears what they can use.
+                    text_events(&format!("The notes are shipped: {}", asked.lines().nth(1).unwrap_or_default()))
+                } else if answered {
                     text_events("Started it.")
                 } else if body.contains("Please ship") {
                     let arguments = format!(
-                        "{{\"title\":\"Ship the notes\",\"project\":{},\"brief\":\"Write out.txt with the word shipped.\"}}",
+                        "{{\"name\":\"Ship the notes\",\"purpose\":\"Ships the release notes\",\"project\":{},\"message\":\"Write out.txt with the word shipped.\"}}",
                         json_string(&project)
                     );
-                    tool_call_events("create_task", &arguments)
+                    tool_call_events("create_bot", &arguments)
                 } else {
                     text_events("Hello from the stand-in model.")
                 }
@@ -167,6 +171,11 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
     assert_eq!(std::fs::read_to_string(project.join("out.txt")).unwrap().trim(), "shipped");
     std::fs::remove_file(project.join("out.txt")).unwrap();
     assert!(project.join("rules.seen").exists(), "the project's AGENTS.md reached the task's system prompt");
+
+    // The bot's answer goes back to the main bot, which tells the person.
+    app.press("id:nav-home").unwrap();
+    app.wait_for_within("From Ship the notes", long).unwrap();
+    app.wait_for_within("The notes are shipped: All done.", long).unwrap();
 
     app.press("id:side-Second task").unwrap();
     app.wait_for_within("Allow once", long).unwrap();

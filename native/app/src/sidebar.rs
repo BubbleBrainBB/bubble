@@ -7,6 +7,7 @@ use bubble_store::{MessageRole, TaskState, TaskSummary};
 use nsh_core::prelude::*;
 
 use crate::avatar;
+use crate::manager::MAIN_BOT;
 use crate::palette::*;
 use crate::state::{AppState, Route};
 use crate::ui::icon;
@@ -16,9 +17,6 @@ const SETTINGS_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox=
 pub const FOLDER_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 4.5a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"##;
 const SEARCH_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.25" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.25 10.25L13.5 13.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>"##;
 const PLUS_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>"##;
-
-/// The main bot's name.
-pub const MAIN_BOT: &str = "Bubble";
 
 /// A round button raised off the sidebar.
 fn round_button(markup: &'static str, label: &'static str, id: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {

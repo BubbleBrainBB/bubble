@@ -75,7 +75,7 @@ pub fn kind_of(name: &str, text: &str) -> Kind {
 
 /// Task cards stand on their own; every other tool call can be grouped.
 fn groupable_tool(line: &Line) -> bool {
-    matches!(&line.kind, LineKind::Tool { name, .. } if !matches!(name.as_str(), "create_task" | "continue_task" | "spawn_agent" | "run_workflow"))
+    matches!(&line.kind, LineKind::Tool { name, .. } if !matches!(name.as_str(), "create_bot" | "message_bot" | "create_task" | "continue_task" | "spawn_agent" | "run_workflow"))
 }
 
 /// The model's reasoning (or a reply still starting) with no text: part

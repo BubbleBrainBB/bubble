@@ -236,7 +236,7 @@ fn block_view(
         Block::Line { id, .. } => conversation.lines.with_untracked(|lines| {
             lines.iter().find(|l| l.id == id).is_some_and(|l| match &l.kind {
                 LineKind::Reasoning => true,
-                LineKind::Tool { name, .. } => !matches!(name.as_str(), "create_task" | "continue_task" | "spawn_agent" | "run_workflow"),
+                LineKind::Tool { name, .. } => !matches!(name.as_str(), "create_bot" | "message_bot" | "create_task" | "continue_task" | "spawn_agent" | "run_workflow"),
                 _ => false,
             })
         }),
@@ -856,7 +856,7 @@ fn turn_header(block: ReadSignal<Block>, conversation: Conversation, id: String)
                             .filter(|l| l.turn_id.as_deref() == Some(turn.as_str()) && l.id != turn)
                             .filter(|l| match &l.kind {
                                 LineKind::Tool { name, status, .. } => {
-                                    !status.unfinished() && !matches!(name.as_str(), "create_task" | "continue_task" | "spawn_agent" | "run_workflow")
+                                    !status.unfinished() && !matches!(name.as_str(), "create_bot" | "message_bot" | "create_task" | "continue_task" | "spawn_agent" | "run_workflow")
                                 }
                                 LineKind::Reasoning => !l.reasoning.trim().is_empty(),
                                 _ => false,
@@ -1095,7 +1095,11 @@ fn subagents_view(conversation: Conversation, anchor: Option<ReadSignal<Line>>) 
 
 fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, project: Option<String>) -> AnyElement {
     match line.get_untracked().kind {
-        LineKind::Tool { name, .. } if name == "create_task" || name == "continue_task" => task_card_line(app, conversation, line),
+        // A bot the main bot made or wrote to shows as a card that follows
+        // it (the task names are what earlier versions recorded).
+        LineKind::Tool { name, .. } if matches!(name.as_str(), "create_bot" | "message_bot" | "create_task" | "continue_task") => {
+            task_card_line(app, conversation, line)
+        }
         LineKind::Tool { ref name, .. } if name == "spawn_agent" || name == "run_workflow" => view()
             .gap(px(6.0)).child(tool_row(line, project, conversation.opened)).child(subagents_view(conversation, Some(line))).into_element(),
         LineKind::Tool { .. } => tool_row(line, project, conversation.opened),
@@ -1184,7 +1188,7 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>, 
         LineKind::Message(MessageRole::System) => view()
             .gap(px(6.0))
             .child(stamp_line(line))
-            .child(text("From Bubble").text_size(px(SMALL)).text_color(muted()))
+            .child(text(move || format!("From {}", app.sender_label(&line.get().id))).text_size(px(SMALL)).text_color(muted()))
             .child(
                 view()
                     .px(px(14.0))
@@ -1236,10 +1240,11 @@ fn task_card_line(app: AppState, conversation: Conversation, line: ReadSignal<Li
         let for_icon = summary.clone();
         let for_title = summary.clone();
         let for_meta = summary.clone();
-        let followed_up = matches!(line.get_untracked().kind, LineKind::Tool { ref name, .. } if name == "continue_task");
+        let followed_up =
+            matches!(line.get_untracked().kind, LineKind::Tool { ref name, .. } if name == "continue_task" || name == "message_bot");
         view()
             .gap(px(6.0))
-            .child(when(move || followed_up, || text("Followed up").text_size(px(SMALL)).text_color(muted())))
+            .child(when(move || followed_up, || text("Sent a message").text_size(px(SMALL)).text_color(muted())))
             .child(
                 view()
                     .max_w(px(520.0))
@@ -1273,7 +1278,7 @@ fn task_card_line(app: AppState, conversation: Conversation, line: ReadSignal<Li
                                 let project = s.task.project_cwd.as_deref().map(project_name).unwrap_or_else(|| "No project".into());
                                 format!("{}, {project}", state_label(s.state))
                             }
-                            None => "This task was removed".to_owned(),
+                            None => "This bot was removed".to_owned(),
                         })
                         .pl(px(22.0))
                         .text_size(px(SMALL))
