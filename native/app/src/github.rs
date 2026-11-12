@@ -22,7 +22,60 @@ use crate::state::{AppState, Conversation};
 
 const SOURCE: &str = "github";
 const NOTIFICATIONS_CURSOR: &str = "github-notifications";
-const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the loop looks at GitHub. Not every look asks for everything:
+/// see [`Pace`].
+const DEFAULT_INTERVAL: Duration = Duration::from_secs(20);
+/// GitHub asks that notifications be read no more often than this.
+const NOTIFICATIONS_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How often each thing is asked for, so that looking often stays well
+/// inside what GitHub allows in an hour however many repositories are
+/// watched and issues followed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Pace {
+    /// The loop's own step.
+    step: Duration,
+    notifications: Duration,
+    /// Set by hand: everything at that step, however much there is.
+    fixed: bool,
+}
+
+impl Pace {
+    fn current() -> Pace {
+        match std::env::var("BUBBLE_GH_POLL_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis) {
+            // Set by hand (and by tests): everything at that step.
+            Some(step) => Pace { step, notifications: step, fixed: true },
+            None => Pace { step: DEFAULT_INTERVAL, notifications: NOTIFICATIONS_INTERVAL, fixed: false },
+        }
+    }
+
+    /// What was newly opened, per repository: every step, slower with
+    /// many repositories (one request each; about 1800 an hour at most).
+    fn opened(&self, repositories: usize) -> Duration {
+        if self.fixed { self.step } else { self.step.max(Duration::from_secs(2) * repositories as u32) }
+    }
+
+    /// Each followed issue or pull request: every step, slower with many
+    /// of them (one request each; about 900 an hour at most).
+    fn link(&self, links: usize) -> Duration {
+        if self.fixed { self.step } else { self.step.max(Duration::from_secs(4) * links as u32) }
+    }
+}
+
+/// Whether something last looked at `last` (milliseconds; never when
+/// `None`) is due again at `now`, when it is looked at every `every`. A
+/// look a little early counts, so a step that comes a moment short of
+/// the time does not put it off a whole step.
+fn due(last: Option<i64>, now: i64, every: Duration) -> bool {
+    last.is_none_or(|last| now - last >= every.as_millis() as i64 * 9 / 10)
+}
+
+/// When the loop last asked for what it does not ask for at every step.
+#[derive(Default)]
+struct Looked {
+    notifications: Option<i64>,
+    opened: Option<i64>,
+}
 
 /// How far Bubble may go on a repository.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,14 +135,6 @@ pub struct Repo {
     pub level: Option<Level>,
 }
 
-fn poll_interval() -> Duration {
-    std::env::var("BUBBLE_GH_POLL_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(DEFAULT_INTERVAL)
-}
-
 /// Starts the loop; it runs while the app does.
 pub fn start(app: AppState) {
     let Some(gh) = app.gh() else {
@@ -113,26 +158,31 @@ pub fn start(app: AppState) {
             Ok(Err(error)) => app.github_status.set(Some(format!("{error:#}"))),
             Err(_) => {}
         }
+        let mut looked = Looked::default();
         loop {
-            tick(app, &gh, me.as_deref()).await;
-            timer(poll_interval()).await;
+            tick(app, &gh, me.as_deref(), &mut looked).await;
+            timer(Pace::current().step).await;
         }
     });
 }
 
 /// One look at GitHub.
-async fn tick(app: AppState, gh: &Gh, me: Option<&str>) {
+async fn tick(app: AppState, gh: &Gh, me: Option<&str>, looked: &mut Looked) {
     let repos = app.github_repos();
     let watched: Vec<&Repo> = repos.iter().filter(|r| r.level.is_some()).collect();
     if watched.is_empty() {
         return;
     }
-    // New tasks first, so their issues get a first look in this same
-    // tick: what changes after it reaches the agent, even when the task
-    // starts before the next tick.
-    discover(app, gh, &watched).await;
-    discover_opened(app, gh, &watched, me).await;
-    follow_links(app, gh, &watched).await;
+    let (pace, now) = (Pace::current(), bubble_store::now_ms());
+    if due(looked.notifications, now, pace.notifications) {
+        looked.notifications = Some(now);
+        discover(app, gh, &watched).await;
+    }
+    if due(looked.opened, now, pace.opened(watched.len())) {
+        looked.opened = Some(now);
+        discover_opened(app, gh, &watched, me).await;
+    }
+    follow_links(app, gh, &watched, pace).await;
     deliver_pending(app);
     crate::triage::maybe_run(app);
     app.refresh_away();
@@ -143,9 +193,13 @@ fn level_of(repos: &[&Repo], repo: &str) -> Option<Level> {
 }
 
 /// Looks at every linked issue and pull request of an open task.
-async fn follow_links(app: AppState, gh: &Gh, repos: &[&Repo]) {
+async fn follow_links(app: AppState, gh: &Gh, repos: &[&Repo], pace: Pace) {
     let links = app.with_store(|s| s.watched_links()).unwrap_or_default();
+    let (every, now) = (pace.link(links.len()), bubble_store::now_ms());
     for link in links {
+        if !due(link.polled_at, now, every) {
+            continue;
+        }
         let Some(level) = level_of(repos, &link.repo) else { continue };
         let Some(kind) = Kind::parse(&link.kind) else { continue };
         let number = link.number as u64;
@@ -645,6 +699,28 @@ pub fn link_task(app: AppState, task_id: &str, input: &str, done: impl FnOnce(Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn looking_often_stays_inside_what_github_allows() {
+        let pace = Pace { step: DEFAULT_INTERVAL, notifications: NOTIFICATIONS_INTERVAL, fixed: false };
+        let an_hour = |every: Duration| 3600 / every.as_secs();
+        // A few repositories and issues: each at every step.
+        assert_eq!(pace.opened(1), Duration::from_secs(20));
+        assert_eq!(pace.link(3), Duration::from_secs(20));
+        // Many: slower each, so the hour's requests stay bounded.
+        for count in [1usize, 5, 10, 40, 200] {
+            assert!(an_hour(pace.opened(count)) * count as u64 <= 1800, "{count} repositories");
+            assert!(an_hour(pace.link(count)) * count as u64 <= 900, "{count} links");
+        }
+        assert_eq!(an_hour(pace.notifications), 60);
+        // A step set by hand is kept for everything.
+        let fixed = Pace { step: Duration::from_millis(300), notifications: Duration::from_millis(300), fixed: true };
+        assert_eq!(fixed.link(50), Duration::from_millis(300));
+        // Never looked at is due; just looked at is not; a moment short of the time is.
+        assert!(due(None, 1_000, pace.step));
+        assert!(!due(Some(1_000), 5_000, pace.step));
+        assert!(due(Some(1_000), 19_500, pace.step));
+    }
 
     #[test]
     fn links_are_read_from_what_the_person_types() {
