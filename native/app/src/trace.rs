@@ -159,6 +159,21 @@ fn doing(name: &str, title: &str, key: &str) -> String {
     }
 }
 
+/// How a bot looks while it uses a tool.
+fn look(name: &str) -> Mood {
+    match name {
+        "bash" | "background_task" | "task_output" | "kill_task" => Mood::Running,
+        "read" | "grep" | "glob" | "ls" | "lsp" | "notebook_read" | "web_fetch" | "recall" | "skill" => Mood::Reading,
+        "write" | "edit" | "multi_edit" | "apply_patch" | "notebook_edit" | "remember" | "forget" | "add_routine" => Mood::Writing,
+        "web_search" | "skill_search" | "tool_search" => Mood::Searching,
+        "message_bot" | "create_bot" | "list_bots" | "get_bot" | "update_bot" | "spawn_agent" | "run_workflow" | "wait_workflow" | "agent_batch" => {
+            Mood::Messaging
+        }
+        name if name.starts_with("github_") => Mood::Messaging,
+        _ => Mood::Working,
+    }
+}
+
 /// What the running turn `turn` does now.
 pub fn activity(lines: &[Line], turn: &str, status: TurnStatus) -> Activity {
     let waits = |phrase: &str| Activity { phrase: phrase.to_owned(), mood: Mood::Waiting };
@@ -178,7 +193,7 @@ pub fn activity(lines: &[Line], turn: &str, status: TurnStatus) -> Activity {
     let step = mine.iter().rev().find(|l| matches!(l.kind, LineKind::Tool { status: ToolStatus::Running, .. }));
     if let Some(step) = step {
         let LineKind::Tool { name, .. } = &step.kind else { unreachable!("a tool line") };
-        return Activity { phrase: doing(name, &step.text, &step.id), mood: Mood::Working };
+        return Activity { phrase: doing(name, &step.text, &step.id), mood: look(name) };
     }
     // It has used no tool yet: it read the message and is writing back, as
     // far as anyone can tell. Once it has, the pauses between its steps
@@ -313,7 +328,13 @@ mod tests {
         assert_eq!(working("github_comment", "Commented").phrase, "Working on GitHub");
         assert_eq!(working("mcp__linear__list", "Listed").phrase, "Using a connected app");
         assert!(WORKING.contains(&working("something_new", "Did it").phrase.as_str()));
-        assert_eq!(working("bash", "Ran x").mood, Mood::Working);
+        // Its face goes with what it does.
+        assert_eq!(working("bash", "Ran x").mood, Mood::Running);
+        assert_eq!(working("read", "Read a").mood, Mood::Reading);
+        assert_eq!(working("edit", "Edited a").mood, Mood::Writing);
+        assert_eq!(working("web_search", "Searched").mood, Mood::Searching);
+        assert_eq!(working("message_bot", "Messaged Dev").mood, Mood::Messaging);
+        assert_eq!(working("something_new", "Did it").mood, Mood::Working);
 
         // Nothing of the command, the path or the query is in the words.
         assert!(!working("bash", "Ran rm -rf build").phrase.contains("rm"));

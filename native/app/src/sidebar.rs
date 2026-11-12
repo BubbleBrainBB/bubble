@@ -128,7 +128,7 @@ pub fn sidebar(app: AppState) -> impl IntoElement {
                         .rounded_full()
                         .bg(move || if home_current.get() { item_active() } else { side() })
                         // Its eyes follow what it does.
-                        .child(avatar::main_doing(56.0, move || {
+                        .child(avatar::main_doing(app, 56.0, move || {
                             if !main_busy() {
                                 avatar::Mood::Still
                             } else if main_waits() {
@@ -237,11 +237,18 @@ fn bot_row(app: AppState, bot: ReadSignal<TaskSummary>) -> impl IntoElement {
             app.route.set(Route::Task(open.clone()));
         })
         // A face that shows what the bot is doing.
-        .child(avatar::bot_doing(app, &id, 38.0, move || match bot.get().state {
-            TaskState::Running => avatar::Mood::Working,
-            TaskState::NeedsYou | TaskState::Queued => avatar::Mood::Waiting,
-            _ => avatar::Mood::Still,
-        }))
+        .child({
+            let (mine, news) = (id.clone(), unread.clone());
+            avatar::bot_doing(app, &id, 38.0, move || match bot.get().state {
+                // What it is at, as its conversation would say it.
+                TaskState::Running => app.task_conversation(&mine).mood(),
+                TaskState::NeedsYou | TaskState::Queued => avatar::Mood::Waiting,
+                TaskState::Failed => avatar::Mood::Troubled,
+                // It said something the person has not read yet.
+                _ if news() => avatar::Mood::Pleased,
+                _ => avatar::Mood::Still,
+            })
+        })
         .child(
             view()
                 .flex_1()

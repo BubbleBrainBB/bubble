@@ -12,16 +12,30 @@ use nsh_core::prelude::*;
 /// What a bot is doing, as its face shows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mood {
-    /// Nothing: a still face.
+    /// Nothing: a still face (its eyes still follow a pointer that comes near).
     Still,
-    /// Writing back: it looks down at what it writes.
+    /// Writing back: it looks down at what it writes, its eyes going along the line.
     Typing,
-    /// Between steps: it looks up, and from side to side slowly.
+    /// Between steps: it looks up, and slowly from side to side.
     Thinking,
-    /// Using a tool: it looks from one side to the other.
+    /// Reading files or a page: its eyes go along a line, and back to the next.
+    Reading,
+    /// Changing files: it looks down, with small quick glances.
+    Writing,
+    /// Searching: it looks all around.
+    Searching,
+    /// Running commands: it looks from one side to the other, quickly.
+    Running,
+    /// Talking to another bot: it looks over to the side, and nods.
+    Messaging,
+    /// Something else: it looks from side to side.
     Working,
     /// Waiting for the person or its turn: it looks ahead, and blinks.
     Waiting,
+    /// It has said something the person has not read: wide-eyed, with a little bounce.
+    Pleased,
+    /// Its last turn failed: its eyes are low and half shut.
+    Troubled,
 }
 
 /// The outlines, in a 48 by 48 box.
@@ -108,57 +122,154 @@ fn shape_markup(shape: usize, color: usize) -> String {
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><g fill="{}">{}</g></svg>"#, COLORS[color], SHAPES[shape])
 }
 
-/// A face whose eyes show `mood`: a shape, and two eyes over it that look
-/// about and blink. A still mood runs nothing.
-fn alive(size: f32, shape: &str, eyes: [(f32, f32, f32, f32); 2], tilt: f32, mood: Mood) -> View {
+/// How near a pointer has to come for a face to look at it, in points.
+const NOTICES: f32 = 220.0;
+
+/// How far the eyes of a face `size` wide turn toward a pointer at
+/// `pointer`, when the face's middle is at `middle` (both in the window):
+/// right over the face they look straight out, further off further aside,
+/// up to `reach`; `None` when the pointer is too far to notice.
+fn toward(pointer: (f32, f32), middle: (f32, f32), size: f32, reach: f32) -> Option<(f32, f32)> {
+    let (dx, dy) = (pointer.0 - middle.0, pointer.1 - middle.1);
+    let far = (dx * dx + dy * dy).sqrt();
+    (far < NOTICES).then(|| {
+        let pull = (far / (size * 0.9)).min(1.0) * reach / far.max(0.001);
+        (dx * pull, dy * pull)
+    })
+}
+
+/// A face whose eyes show `mood`, and look at the pointer when it comes
+/// near: a shape, and two eyes over it that glance about and blink.
+fn alive(app: crate::state::AppState, size: f32, shape: &str, eyes: [(f32, f32, f32, f32); 2], tilt: f32, mood: Mood) -> View {
     let scale = size / 48.0;
     // How far a glance goes.
-    let reach = size * 0.045;
-    let (across, down, lids) = (animated_value(0.0), animated_value(0.0), animated_value(1.0));
+    let reach = size * 0.085;
+    // What the mood does with the eyes: where they look and how open they are.
+    let (across, down, lids, wide) = (animated_value(0.0), animated_value(0.0), animated_value(1.0), animated_value(1.0));
     let glide = |ms: f32| Timing::new(ms, Easing::EaseInOut);
-    let blink_every = |rest: f32| {
-        let _ = Animation::sequence([
-            Animation::delay(rest),
-            Animation::timing(&lids, 0.1, Timing::new(80.0, Easing::EaseInOut)),
-            Animation::timing(&lids, 1.0, Timing::new(140.0, Easing::EaseInOut)),
-        ])
-        .looped(None)
-        .start();
+    let to = |value: &AnimatedValue, target: f32, ms: f32| Animation::timing(value, target, glide(ms));
+    let run = |steps: Vec<Animation>| {
+        let _ = Animation::sequence(steps).looped(None).start();
     };
+    // The eyes shut and open again every `rest` milliseconds, from `open`.
+    let blink = |rest: f32, open: f32| run(vec![Animation::delay(rest), to(&lids, 0.08, 80.0), to(&lids, open, 140.0)]);
     match mood {
         Mood::Still => {}
-        Mood::Waiting => blink_every(2600.0),
+        Mood::Waiting => blink(2600.0, 1.0),
         Mood::Typing => {
-            let _ = Animation::timing(&down, reach * 0.9, glide(260.0)).start();
-            blink_every(3200.0);
+            let _ = to(&down, reach * 0.8, 240.0).start();
+            // Along the line it writes, and back.
+            run(vec![to(&across, reach * 0.7, 900.0), to(&across, -reach * 0.7, 260.0)]);
+            blink(3200.0, 1.0);
         }
         Mood::Thinking => {
-            let _ = Animation::timing(&down, -reach, glide(360.0)).start();
-            let _ = Animation::sequence([
-                Animation::timing(&across, -reach * 0.7, glide(1300.0)),
-                Animation::delay(500.0),
-                Animation::timing(&across, reach * 0.7, glide(1300.0)),
-                Animation::delay(500.0),
-            ])
-            .looped(None)
-            .start();
-            blink_every(3600.0);
+            // Not as far up as aside: the top of a face is near.
+            let _ = to(&down, -reach * 0.75, 360.0).start();
+            run(vec![to(&across, -reach * 0.8, 1300.0), Animation::delay(450.0), to(&across, reach * 0.8, 1300.0), Animation::delay(450.0)]);
+            blink(3600.0, 1.0);
+        }
+        Mood::Reading => {
+            // A line, the next line, and back to the top.
+            run(vec![
+                to(&across, -reach, 200.0),
+                to(&across, reach, 1100.0),
+                to(&across, -reach, 220.0),
+                to(&across, reach, 1100.0),
+                to(&across, -reach, 220.0),
+            ]);
+            run(vec![to(&down, -reach * 0.3, 200.0), Animation::delay(1100.0), to(&down, reach * 0.4, 220.0), Animation::delay(1100.0), Animation::delay(220.0)]);
+            blink(4200.0, 1.0);
+        }
+        Mood::Writing => {
+            let _ = to(&down, reach * 0.9, 220.0).start();
+            run(vec![to(&across, reach * 0.5, 180.0), to(&across, -reach * 0.5, 180.0), to(&across, reach * 0.2, 140.0), Animation::delay(520.0)]);
+            blink(3400.0, 1.0);
+        }
+        Mood::Searching => {
+            // Around: right, down, left, up.
+            run(vec![to(&across, reach, 420.0), Animation::delay(420.0), to(&across, -reach, 420.0), Animation::delay(420.0)]);
+            run(vec![Animation::delay(420.0), to(&down, reach * 0.8, 420.0), Animation::delay(420.0), to(&down, -reach * 0.8, 420.0)]);
+            blink(4600.0, 1.0);
+        }
+        Mood::Running => {
+            run(vec![to(&across, reach, 260.0), Animation::delay(380.0), to(&across, -reach, 320.0), Animation::delay(380.0)]);
+            blink(3000.0, 1.0);
+        }
+        Mood::Messaging => {
+            let _ = to(&across, reach, 300.0).start();
+            // A nod, now and then.
+            run(vec![Animation::delay(900.0), to(&down, reach * 0.6, 160.0), to(&down, 0.0, 200.0)]);
+            blink(3800.0, 1.0);
         }
         Mood::Working => {
-            let _ = Animation::sequence([
-                Animation::timing(&across, reach, glide(420.0)),
-                Animation::delay(700.0),
-                Animation::timing(&across, -reach, glide(560.0)),
-                Animation::delay(700.0),
-            ])
-            .looped(None)
-            .start();
-            blink_every(4200.0);
+            run(vec![to(&across, reach, 420.0), Animation::delay(700.0), to(&across, -reach, 560.0), Animation::delay(700.0)]);
+            blink(4200.0, 1.0);
+        }
+        Mood::Pleased => {
+            let _ = to(&wide, 1.18, 200.0).start();
+            run(vec![to(&down, -reach * 0.5, 220.0), to(&down, 0.0, 260.0), Animation::delay(1600.0)]);
+            blink(3000.0, 1.0);
+        }
+        Mood::Troubled => {
+            let _ = to(&down, reach * 0.7, 300.0).start();
+            let _ = to(&lids, 0.55, 300.0).start();
+            blink(5200.0, 0.55);
         }
     }
+
+    // The pointer, when it is near: the eyes turn to it, and open a little
+    // wider. `free` is how much of the mood's own glancing is left then.
+    let (look_x, look_y, free, alert) = (animated_value(0.0), animated_value(0.0), animated_value(1.0), animated_value(1.0));
+    let own = element_ref();
+    // Where the face's middle is in the window, and when that was asked.
+    let middle = stored(None::<(f32, f32)>);
+    let asked = stored(0_i64);
+    let watching = stored(false);
+    let (look_x_to, look_y_to, free_to, alert_to) = (look_x.clone(), look_y.clone(), free.clone(), alert.clone());
+    effect(move || {
+        let pointer = app.pointer.get();
+        let now = bubble_store::now_ms();
+        // Lists scroll and panels open: ask again where the face is, now and then.
+        if pointer.is_some() && now - asked.get() > 400 {
+            asked.replace(now);
+            spawn(async move {
+                if let Some(found) = own.measure().await {
+                    middle.replace(Some((found.page.x.0 + size / 2.0, found.page.y.0 + size / 2.0)));
+                }
+            });
+        }
+        let turn = match (pointer, middle.get()) {
+            // A little further than its own glances go: it is looking at something.
+            (Some(pointer), Some(middle)) => toward(pointer, middle, size, reach * 1.25),
+            _ => None,
+        };
+        match turn {
+            Some((x, y)) => {
+                let quick = Timing::new(90.0, Easing::EaseOut);
+                let _ = Animation::timing(&look_x_to, x, quick).start();
+                let _ = Animation::timing(&look_y_to, y, quick).start();
+                if !watching.replace(true) {
+                    let _ = Animation::timing(&free_to, 0.0, Timing::new(160.0, Easing::EaseOut)).start();
+                    let _ = Animation::timing(&alert_to, 1.14, Timing::new(160.0, Easing::EaseOut)).start();
+                }
+            }
+            None if watching.replace(false) => {
+                let back = Timing::new(320.0, Easing::EaseInOut);
+                for (value, rest) in [(&look_x_to, 0.0), (&look_y_to, 0.0), (&free_to, 1.0), (&alert_to, 1.0)] {
+                    let _ = Animation::timing(value, rest, back).start();
+                }
+            }
+            None => {}
+        }
+    });
+
+    let gaze_x = across.mul(&free).add(&look_x);
+    let gaze_y = down.mul(&free).add(&look_y);
+    let open = wide.mul(&alert);
     view()
         .size(px(size))
         .flex_shrink_0()
+        .element_ref(&own)
         .child(svg(ImageSrc::svg_markup(shape)).absolute().top(px(0.0)).left(px(0.0)).size(px(size)))
         .child(
             view()
@@ -166,10 +277,11 @@ fn alive(size: f32, shape: &str, eyes: [(f32, f32, f32, f32); 2], tilt: f32, moo
                 .top(px(0.0))
                 .left(px(0.0))
                 .size(px(size))
-                .bind_translate_x(&across)
-                .bind_translate_y(&down)
+                .bind_translate_x(&gaze_x)
+                .bind_translate_y(&gaze_y)
                 .children(eyes.map(|(left, top, width, height)| {
-                    // The lid closes over the eye; the eye leans inside it.
+                    // The lid closes over the eye; the eye leans inside it,
+                    // and grows a little when something has its attention.
                     view()
                         .absolute()
                         .left(px(left * scale))
@@ -177,31 +289,57 @@ fn alive(size: f32, shape: &str, eyes: [(f32, f32, f32, f32); 2], tilt: f32, moo
                         .w(px(width * scale))
                         .h(px(height * scale))
                         .bind_transform(nsh_core::TransformKind::ScaleY, &lids)
-                        .child(view().w_full().h_full().rounded(px(width * scale / 2.0)).bg(rgb(0xFFFFFF)).rotate(deg(tilt)))
+                        .child(
+                            view()
+                                .w_full()
+                                .h_full()
+                                .bind_scale(&open)
+                                .child(view().w_full().h_full().rounded(px(width * scale / 2.0)).bg(rgb(0xFFFFFF)).rotate(deg(tilt))),
+                        )
                 })),
         )
 }
 
 /// A bot's face showing what it is doing; it follows a change of look and
-/// of mood.
+/// of mood, and a pointer that comes near.
 pub fn bot_doing(app: crate::state::AppState, id: &str, size: f32, mood: impl Fn() -> Mood + 'static) -> impl IntoElement {
     let id = id.to_owned();
     let mood = computed(mood);
     view().size(px(size)).flex_shrink_0().child(dynamic(move || {
         let (shape, color) = app.face_of(&id);
-        alive(size, &shape_markup(shape, color), EYE_BOXES, EYE_TILT, mood.get())
+        alive(app, size, &shape_markup(shape, color), EYE_BOXES, EYE_TILT, mood.get())
     }))
 }
 
 /// The main bot's face showing what it is doing.
-pub fn main_doing(size: f32, mood: impl Fn() -> Mood + 'static) -> impl IntoElement {
+pub fn main_doing(app: crate::state::AppState, size: f32, mood: impl Fn() -> Mood + 'static) -> impl IntoElement {
     let mood = computed(mood);
-    view().size(px(size)).flex_shrink_0().child(dynamic(move || alive(size, MAIN_SHAPE, MAIN_EYE_BOXES, MAIN_EYE_TILT, mood.get())))
+    view().size(px(size)).flex_shrink_0().child(dynamic(move || alive(app, size, MAIN_SHAPE, MAIN_EYE_BOXES, MAIN_EYE_TILT, mood.get())))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eyes_turn_to_a_pointer_that_is_near() {
+        let (size, reach) = (40.0, 4.0);
+        let look = |x: f32, y: f32| toward((x, y), (100.0, 100.0), size, reach);
+        // Right over the face: straight out.
+        assert_eq!(look(100.0, 100.0), Some((0.0, 0.0)));
+        // Off to the right, as far as the eyes go, and no further however far.
+        let (x, y) = look(180.0, 100.0).unwrap();
+        assert!((x - reach).abs() < 0.001 && y.abs() < 0.001, "{x}, {y}");
+        assert_eq!(look(180.0, 100.0), look(250.0, 100.0));
+        // Up and to the left: both, and still no further than the reach.
+        let (x, y) = look(40.0, 40.0).unwrap();
+        assert!(x < 0.0 && y < 0.0 && ((x * x + y * y).sqrt() - reach).abs() < 0.001);
+        // Close by, it turns only part of the way.
+        let (x, _) = look(110.0, 100.0).unwrap();
+        assert!(x > 0.0 && x < reach);
+        // Too far to notice.
+        assert_eq!(look(100.0 + NOTICES + 1.0, 100.0), None);
+    }
 
     #[test]
     fn a_bot_keeps_its_face_and_bots_differ() {

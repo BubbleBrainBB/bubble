@@ -45,6 +45,9 @@ pub fn App() -> impl IntoElement {
         .flex_row()
         .bg(pane())
         .text_color(ink())
+        // Where the pointer is, for the faces that look at it.
+        .on_mouse_move(move |event: &nsh_core::MouseEvent| app.pointer.set(Some((event.page_position.x.0, event.page_position.y.0))))
+        .on_mouse_leave(move |_: &nsh_core::MouseEvent| app.pointer.set(None))
         .child(sidebar::sidebar(app))
         .child(
             view()

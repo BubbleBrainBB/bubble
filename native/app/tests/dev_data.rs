@@ -46,7 +46,11 @@ fn development_data_starts_from_the_persons_setup_and_stays_apart() {
         std::env::set_var("BUBBLE_MEMORY_AUTO", "0");
         std::env::set_var("BUBBLE_GH", root.join("no-gh"));
     }
-    let mut app = Headless::start(EngineConfig::new(Root::of::<bubble_app::App>())).unwrap();
+    // A desktop: there is a mouse.
+    let mut config = EngineConfig::new(Root::of::<bubble_app::App>());
+    config.environment.os = nsh_core::platform::Os::MacOs;
+    config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+    let mut app = Headless::start(config).unwrap();
     app.set_viewport(nsh_core::element::size(nsh_core::element::px(1280.0), nsh_core::element::px(820.0))).unwrap();
     app.wait_for_within("id:nav-home", Duration::from_secs(15)).unwrap();
 
@@ -73,6 +77,12 @@ fn development_data_starts_from_the_persons_setup_and_stays_apart() {
     app.type_text("id:bot-name", "Scratch").unwrap();
     app.press("Create bot").unwrap();
     app.wait_for("id:side-Scratch").unwrap();
+    // The pointer over a bot, then over the main bot: their faces turn to
+    // it, and the app goes on as before.
+    app.hover("id:side-Scratch").unwrap();
+    app.hover("id:nav-home").unwrap();
+    app.press("id:nav-settings").unwrap();
+    app.wait_for("Bots working at once").unwrap();
     drop(app);
     let theirs_db = Store::open(theirs.join("native/bubble.db")).unwrap();
     let names: Vec<String> = theirs_db.list_tasks().unwrap().into_iter().map(|t| t.task.title).collect();

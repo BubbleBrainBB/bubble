@@ -113,9 +113,17 @@ fn reading_classes() -> TextViewClasses {
     }
 }
 
-/// Markdown in the conversation's type.
-fn markdown(source: String) -> AnyElement {
-    nsh_base::text_view::text_view().markdown(SharedString::from(source)).selectable(true).classes(reading_classes()).into_element()
+/// The same, on the dark bubble of what was said to a bot (light in dark).
+fn reading_classes_on_ink() -> TextViewClasses {
+    TextViewClasses {
+        root: Some("text-[13px] leading-[22px] text-[#FFFFFF] dark:text-[#1A1A1A]".into()),
+        code: Some("bg-[#FFFFFF26] text-[#FFFFFF] dark:bg-[#0000001A] dark:text-[#1A1A1A]".into()),
+        code_block: Some("bg-[#FFFFFF1F] dark:bg-[#0000000F]".into()),
+        code_block_code: Some("text-[#FFFFFF] dark:text-[#1A1A1A]".into()),
+        link: Some("text-[#FFFFFF] dark:text-[#1A1A1A] underline".into()),
+        blockquote: Some("text-[#FFFFFFCC] dark:text-[#1A1A1ACC]".into()),
+        ..reading_classes()
+    }
 }
 
 /// Whether some block of `blocks` takes the width it is given and asks for
@@ -142,6 +150,29 @@ fn reply_bubble(source: &str) -> AnyElement {
     let bubble = if fits { bubble.self_start().max_w(percentage(1.0)) } else { bubble.w_full() };
     bubble
         .child(nsh_base::text_view::text_view().document(document).selectable(true).classes(reading_classes()))
+        .into_element()
+}
+
+/// What someone other than the person said to this bot (the main bot,
+/// another bot, GitHub, a routine): where the person's own words would be
+/// and looking as they do, with who said it over it. Whoever a bot is
+/// answering, its conversation reads the same way.
+fn said_to_bot(from: impl Fn() -> String + 'static, line: ReadSignal<Line>) -> AnyElement {
+    let document = nsh_base::text_view::Parser::new().markdown(&line.get_untracked().text);
+    let fits = !takes_given_width(&document.blocks) && document.footnotes.is_empty();
+    let bubble = view().bg(user_bubble()).rounded(px(18.0)).px(px(16.0)).py(px(9.0));
+    let bubble = if fits { bubble } else { bubble.w_full() };
+    view()
+        .child(stamp_line(line))
+        .child(
+            view()
+                .self_end()
+                .max_w(percentage(0.8))
+                .items_end()
+                .gap(px(4.0))
+                .child(text(from).text_size(px(SMALL)).text_color(muted()))
+                .child(bubble.child(nsh_base::text_view::text_view().document(document).selectable(true).classes(reading_classes_on_ink()))),
+        )
         .into_element()
 }
 
@@ -323,7 +354,7 @@ fn activity_row(app: AppState, conversation: Conversation, block: ReadSignal<Blo
     let mood = move || doing.get().mood;
     let face = match conversation.task_id.get() {
         Some(id) => crate::avatar::bot_doing(app, &id, 28.0, mood).into_element(),
-        None => crate::avatar::main_doing(28.0, mood).into_element(),
+        None => crate::avatar::main_doing(app, 28.0, mood).into_element(),
     };
     view()
         .flex_row()
@@ -389,32 +420,8 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>) 
             view().child((!current.text.trim().is_empty()).then(|| reply_bubble(&current.text))).into_element()
         }),
         LineKind::Message(MessageRole::Tool | MessageRole::Checkpoint) => view().into_element(),
-        LineKind::Message(MessageRole::External) => view()
-            .gap(px(6.0))
-            .child(stamp_line(line))
-            .child(text("From GitHub").text_size(px(SMALL)).text_color(muted()))
-            .child(
-                view()
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .rounded(px(18.0))
-                    .bg(tertiary())
-                    .child(markdown(line.get_untracked().text)),
-            )
-            .into_element(),
-        LineKind::Message(MessageRole::System) => view()
-            .gap(px(6.0))
-            .child(stamp_line(line))
-            .child(text(move || format!("From {}", app.sender_label(&line.get().id))).text_size(px(SMALL)).text_color(muted()))
-            .child(
-                view()
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .rounded(px(18.0))
-                    .bg(tertiary())
-                    .child(markdown(line.get_untracked().text)),
-            )
-            .into_element(),
+        LineKind::Message(MessageRole::External) => said_to_bot(|| "From GitHub".to_owned(), line),
+        LineKind::Message(MessageRole::System) => said_to_bot(move || format!("From {}", app.sender_label(&line.get().id)), line),
         LineKind::Notice => text(move || line.get().text).text_size(px(SMALL)).text_color(muted()).into_element(),
         LineKind::Failure => view()
             .flex_row()

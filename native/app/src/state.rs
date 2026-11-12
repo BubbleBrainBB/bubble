@@ -209,6 +209,9 @@ pub struct AppState {
     pub memory_revision: Signal<u32>,
     /// The open bot's details show beside its conversation.
     pub details_open: Signal<bool>,
+    /// Where the pointer is in the window, while it is over it: the bots'
+    /// faces look at it when it comes near.
+    pub pointer: Signal<Option<(f32, f32)>>,
     /// When the person last looked at each bot's conversation.
     seen: Signal<HashMap<String, i64>>,
     /// GitHub events since the person last wrote to the Manager (Home's
@@ -298,6 +301,7 @@ impl AppState {
             tickets_revision: signal(0),
             memory_revision: signal(0),
             details_open: signal(false),
+            pointer: signal(None),
             seen: signal(setting(BOTS_SEEN).and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default()),
             away: signal(Vec::new()),
             linking: signal(false),
@@ -1618,6 +1622,20 @@ impl Conversation {
         self.awaiting.with(|waiting| {
             waiting.insert(bot_id.to_owned());
         });
+    }
+
+    /// How the bot looks now: what its running turn is doing.
+    pub fn mood(&self) -> crate::avatar::Mood {
+        self.lines.with(|lines| {
+            let turn = lines.iter().rev().find_map(|line| match line.kind {
+                LineKind::Turn { status, .. } => Some((line.id.clone(), status)),
+                _ => None,
+            });
+            match turn {
+                Some((id, status)) if crate::trace::running(status) => crate::trace::activity(lines, &id, status).mood,
+                _ => crate::avatar::Mood::Working,
+            }
+        })
     }
 
     /// How much stands between this bot and new work: its turn in
