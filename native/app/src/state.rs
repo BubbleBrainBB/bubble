@@ -852,6 +852,8 @@ impl AppState {
         known.truncate(40);
         let json = serde_json::to_string(&known).ok();
         self.with_store(|s| s.set_setting(PROJECTS, json.as_deref()));
+        // The repositories to watch are those of the known projects.
+        self.repo_levels.update(|v| *v += 1);
     }
 
     /// Who sent the message `message_id` shows, when it came from a bot:

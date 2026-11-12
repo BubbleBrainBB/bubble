@@ -1295,6 +1295,24 @@ fn tool_settings(app: AppState) -> impl IntoElement {
 fn github_settings(app: AppState) -> impl IntoElement {
     use crate::github::Level;
     const LEVELS: [Option<Level>; 4] = [None, Some(Level::Observe), Some(Level::Prepare), Some(Level::Act)];
+    // What became of the folder just added, when it is not a repository to watch.
+    let note = signal(None::<String>);
+    let add = move || {
+        let picked = pick_paths(nsh_core::file_dialog::OpenDialog::folders().button_label("Add project"));
+        spawn(async move {
+            let Ok(Some(paths)) = picked.await else { return };
+            let Some(folder) = paths.into_iter().next().map(|p| p.display().to_string()) else { return };
+            let folder = folder.trim_end_matches('/').to_owned();
+            app.remember_project(&folder);
+            note.set(match app.repo_of(&folder) {
+                Some(_) => None,
+                None => Some(format!(
+                    "{} is a project now, but it is no GitHub repository (no github.com remote), so there is nothing to watch.",
+                    project_name(&folder)
+                )),
+            });
+        });
+    };
     view()
         .gap(px(8.0))
         .child(
@@ -1308,10 +1326,12 @@ fn github_settings(app: AppState) -> impl IntoElement {
                 ),
         )
         .child(when(move || app.github_repos().is_empty(), || {
-            text("Projects that are GitHub repositories show here once a task uses them.")
+            text("Projects that are GitHub repositories show here: add a project folder, or have a bot work in one.")
                 .text_size(px(SMALL))
                 .text_color(muted())
         }))
+        .child(view().flex_row().child(button("Add a project folder", add)))
+        .child(dynamic(move || note.get().map(|message| text(message).text_size(px(SMALL)).text_color(muted()))))
         .child(each(
             move || app.github_repos(),
             |repo: &crate::github::Repo| repo.name.clone(),

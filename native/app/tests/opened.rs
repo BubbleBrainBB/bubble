@@ -138,16 +138,19 @@ fn a_newly_opened_issue_is_weighed_and_proposed_to_the_repositorys_bot() {
     // New work starts with the Manager; this test starts from a task already made.
     bubble_store::Store::open(home.join("native/bubble.db"))
         .unwrap()
-        .create_task(bubble_store::NewTask { title: "Set up", project_cwd: Some(project.to_str().unwrap()), origin: bubble_store::Origin::User })
+        .create_task(bubble_store::NewTask { title: "Set up", project_cwd: None, origin: bubble_store::Origin::User })
         .unwrap();
     let mut app = Headless::start(EngineConfig::new(Root::of::<bubble_app::App>())).unwrap();
     app.set_viewport(nsh_core::element::size(nsh_core::element::px(1280.0), nsh_core::element::px(820.0))).unwrap();
     let long = Duration::from_secs(15);
 
-    // A first task makes the project known; then the repository is watched.
     app.wait_for_within("id:nav-home", long).unwrap();
-    app.press("id:side-Set up").unwrap();
+    // No bot has worked anywhere yet, so no project is known: the person
+    // adds the folder in Settings, and its repository shows, to be watched.
     app.press("id:nav-settings").unwrap();
+    app.wait_for("text:/^Projects that are GitHub repositories show here/").unwrap();
+    app.on_pick_paths(vec![project.clone()]).unwrap();
+    app.press("Add a project folder").unwrap();
     app.wait_for_within("acme/demo", long).unwrap();
     app.press("label:Prepare for acme/demo").unwrap();
 
