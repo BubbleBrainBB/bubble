@@ -252,6 +252,7 @@ native/
   - 测试：Rust 全工作区 230 个通过，新增 `app/tests/settings.rs`。
   - 没有 Tools 分区（用户定：不让用户看 bot 有哪些工具，心智负担要最轻）：MCP 服务器、Skills、Hooks、web search 都不在界面上出现，Skills 页面一并删掉；它们仍照 settings.json 和技能文件夹生效。
   - Memory 暂时不在设置里显示（用户定）。做过一版单独的 Memory 分区（所有 bot 都读的笔记可加可删，下面列有笔记的项目和 bot），在提交 029a233 里，要恢复时从那里取。bot 详情面板里它自己的笔记照旧。
+  - 输入框不再有模型和 Reasoning 菜单（用户定）：模型在 Settings 里设；某个 bot 要用不同的模型，在它的详情面板「Model」里选，默认跟随 Settings。Reasoning 只有 Settings 里那一个，不再能按 bot 设（旧的 `task_thinking:<id>` 不再读）。
   - 没做：项目文件夹不能从列表里移除；没有 Grok 那样的「总是询问」列表（核心没有这种规则）。
 
 ## 修订记录

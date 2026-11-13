@@ -679,8 +679,9 @@ fn approval_card(app: AppState, conversation: Conversation, line: ReadSignal<Lin
 const STOP_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect x="4.5" y="4.5" width="7" height="7" rx="1.5" fill="currentColor"/></svg>"##;
 const SEND_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5" stroke="currentColor" stroke-width="1.75" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 
-/// Whose composer it is: the Manager's, or a task's (with its own model and
-/// effort, and its project's files to mention).
+/// Whose composer it is: the Manager's, or a bot's (with its project's
+/// files to mention). Which model answers is set in Settings, and for one
+/// bot in its details.
 #[derive(Clone, PartialEq)]
 pub enum ComposerFor {
     Manager,
@@ -761,16 +762,6 @@ fn composer_menu(
     shown: impl Fn() -> String + 'static,
     options: impl Fn() -> Vec<(String, bool, Rc<dyn Fn()>)> + 'static,
 ) -> impl IntoElement {
-    toned_menu(label, shown, || false, options)
-}
-
-/// A composer menu whose shown value turns red while `warn` holds.
-fn toned_menu(
-    label: &'static str,
-    shown: impl Fn() -> String + 'static,
-    warn: impl Fn() -> bool + 'static,
-    options: impl Fn() -> Vec<(String, bool, Rc<dyn Fn()>)> + 'static,
-) -> impl IntoElement {
     nsh_base::menu()
         .placement(Placement::Top)
         .align(Align::End)
@@ -790,7 +781,7 @@ fn toned_menu(
                 .child(
                     text(shown)
                         .text_size(px(BODY))
-                        .text_color(move || if warn() { failed() } else { secondary() })
+                        .text_color(secondary())
                         .number_of_lines(1),
                 ),
         )
@@ -818,100 +809,8 @@ fn toned_menu(
         }))
 }
 
-/// The model and effort pickers: a task's own, or the Manager's (which are
-/// Settings').
-fn model_pickers(app: AppState, target: ComposerFor) -> impl IntoElement {
-    use bubble_core::Level as ThinkingLevel;
-    use bubble_store::RunRole;
-    let task_id = match &target {
-        ComposerFor::Task(id) => Some(id.clone()),
-        ComposerFor::Manager => None,
-    };
-    let current = {
-        let task_id = task_id.clone();
-        move || match &task_id {
-            Some(id) => app.task_model_of(id),
-            None => {
-                app.manager_model.get();
-                app.model_for(RunRole::Manager)
-            }
-        }
-    };
-    let level = {
-        let task_id = task_id.clone();
-        move || match &task_id {
-            Some(id) => app.task_thinking_of(id),
-            None => app.thinking.get(),
-        }
-    };
-    let model_options = {
-        let task_id = task_id.clone();
-        let current = current.clone();
-        move || {
-            let chosen = current();
-            let mut models = app.models.get();
-            if let Some(c) = &chosen {
-                if !models.contains(c) {
-                    models.push(c.clone());
-                }
-            }
-            models
-                .into_iter()
-                .map(|model| {
-                    let task_id = task_id.clone();
-                    let picked = model.clone();
-                    let pick: Rc<dyn Fn()> = Rc::new(move || match &task_id {
-                        Some(id) => app.set_task_model(id, Some(picked.clone())),
-                        None => app.set_model_setting(RunRole::Manager, Some(picked.clone())),
-                    });
-                    let is = chosen.as_deref() == Some(model.as_str());
-                    (model, is, pick)
-                })
-                .collect::<Vec<_>>()
-        }
-    };
-    let levels = {
-        let current = current.clone();
-        move || current().map(|m| app.levels_of(&m)).unwrap_or_default()
-    };
-    let level_options = {
-        let task_id = task_id.clone();
-        let levels = levels.clone();
-        let level = level.clone();
-        move || {
-            let now = level();
-            levels()
-                .into_iter()
-                .map(|l: ThinkingLevel| {
-                    let task_id = task_id.clone();
-                    let pick: Rc<dyn Fn()> = Rc::new(move || match &task_id {
-                        Some(id) => app.set_task_thinking(id, Some(l)),
-                        None => app.set_thinking(l),
-                    });
-                    (l.as_str().to_owned(), l == now, pick)
-                })
-                .collect::<Vec<_>>()
-        }
-    };
-    let shown_level = {
-        let current = current.clone();
-        let level = level.clone();
-        move || {
-            let Some(reference) = current() else { return String::new() };
-            app.effective_level(&reference, level()).as_str().to_owned()
-        }
-    };
-    let thinks = move || levels().iter().any(|l| *l != ThinkingLevel::Off);
-    view()
-        .flex_row()
-        .items_center()
-        .child(composer_menu("Model", move || current().unwrap_or_else(|| "No model".into()), model_options))
-        .child(when(thinks, move || composer_menu("Effort", shown_level.clone(), level_options.clone())))
-}
-
 /// Where the person writes: text, `@file` mentions of the task's project,
-/// pictures (pasted or attached), Up and Down for what they sent before,
-/// and the model and effort it goes to.
+/// pictures (pasted or attached), and Up and Down for what they sent before.
 pub fn composer(
     app: AppState,
     conversation: Conversation,
@@ -1180,7 +1079,6 @@ pub fn composer(
                     )
                     .child(view().flex_1())
                     .child(bot.get().map(|id| project_picker(app, id, files)))
-                    .child(model_pickers(app, target))
                     .child(dynamic(move || {
                         let send_on_press = send_on_press.clone();
                         if conversation.busy.get() {

@@ -1,6 +1,6 @@
 //! The composer, headless: an `@file` mention sends the file along, a
 //! pasted picture goes with the message, Up brings back what was sent, and
-//! a task keeps its own model and effort.
+//! a bot runs on the model its details give it.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -152,13 +152,14 @@ fn the_composer_mentions_files_takes_pictures_and_remembers() {
     app.press_key("down").unwrap();
     composer_shows(&mut app, "");
 
-    // The task's own model and effort.
+    // The bot's own model is set in its details, not in the composer.
+    assert!(!app.shows("label:Effort"));
+    app.press("id:bot-details-toggle").unwrap();
+    app.wait_for("text:Same as Settings").unwrap();
     app.press("label:Model").unwrap();
-    app.press("label:stepfun:step-3").unwrap();
+    app.press("label:Model: stepfun:step-3").unwrap();
     app.wait_for("text:stepfun:step-3").unwrap();
-    app.press("label:Effort").unwrap();
-    app.press("label:high").unwrap();
-    app.wait_for("text:/^high$/").unwrap();
+    app.press("id:bot-details-toggle").unwrap();
     app.type_text("id:composer", "once more").unwrap();
     app.submit("text:once more").unwrap();
     app.wait_for_within("label:Send", long).unwrap();

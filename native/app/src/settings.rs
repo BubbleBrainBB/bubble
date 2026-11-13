@@ -290,7 +290,7 @@ pub struct Choice {
 }
 
 impl Choice {
-    fn new(name: impl Into<String>, chosen: bool, pick: impl Fn() + 'static) -> Self {
+    pub fn new(name: impl Into<String>, chosen: bool, pick: impl Fn() + 'static) -> Self {
         Choice { name: name.into(), note: None, label: None, chosen, pick: Rc::new(pick) }
     }
 
@@ -299,7 +299,7 @@ impl Choice {
         self
     }
 
-    fn label(mut self, label: String) -> Self {
+    pub fn label(mut self, label: String) -> Self {
         self.label = Some(label);
         self
     }
@@ -307,7 +307,7 @@ impl Choice {
 
 /// A choice among a few: a button showing the one chosen, with a small
 /// arrow, that opens a menu of them all, the chosen one filled and checked.
-fn dropdown(label: impl Into<String>, shown: impl Fn() -> String + 'static, choices: impl Fn() -> Vec<Choice> + 'static) -> impl IntoElement {
+pub fn dropdown(label: impl Into<String>, shown: impl Fn() -> String + 'static, choices: impl Fn() -> Vec<Choice> + 'static) -> impl IntoElement {
     menu_of(label.into(), shown, choices, None)
 }
 

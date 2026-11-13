@@ -96,6 +96,33 @@ pub fn panel(app: AppState, bot_id: String) -> impl IntoElement {
         });
     };
 
+    // The model this bot runs on, when not the one Settings gives every bot.
+    let model = crate::settings::dropdown(
+        "Model",
+        move || app.task_model_override(&id.get()).unwrap_or_else(|| "Same as Settings".to_owned()),
+        move || {
+            use crate::settings::Choice;
+            let own = app.task_model_override(&id.get());
+            let shared = match app.model_for(bubble_store::RunRole::Task) {
+                Some(model) => format!("Same as Settings ({model})"),
+                None => "Same as Settings".to_owned(),
+            };
+            let mut choices = vec![Choice::new(shared, own.is_none(), move || app.set_task_model(&id.get(), None)).label("Model: same as Settings".to_owned())];
+            let mut models = app.models.get();
+            if let Some(current) = &own {
+                if !models.contains(current) {
+                    models.push(current.clone());
+                }
+            }
+            for model in models {
+                let picked = model.clone();
+                let is = own.as_deref() == Some(model.as_str());
+                choices.push(Choice::new(model.clone(), is, move || app.set_task_model(&id.get(), Some(picked.clone()))).label(format!("Model: {model}")));
+            }
+            choices
+        },
+    );
+
     let tickets = move || {
         // Read again when work comes in, is decided or ends.
         app.tickets_revision.get();
@@ -151,6 +178,13 @@ pub fn panel(app: AppState, bot_id: String) -> impl IntoElement {
                                         text(move || saved.get().unwrap_or_default()).text_size(px(SMALL)).text_color(muted())
                                     })),
                             ),
+                    )
+                    .child(
+                        view()
+                            .gap(px(8.0))
+                            .child(heading("Model"))
+                            .child(view().flex_row().child(model))
+                            .child(text("Every bot runs on the model in Settings unless you give it one here.").text_size(px(SMALL)).text_color(muted())),
                     )
                     .child(
                         view()

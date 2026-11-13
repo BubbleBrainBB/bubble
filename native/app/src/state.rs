@@ -75,9 +75,6 @@ fn bot_instruction_key(bot_id: &str) -> String {
 fn task_model_key(task_id: &str) -> String {
     format!("task_model:{task_id}")
 }
-fn task_thinking_key(task_id: &str) -> String {
-    format!("task_thinking:{task_id}")
-}
 /// "full" when the bots' changes and commands need no approvals; absent
 /// when each asks first. One setting for every bot.
 pub const ACCESS: &str = "access";
@@ -673,10 +670,9 @@ impl AppState {
         };
         let name = (2..).map(|n| format!("{base} {n}")).find(|name| !self.name_taken(name, None))?;
         let id = self.create_bot(&name, &self.bot_role(bot_id), &self.bot_instruction(bot_id), original.origin).ok()?;
-        for key in [task_model_key, task_thinking_key] {
-            if let Some(value) = self.with_store(|s| s.setting(&key(bot_id))).flatten() {
-                self.with_store(|s| s.set_setting(&key(&id), Some(&value)));
-            }
+        // A copy runs on what the bot it was copied from runs on.
+        if let Some(model) = self.with_store(|s| s.setting(&task_model_key(bot_id))).flatten() {
+            self.with_store(|s| s.set_setting(&task_model_key(&id), Some(&model)));
         }
         Some(id)
     }
@@ -846,22 +842,8 @@ impl AppState {
         self.with_store(|s| s.setting(&task_model_key(task_id))).flatten()
     }
 
-    /// How hard a task's model thinks: its own level, else Settings'.
-    pub fn task_thinking_of(&self, task_id: &str) -> ThinkingLevel {
-        self.task_revision.get();
-        self.with_store(|s| s.setting(&task_thinking_key(task_id)))
-            .flatten()
-            .and_then(|v| ThinkingLevel::parse(&v))
-            .unwrap_or_else(|| self.thinking.get())
-    }
-
     pub fn set_task_model(&self, task_id: &str, model: Option<String>) {
         self.with_store(|s| s.set_setting(&task_model_key(task_id), model.as_deref()));
-        self.task_revision.update(|v| *v += 1);
-    }
-
-    pub fn set_task_thinking(&self, task_id: &str, level: Option<ThinkingLevel>) {
-        self.with_store(|s| s.set_setting(&task_thinking_key(task_id), level.map(|l| l.as_str())));
         self.task_revision.update(|v| *v += 1);
     }
 
@@ -1819,10 +1801,8 @@ impl Conversation {
             Some(id) => app.task_model_of(id),
             None => app.model_for(RunRole::Manager),
         };
-        let thinking = match &task_id {
-            Some(id) => app.task_thinking_of(id),
-            None => app.thinking.get_untracked(),
-        };
+        // How hard it thinks is one setting, for every bot.
+        let thinking = app.thinking.get_untracked();
         let model = reference
             .clone()
             .ok_or_else(|| anyhow!("no model is set"))

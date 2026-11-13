@@ -137,7 +137,8 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
 
     // Home: the Manager answers a plain message itself.
     app.wait_for("What should we work on?").unwrap();
-    app.wait_for("text:mock:test-model").unwrap();
+    // Which model answers is not the composer's to say.
+    assert!(!app.shows("text:mock:test-model") && !app.shows("label:Model"));
     app.type_text("id:composer", "Say hello").unwrap();
     app.submit("text:Say hello").unwrap();
     app.wait_for_within("text:/Hello from the stand-in model/", long).unwrap();
