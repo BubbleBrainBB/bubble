@@ -39,8 +39,29 @@ const BOT_LIMIT: usize = 8_000;
 const TEAM_LIMIT: usize = 4_000;
 const PROJECT_LIMIT: usize = 6_000;
 
-fn root() -> PathBuf {
+pub fn root() -> PathBuf {
     bubble_home().join("native").join("memory")
+}
+
+/// How many notes are kept: the bots' own, each project's and the team's.
+pub fn count() -> usize {
+    fn notes_in(folder: &std::path::Path) -> usize {
+        let Ok(files) = std::fs::read_dir(folder) else { return 0 };
+        files
+            .flatten()
+            .map(|file| {
+                let path = file.path();
+                if path.is_dir() {
+                    notes_in(&path)
+                } else if path.extension().is_some_and(|e| e == "md") {
+                    std::fs::read_to_string(&path).map(|text| text.lines().filter_map(text_of).count()).unwrap_or(0)
+                } else {
+                    0
+                }
+            })
+            .sum()
+    }
+    notes_in(&root())
 }
 
 fn path(scope: &Scope) -> PathBuf {

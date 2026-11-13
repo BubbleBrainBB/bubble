@@ -136,7 +136,7 @@ fn what_a_reply_says_stays_inside_its_bubble() {
     let capture = geometry.clone();
     app.observe(move |_, batch| capture.lock().unwrap().apply(batch));
     // Away and back, so the conversation is laid out under the observer.
-    app.press("id:nav-settings").unwrap();
+    app.press("id:nav-search").unwrap();
     app.press("id:nav-home").unwrap();
     app.wait_for(AFTER_NOTE).unwrap();
     {

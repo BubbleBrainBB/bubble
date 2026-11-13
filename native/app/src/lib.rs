@@ -13,6 +13,8 @@ mod memory;
 mod pages;
 mod palette;
 mod prs;
+mod rules;
+mod settings;
 mod sidebar;
 mod state;
 mod trace;
@@ -78,8 +80,9 @@ pub fn App() -> impl IntoElement {
                         Route::PullRequests => prs::page(app).into_element(),
                         Route::Skills => pages::skills(app).into_element(),
                         Route::Search => pages::search(app).into_element(),
-                        Route::Settings => pages::settings(app).into_element(),
                     })
                 }))),
         )
+        // Settings, over all of it.
+        .child(when(move || app.settings.get().is_some(), move || settings::dialog(app)))
 }

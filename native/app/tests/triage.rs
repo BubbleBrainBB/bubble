@@ -146,8 +146,12 @@ fn a_mention_is_triaged_into_a_task_and_shown_on_home() {
     app.wait_for_within("id:nav-home", long).unwrap();
     app.press("id:side-Set up").unwrap();
     app.press("id:nav-settings").unwrap();
+    app.press("id:settings-projects").unwrap();
     app.wait_for_within("acme/demo", long).unwrap();
+    app.press("label:Level for acme/demo").unwrap();
     app.press("label:Prepare for acme/demo").unwrap();
+    app.wait_for("text:Prepare").unwrap();
+    app.press("id:settings-close").unwrap();
 
     // The mention is triaged into work proposed to the repository's bot,
     // and Home says so.

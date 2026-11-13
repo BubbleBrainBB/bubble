@@ -168,10 +168,14 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
 
     // Settings: the repository is found and set to prepare.
     app.press("id:nav-settings").unwrap();
-    app.wait_for_within("Signed in with GitHub CLI as tester", long).unwrap();
+    app.press("id:settings-projects").unwrap();
+    app.wait_for_within("Signed in as tester", long).unwrap();
     app.wait_for("acme/demo").unwrap();
+    app.press("label:Level for acme/demo").unwrap();
+    app.wait_for("text:/^Bots work on new issues and reviews/").unwrap();
     app.press("label:Prepare for acme/demo").unwrap();
-    app.wait_for("text:/^Agents work on new issues and reviews/").unwrap();
+    app.wait_for("text:Prepare").unwrap();
+    app.press("id:settings-close").unwrap();
 
     // The main bot hands the assignment to the bot whose role fits, as
     // work proposed to it and linked to the issue. No bot is made for it,

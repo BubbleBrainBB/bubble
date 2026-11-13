@@ -36,9 +36,10 @@ fn dark_appearance_is_chosen_and_kept() {
         app.wait_for_within("What should we work on?", long).unwrap();
         assert!(!is_light(&app, "text:What should we work on?"), "light by default");
         app.press("id:nav-settings").unwrap();
-        app.press("label:Appearance Dark").unwrap();
+        app.press("label:Theme").unwrap();
+        app.press("label:Dark").unwrap();
         app.wait(Duration::from_millis(100)).unwrap();
-        assert!(is_light(&app, "text:Appearance"), "dark: light text");
+        assert!(is_light(&app, "text:Theme"), "dark: light text");
     }
     let mut app = Headless::start(EngineConfig::new(Root::of::<bubble_app::App>())).unwrap();
     app.wait_for_within("What should we work on?", long).unwrap();

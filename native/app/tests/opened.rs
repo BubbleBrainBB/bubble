@@ -148,11 +148,15 @@ fn a_newly_opened_issue_is_weighed_and_proposed_to_the_repositorys_bot() {
     // No bot has worked anywhere yet, so no project is known: the person
     // adds the folder in Settings, and its repository shows, to be watched.
     app.press("id:nav-settings").unwrap();
-    app.wait_for("text:/^Projects that are GitHub repositories show here/").unwrap();
+    app.press("id:settings-projects").unwrap();
+    app.wait_for("text:/^None yet\\. Add one/").unwrap();
     app.on_pick_paths(vec![project.clone()]).unwrap();
     app.press("Add a project folder").unwrap();
     app.wait_for_within("acme/demo", long).unwrap();
+    app.press("label:Level for acme/demo").unwrap();
     app.press("label:Prepare for acme/demo").unwrap();
+    app.wait_for("text:Prepare").unwrap();
+    app.press("id:settings-close").unwrap();
 
     // The issue is weighed and proposed to the repository's bot; the
     // updater's pull request is written down, and Home says both.

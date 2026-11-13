@@ -905,38 +905,8 @@ fn model_pickers(app: AppState, target: ComposerFor) -> impl IntoElement {
     view()
         .flex_row()
         .items_center()
-        .child(task_id.clone().map(|id| access_menu(app, id)))
         .child(composer_menu("Model", move || current().unwrap_or_else(|| "No model".into()), model_options))
         .child(when(thinks, move || composer_menu("Effort", shown_level.clone(), level_options.clone())))
-}
-
-/// Whether a task's commands ask first or go ahead (Full access). Full
-/// access holds while the person sent the latest message; work GitHub or
-/// the Manager hands over still asks.
-fn access_menu(app: AppState, task_id: String) -> impl IntoElement {
-    let full = {
-        let task_id = task_id.clone();
-        move || app.task_full_access(&task_id)
-    };
-    let shown = {
-        let full = full.clone();
-        move || if full() { "Full access".to_owned() } else { "Ask first".to_owned() }
-    };
-    let options = {
-        let full = full.clone();
-        move || {
-            let on = full();
-            [("Ask first", false), ("Full access", true)]
-                .into_iter()
-                .map(|(name, value)| {
-                    let task_id = task_id.clone();
-                    let pick: Rc<dyn Fn()> = Rc::new(move || app.set_task_full_access(&task_id, value));
-                    (name.to_owned(), on == value, pick)
-                })
-                .collect::<Vec<_>>()
-        }
-    };
-    toned_menu("Access", shown, full, options)
 }
 
 /// Where the person writes: text, `@file` mentions of the task's project,

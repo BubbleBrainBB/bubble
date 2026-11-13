@@ -116,8 +116,8 @@ impl Level {
         match level {
             None => "Not watched",
             Some(Level::Observe) => "Records what happens; starts nothing",
-            Some(Level::Prepare) => "Agents work on new issues and reviews; comments, PRs and pushes wait for you",
-            Some(Level::Act) => "Agents also comment, push and open PRs without asking; merging stays yours",
+            Some(Level::Prepare) => "Bots work on new issues and reviews; anything published waits for you",
+            Some(Level::Act) => "Bots also comment, push and open pull requests; merging stays yours",
         }
     }
 }

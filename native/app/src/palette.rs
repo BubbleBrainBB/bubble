@@ -78,6 +78,14 @@ pub fn needs() -> AdaptiveColor {
 pub fn failed() -> AdaptiveColor {
     pair(0xDC2626, 0xF87171)
 }
+/// Something is there and works: the dot beside it.
+pub fn working_color() -> AdaptiveColor {
+    pair(0x2E9E5B, 0x4CC26E)
+}
+/// What is behind a dialog, dimmed.
+pub fn scrim() -> AdaptiveColor {
+    pair_alpha(0x0000_003D, 0x0000_0080)
+}
 /// Shadows under raised surfaces.
 pub fn shadow() -> AdaptiveColor {
     pair_alpha(0x0F17_2A14, 0x0000_0066)

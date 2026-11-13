@@ -149,6 +149,7 @@ fn the_manager_starts_tasks_that_queue_ask_and_finish() {
         app.press("label:Fewer bots at once").unwrap();
     }
     app.wait_for("1").unwrap();
+    app.press("id:settings-close").unwrap();
 
     // The main bot gives a request to a bot and says so in words: the
     // conversation shows what was said, not the calls behind it. The bot

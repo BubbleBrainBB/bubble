@@ -79,10 +79,9 @@ fn task_model_key(task_id: &str) -> String {
 fn task_thinking_key(task_id: &str) -> String {
     format!("task_thinking:{task_id}")
 }
-/// "full" when the task's runs the person starts need no approvals.
-fn task_access_key(task_id: &str) -> String {
-    format!("task_access:{task_id}")
-}
+/// "full" when the bots' changes and commands need no approvals; absent
+/// when each asks first. One setting for every bot.
+pub const ACCESS: &str = "access";
 /// Why a run began, when the person chose it (a rerun).
 /// The subagents a task's agent started, as the agent reported them.
 fn subagents_key(task_id: &str) -> String {
@@ -99,6 +98,16 @@ pub struct ServerRow {
     pub scope: &'static str,
     pub status: String,
     pub failed: bool,
+    pub connected: bool,
+}
+
+/// A folder the bots work in, as Settings shows it: the GitHub repository
+/// it is of, when it is one, and how far Bubble may go there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectFolder {
+    pub path: String,
+    pub repo: Option<String>,
+    pub level: Option<Level>,
 }
 
 /// What the agent said it can run.
@@ -122,7 +131,8 @@ fn server_row(server: &bubble_host::McpServer) -> ServerRow {
         "local" => "local",
         _ => "user",
     };
-    ServerRow { name: server.name.clone(), scope, status, failed }
+    let connected = matches!(server.state, bubble_host::McpState::Connected { .. });
+    ServerRow { name: server.name.clone(), scope, status, failed, connected }
 }
 
 /// What Settings says about skills.
@@ -147,7 +157,6 @@ pub enum Route {
     PullRequests,
     Skills,
     Search,
-    Settings,
 }
 
 pub use crate::transcript::{Line, LineKind, ToolStatus, TurnStatus};
@@ -199,8 +208,6 @@ pub struct AppState {
     pub catalog: Signal<Arc<Catalog>>,
     pub mcp_servers: Signal<Vec<ServerRow>>,
     pub skills: Signal<SkillsSummary>,
-    /// Where persistent memory stands.
-    pub memory_status: Signal<String>,
     /// The person's hooks (settings.json), as Settings shows them.
     pub hook_rules: Signal<Vec<String>>,
     pub route: Signal<Route>,
@@ -229,6 +236,10 @@ pub struct AppState {
     pub changes_open: Signal<bool>,
     /// Light, dark, or as the system is.
     pub appearance: Signal<nsh_core::platform::Appearance>,
+    /// The bots' changes and commands go ahead without asking.
+    pub full_access: Signal<bool>,
+    /// Settings is open, at this section, over whatever the window shows.
+    pub settings: Signal<Option<crate::settings::Section>>,
     /// Prompts that start tasks on a schedule.
     pub automations: Signal<Vec<crate::automations::Automation>>,
     /// The person's skills, for the Skills page.
@@ -293,7 +304,6 @@ impl AppState {
             catalog: signal(Arc::new(Catalog::default())),
             mcp_servers: signal(Vec::new()),
             skills: signal(SkillsSummary::default()),
-            memory_status: signal(String::new()),
             hook_rules: signal(Vec::new()),
             problem: signal((!problems.is_empty()).then(|| problems.join("\n"))),
             // The conversation that was open comes back, as a messenger's does.
@@ -315,6 +325,8 @@ impl AppState {
             automations: signal(crate::automations::load(setting(crate::automations::KEY).as_deref())),
             skill_list: signal(Vec::new()),
             appearance: signal(appearance_of(setting(APPEARANCE).as_deref())),
+            full_access: signal(setting(ACCESS).as_deref() == Some("full")),
+            settings: signal(None),
             conversations: stored(HashMap::new()),
             queue: stored(VecDeque::new()),
             gh: stored(Gh::locate()),
@@ -343,7 +355,7 @@ impl AppState {
         github::start(state);
         crate::automations::start(state);
         state.refresh_catalog();
-        state.show_hooks_and_memory();
+        state.show_hooks();
         state.import_sessions();
         state
     }
@@ -375,10 +387,9 @@ impl AppState {
 
     /// Finds the person's skills and connects their own MCP servers, so
     /// Settings shows what works before a task needs it.
-    /// What Settings says about hooks and memory. Both are the agent's own
-    /// work (it runs the hooks and keeps the memory, from the conversations
-    /// in its session files); the app only shows where they stand.
-    fn show_hooks_and_memory(&self) {
+    /// What Settings says about hooks: the agent runs them; the app only
+    /// shows that they are there.
+    fn show_hooks(&self) {
         let hooks = Hooks::load(&bubble_home(), None);
         self.hook_rules.set(
             hooks
@@ -387,15 +398,6 @@ impl AppState {
                 .map(|r| format!("{}: {}{}", r.events.join(", "), r.command, r.matcher.as_ref().map(|m| format!(" (matching {m})")).unwrap_or_default()))
                 .collect(),
         );
-        let updated = std::fs::metadata(bubble_core::memory::root().join("memory_summary.md"))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| bubble_core::time::from_millis(d.as_millis()).date);
-        self.memory_status.set(match updated {
-            Some(date) => format!("Summary updated {date}"),
-            None => "No memory yet".to_owned(),
-        });
     }
 
     /// Asks the agent what it offers (models and accounts, skills, MCP
@@ -615,6 +617,7 @@ impl AppState {
             for row in rows.iter_mut().filter(|r| r.name == name) {
                 row.status = "Connecting…".into();
                 row.failed = false;
+                row.connected = false;
             }
         });
     }
@@ -657,6 +660,19 @@ impl AppState {
     pub fn set_repo_level(&self, repo: &str, level: Option<Level>) {
         self.with_store(|s| s.set_setting(&github::level_key(repo), level.map(Level::as_str)));
         self.repo_levels.update(|v| *v += 1);
+    }
+
+    /// Every known project folder, with its repository and level.
+    pub fn project_folders(&self) -> Vec<ProjectFolder> {
+        self.repo_levels.get();
+        self.projects()
+            .into_iter()
+            .map(|path| {
+                let repo = self.repo_of(&path);
+                let level = repo.as_deref().and_then(|repo| self.repo_level(repo));
+                ProjectFolder { path, repo, level }
+            })
+            .collect()
     }
 
     /// The projects that are GitHub repositories, with their levels.
@@ -811,7 +827,7 @@ impl AppState {
         };
         let name = (2..).map(|n| format!("{base} {n}")).find(|name| !self.name_taken(name, None))?;
         let id = self.create_bot(&name, &self.bot_role(bot_id), &self.bot_instruction(bot_id), original.origin).ok()?;
-        for key in [task_model_key, task_thinking_key, task_access_key] {
+        for key in [task_model_key, task_thinking_key] {
             if let Some(value) = self.with_store(|s| s.setting(&key(bot_id))).flatten() {
                 self.with_store(|s| s.set_setting(&key(&id), Some(&value)));
             }
@@ -1003,17 +1019,16 @@ impl AppState {
         self.task_revision.update(|v| *v += 1);
     }
 
-    /// Whether the task's runs the person starts go ahead without asking.
-    pub fn task_full_access(&self, task_id: &str) -> bool {
-        self.task_revision.get();
-        self.with_store(|s| s.setting(&task_access_key(task_id))).flatten().as_deref() == Some("full")
-    }
-
-    pub fn set_task_full_access(&self, task_id: &str, full: bool) {
-        self.with_store(|s| s.set_setting(&task_access_key(task_id), full.then_some("full")));
-        self.task_revision.update(|v| *v += 1);
+    /// Full access, for every bot: changes and commands go ahead without
+    /// asking, whoever gave the bot the work. What the rules never allow is
+    /// still refused, and what a repository's level keeps for the person
+    /// (comments, pushes, pull requests) still waits for them.
+    pub fn set_full_access(&self, full: bool) {
+        self.with_store(|s| s.set_setting(ACCESS, full.then_some("full")));
+        self.full_access.set(full);
         if full {
-            if let Some(conversation) = self.conversations.with(|map| map.get(task_id).copied()) {
+            let open: Vec<Conversation> = self.conversations.with(|map| map.values().copied().collect());
+            for conversation in open {
                 conversation.allow_waiting(*self);
             }
         }
@@ -1146,6 +1161,7 @@ impl AppState {
             children: stored(children),
             subagents: signal(Vec::new()),
             approvals: stored(HashMap::new()),
+            kept_asks: stored(HashSet::new()),
             questions: stored(HashMap::new()),
             pending: stored(String::new()),
             active_turn: stored(String::new()),
@@ -1362,6 +1378,9 @@ pub struct Conversation {
     pub following: Signal<bool>,
     /// Questions the agent waits on, by their line's id.
     approvals: Stored<HashMap<String, oneshot::Sender<Decision>>>,
+    /// The approvals that are the person's to give whatever the access:
+    /// what a repository's level keeps for them.
+    kept_asks: Stored<HashSet<String>>,
     /// What the agent asked the person and waits to hear, by line id.
     questions: Stored<HashMap<String, oneshot::Sender<Option<Vec<Vec<String>>>>>>,
     /// The line the next reply streams into.
@@ -1465,6 +1484,9 @@ impl Conversation {
             .unwrap_or_else(|| format!("{turn}:tool-{call_id}"));
         let id = format!("{tool_id}:approval");
         self.approvals.with(|map| map.insert(id.clone(), respond));
+        if permission.grant.starts_with("github:") {
+            self.kept_asks.with(|kept| kept.insert(id.clone()));
+        }
         let line = Line::new(
             id,
             LineKind::Approval {
@@ -2011,7 +2033,7 @@ impl Conversation {
                 tools.extend(manager::bot_specs());
                 tools.extend(crate::automations::specs());
                 tools.extend(crate::memory::specs());
-                let full = app.task_full_access(id) && self.driven_by_person(app, &run.id);
+                let full = app.full_access.get_untracked();
                 let instruction = app.bot_instruction(id);
                 // The agent goes by the bot's name, not the main bot's.
                 let name = Some(title.clone()).filter(|t| !t.trim().is_empty());
@@ -2364,12 +2386,8 @@ impl Conversation {
             }
             AgentEvent::ApprovalNeeded { call, permission, respond } => {
                 // Full access, read at each call so switching it applies to
-                // the next one; only while the person drives the run.
-                let full = self
-                    .task_id
-                    .get()
-                    .is_some_and(|id| app.task_full_access(&id) && self.driven_by_person(app, run_id));
-                if full {
+                // the next one.
+                if app.full_access.get_untracked() {
                     let _ = respond.send(Decision::AllowOnce);
                 } else {
                     self.ask_with(app, run_id, &call.id, permission, respond);
@@ -2409,20 +2427,11 @@ impl Conversation {
         }
     }
 
-    /// Whether the person (not GitHub or the Manager) sent the run's latest
-    /// message, the one the agent is working on now.
-    fn driven_by_person(&self, app: AppState, run_id: &str) -> bool {
-        app.with_store(|s| s.messages(run_id)).is_some_and(|messages| person_spoke_last(&messages))
-    }
-
-    /// Full access was turned on: the questions waiting in a run the
-    /// person is driving are allowed.
+    /// Full access was turned on: what waits for a yes here is allowed,
+    /// but for what a repository's level keeps for the person.
     fn allow_waiting(&self, app: AppState) {
-        let Some(run) = self.current_run(app) else { return };
-        if !self.driven_by_person(app, &run.id) {
-            return;
-        }
-        let waiting: Vec<String> = self.approvals.with(|map| map.keys().cloned().collect());
+        let waiting: Vec<String> =
+            self.approvals.with(|map| map.keys().cloned().collect::<Vec<_>>()).into_iter().filter(|id| !self.kept_asks.with(|kept| kept.contains(id))).collect();
         for id in waiting {
             self.decide(app, &id, Decision::AllowOnce);
         }
@@ -2480,7 +2489,7 @@ fn task_prompt(name: &str, role: &str, instruction: &str, project: Option<&str>,
              files and run commands there; relative paths start in that folder. You are not tied to it: other work may come \
              with another folder, and what you did in earlier projects stays in this conversation. {}",
             if full {
-                "The person gave this bot full access: changes and commands go ahead without asking. \
+                "The person gave their bots full access: changes and commands go ahead without asking. \
                  Say what a risky step will do before you take it, prefer reversible steps, and never push, \
                  delete or expose credentials just because nothing asks."
             } else {
@@ -2520,16 +2529,6 @@ fn history_of(messages: &[Message]) -> Vec<ChatMessage> {
 /// The lines of `runs`, oldest first: messages, the tools each reply
 /// called, where each later run begins and why a failed one stopped.
 /// Who began a run, by its first message.
-/// Whether the latest message that set the agent going (not its own
-/// replies or tool results) came from the person.
-fn person_spoke_last(messages: &[Message]) -> bool {
-    messages
-        .iter()
-        .rev()
-        .find(|m| matches!(m.role, MessageRole::User | MessageRole::System | MessageRole::External))
-        .is_some_and(|m| m.role == MessageRole::User)
-}
-
 fn cause_of(role: MessageRole) -> &'static str {
     match role {
         MessageRole::External => "started by GitHub",
@@ -2694,18 +2693,6 @@ mod tests {
             content: content.map(|c| serde_json::to_string(&c).unwrap()),
             created_at: 0,
         }
-    }
-
-    #[test]
-    fn full_access_follows_who_spoke_last() {
-        use MessageRole::*;
-        let run = |roles: &[MessageRole]| roles.iter().map(|r| message(*r, None)).collect::<Vec<_>>();
-        // The Manager started the run; the person's reply puts them in charge.
-        assert!(!person_spoke_last(&run(&[System, Assistant, Tool])));
-        assert!(person_spoke_last(&run(&[System, Assistant, User, Assistant, Tool])));
-        // GitHub speaking after the person hands the run back to asking.
-        assert!(!person_spoke_last(&run(&[User, Assistant, External, Assistant])));
-        assert!(!person_spoke_last(&[]));
     }
 
     #[test]

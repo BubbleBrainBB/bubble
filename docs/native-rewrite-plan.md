@@ -245,6 +245,12 @@ native/
   - 记忆：多了按项目的一份（`memory/projects/`），谁在那个项目干活谁读；`remember` 加 `project`，回合后的回顾把关于项目的和关于人的分开存。
   - 测试：Rust 全工作区 227 个通过，新增 `app/tests/roles.rs`（三个 issue 分给一个开发：第二个因为它忙给了复制出来的 bot 并在独立检出里做，第三个等点头后由同一个开发在另一个仓库的文件夹里做，同一条对话）。TS 2528 个通过，新增 `src/sdk/__tests__/turn-folder.test.ts`。
   - 没做：文件夹的信任确认在桌面端仍是自动同意，没有卡片；worktree 只在上述条件下自动收回，分支不会自动删；Routine 记的是写它时 bot 所在的文件夹；谁欠谁回报仍只在内存里。
+- 2026-11-12：设置改成弹窗，权限改成全局一个（分支 feat/native-rust）。设计稿在 Aegis 画布「Bubble · Settings」。
+  - 设置（`native/app/src/settings.rs`）：不再是一个页面，是盖在窗口上的弹窗，左边五个分区（General、Models、Permissions、Projects、Tools），右边按卡片分组的行。几选一的地方都是下拉（带小箭头的按钮，菜单里选中的一项有底色和对勾）。Skills 和 Pull requests 两个页面从 Tools、Projects 里进。
+  - 权限：一个设置管所有 bot（store 里的 `access`，"full" 或没有），取代原来每个 bot 输入框旁的切换（`task_access:<id>` 不再读）。Full access 下 GitHub 和 Routine 来的活也不再问；仓库级别留给人的那些（评论、推送、开 PR）仍然问；规则里禁止的仍然拒绝。
+  - 规则（`native/app/src/rules.rs`）：「Allow without asking」和「Never allow」两个列表，就是核心自己的 `permissions.allow` / `permissions.deny`，存在 BUBBLE_HOME 下的 settings.json，文件里其余内容和顺序不动（serde_json 开了 `preserve_order`）。界面里写的是命令开头（"git status"），存成 `Bash(git status:*)`；手写的其他工具规则原样显示。核心每回合开头读一次，所以改动从下一回合生效。
+  - 测试：Rust 全工作区 230 个通过，新增 `app/tests/settings.rs`。
+  - 没做：Web search 没有开关（核心没有对应的设置，界面只显示 On）；项目文件夹不能从列表里移除；没有 Grok 那样的「总是询问」列表（核心没有这种规则）。
 
 ## 修订记录
 

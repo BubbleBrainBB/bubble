@@ -41,7 +41,7 @@ fn model_server(seen: &Path) -> String {
             if system.contains("- notes-helper: Keeps notes tidy") && told.contains("mcp__echo__echo") {
                 std::fs::write(&seen, "").ok();
             }
-            if system.contains("gave this bot full access") {
+            if system.contains("gave their bots full access") {
                 std::fs::write(seen.with_extension("full"), "").ok();
             }
             let last = request["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or_default();
@@ -152,11 +152,14 @@ fn tasks_use_mcp_tools_and_settings_show_what_is_there() {
 
     // Settings: the person's servers, connected or not, and their skills.
     app.press("id:nav-settings").unwrap();
+    app.press("id:settings-tools").unwrap();
     app.wait_for_within("text:1 tool", long).unwrap();
+    app.wait_for("text:Connected").unwrap();
     // The one that cannot start says so in the agent's words, and can be tried again.
     app.wait_for_within("label:Retry gone", long).unwrap();
     // Only the test's own folder is certain; the person's may add more.
-    app.wait_for("text:/^\\d+ skills? in .*home/skills/").unwrap();
+    app.wait_for("text:/^\\d+ skills?$/").unwrap();
+    app.press("id:settings-close").unwrap();
 
     // A task loads the tool, asks before calling it, and gets its answer.
     app.press("id:side-Echo").unwrap();
@@ -178,9 +181,13 @@ fn tasks_use_mcp_tools_and_settings_show_what_is_there() {
     app.type_text("id:composer", "Echo again").unwrap();
     app.submit("id:composer").unwrap();
     app.wait_for_within("text:Allow once", long).unwrap();
-    app.press("label:Access").unwrap();
+    // One setting, in Settings, for every bot.
+    app.press("id:nav-settings").unwrap();
+    app.press("id:settings-permissions").unwrap();
+    app.press("label:Approvals").unwrap();
     app.press("label:Full access").unwrap();
     app.wait_for("text:Full access").unwrap();
+    app.press("id:settings-close").unwrap();
     wait_for_count(&mut app, "text:The server said: echo: hi", 2, long);
 
     // With full access the next message goes ahead without asking, and
@@ -191,9 +198,13 @@ fn tasks_use_mcp_tools_and_settings_show_what_is_there() {
     assert!(seen.with_extension("full").exists(), "the agent was told it has full access");
 
     // Back to asking first.
-    app.press("label:Access").unwrap();
+    app.press("id:nav-settings").unwrap();
+    app.press("id:settings-permissions").unwrap();
+    app.press("label:Approvals").unwrap();
     app.press("label:Ask first").unwrap();
     app.wait_for("text:Ask first").unwrap();
+    app.press("id:settings-close").unwrap();
+    assert!(!app.shows("label:Access"), "a bot has no access of its own to set");
 
     std::fs::remove_dir_all(&root).ok();
 }

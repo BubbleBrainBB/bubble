@@ -159,12 +159,15 @@ fn the_sidebar_pages_work() {
     // A project that is a watched repository.
     app.press("id:side-Set up").unwrap();
     app.press("id:nav-settings").unwrap();
+    app.press("id:settings-projects").unwrap();
     app.wait_for_within("acme/demo", long).unwrap();
+    app.press("label:Level for acme/demo").unwrap();
     app.press("label:Prepare for acme/demo").unwrap();
+    app.wait_for("text:Prepare").unwrap();
 
     // Pull requests: a task for #7, then a merge the person confirms.
-    app.press("id:nav-settings").unwrap();
     app.press("id:nav-pull-requests").unwrap();
+    assert!(!app.shows("id:settings-close"), "going to a page closes Settings");
     if let Err(e) = app.wait_for_within("text:#7 Add docs", long) {
         panic!("{e}\nTEXTS: {:?}", app.screen().texts());
     }
@@ -177,6 +180,7 @@ fn the_sidebar_pages_work() {
     app.wait_for("text:Message Set up").unwrap();
     app.wait_for_within("On it.", long).unwrap();
     app.press("id:nav-settings").unwrap();
+    app.press("id:settings-projects").unwrap();
     app.press("id:nav-pull-requests").unwrap();
     app.wait_for_within("Open bot", long).unwrap();
     app.press("Merge").unwrap();
@@ -207,6 +211,7 @@ fn the_sidebar_pages_work() {
 
     // Skills: listed, and found by what they do.
     app.press("id:nav-settings").unwrap();
+    app.press("id:settings-tools").unwrap();
     app.press("id:nav-skills").unwrap();
     app.wait_for("release-notes").unwrap();
     app.type_text("id:skills-search", "merged pull").unwrap();
