@@ -35,12 +35,34 @@ fn native(registry: &mut Registry) {
     registry.register::<App>();
 }
 
+/// Scroll bars are the app's own: a thin thumb at the edge that shows while
+/// something scrolls and goes when it stops, in place of the system's bar,
+/// which is wide wherever the system is set to always show it.
+fn thin_scroll_bars() {
+    use nsh_base::{ScrollbarLook, ScrollbarMode, ScrollbarMotion, ScrollbarTheme, set_scrollbar_theme};
+    use nsh_core::element::{Style, StyleRefinement};
+    let mut look = ScrollbarLook::default();
+    look.style = Style::from(StyleRefinement::default().absolute().top(px(0.0)).bottom(px(0.0)).right(px(5.0)).w(px(4.0)).py(px(10.0)));
+    look.thumb_style = Style::from(StyleRefinement::default().rounded_full().bg(scroll_thumb()));
+    let mut motion = ScrollbarMotion::default();
+    motion.idle = 1200.0;
+    motion.enter = 120.0;
+    motion.exit = 300.0;
+    let mut theme = ScrollbarTheme::default();
+    theme.mode = ScrollbarMode::Scrolling;
+    theme.motion = motion;
+    theme.min_thumb_length = px(32.0);
+    theme.vertical = Some(look);
+    set_scrollbar_theme(Some(theme));
+}
+
 /// The app's root.
 #[component]
 pub fn App() -> impl IntoElement {
     let app = AppState::load();
     provide_context(app);
     set_color_scheme(app.appearance.get_untracked());
+    thin_scroll_bars();
     set_title_bar(nsh_core::desktop::TitleBarStyle::Hidden, Some(px(TOP_BAR)));
     view()
         .flex_1()

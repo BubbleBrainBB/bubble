@@ -82,6 +82,10 @@ pub fn failed() -> AdaptiveColor {
 pub fn working_color() -> AdaptiveColor {
     pair(0x2E9E5B, 0x4CC26E)
 }
+/// The thumb of a scroll bar: thin, and only there while something scrolls.
+pub fn scroll_thumb() -> AdaptiveColor {
+    pair_alpha(0x0000_0033, 0xFFFF_FF40)
+}
 /// What is behind a dialog, dimmed.
 pub fn scrim() -> AdaptiveColor {
     pair_alpha(0x0000_003D, 0x0000_0080)

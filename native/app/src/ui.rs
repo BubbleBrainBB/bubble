@@ -839,6 +839,10 @@ pub fn composer(
     // and the buttons a row of their own under them. It goes back to one
     // line when it is empty again.
     let expanded = signal(false);
+    // It grows with what is written up to this height, and only then
+    // scrolls: until then there is nothing to scroll, so no bar.
+    const TALLEST: f32 = 200.0;
+    let full = signal(false);
     let settle = move || {
         use nsh_core::{LayoutAnimation, LayoutCurve, LayoutTransition};
         animate_layout(LayoutAnimation {
@@ -1116,6 +1120,8 @@ pub fn composer(
                             .flex_1()
                             .min_w(px(0.0))
                             .min_h(px(44.0))
+                            .max_h(px(TALLEST))
+                            .scrollbar(move || full.get())
                             .px(move || px(if tall.get() { 16.0 } else { 8.0 }))
                             .pt(move || px(if tall.get() { 14.0 } else { 12.0 }))
                             .pb(move || px(if tall.get() { 6.0 } else { 12.0 }))
@@ -1126,6 +1132,7 @@ pub fn composer(
                             .on_blur(move || focused.set(false))
                             // One line that no longer fits beside the buttons is more than one.
                             .on_layout(move |frame: &Bounds<Points>| {
+                                full.set(frame.size.height.0 >= TALLEST - 1.0);
                                 if frame.size.height.0 > 50.0 && !expanded.get_untracked() && !draft.with_untracked(|d| d.is_empty()) {
                                     settle();
                                     expanded.set(true);
