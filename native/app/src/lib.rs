@@ -78,7 +78,6 @@ pub fn App() -> impl IntoElement {
                         Route::Task(id) => pages::task(app, id).into_element(),
                         Route::NewBot => pages::new_bot(app).into_element(),
                         Route::PullRequests => prs::page(app).into_element(),
-                        Route::Skills => pages::skills(app).into_element(),
                         Route::Search => pages::search(app).into_element(),
                     })
                 }))),

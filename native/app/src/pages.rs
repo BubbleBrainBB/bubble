@@ -53,7 +53,6 @@ pub fn title_bar(app: AppState, route: Route) -> AnyElement {
             .child(side())
             .into_element(),
         Route::PullRequests => page("Pull requests"),
-        Route::Skills => page("Skills"),
         Route::Search => page("Search"),
         Route::Tasks => page("Bots"),
         Route::NewBot => page("New bot"),
@@ -723,86 +722,6 @@ fn proposals(app: AppState, bot_id: String) -> impl IntoElement {
                 )
         },
     ))
-}
-
-// --- Skills ------------------------------------------------------------------
-
-pub fn skills(app: AppState) -> impl IntoElement {
-    let query = signal(String::new());
-    let shown = move || {
-        let q = query.get().to_lowercase();
-        app.skill_list.with(|list| {
-            list.iter()
-                .filter(|s| q.is_empty() || s.name.to_lowercase().contains(&q) || s.description.to_lowercase().contains(&q))
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-    };
-    scroll().flex_1().child(
-        view()
-            .w_full()
-            .max_w(px(READING_WIDTH + 80.0))
-            .mx(auto())
-            .px(px(20.0))
-            .pt(px(16.0))
-            .pb(px(24.0))
-            .gap(px(8.0))
-            .child(search_field("Search skills", query, "skills-search"))
-            .child(
-                text(move || {
-                    let s = app.skills.get();
-                    format!("{} skills, from {}. Tasks load the one a request needs.", app.skill_list.with(Vec::len), s.folders.join(", "))
-                })
-                .px(px(12.0))
-                .text_size(px(SMALL))
-                .text_color(muted()),
-            )
-            .child(each(shown, |s: &crate::state::SkillRow| s.name.clone(), move |skill, _| {
-                let open = signal(false);
-                view()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .gap(px(4.0))
-                    .border_b(px(LINE))
-                    .border_color(hairline())
-                    .cursor(Cursor::Pointer)
-                    .on_press(move || open.update(|o| *o = !*o))
-                    .label(move || format!("Skill {}", skill.get().name))
-                    .child(
-                        view()
-                            .flex_row()
-                            .gap(px(8.0))
-                            .child(text(move || skill.get().name).text_size(px(BODY)).text_color(ink()))
-                            .child(
-                                text(move || {
-                                    let s = skill.get();
-                                    if s.manual_only { format!("{}, only when asked by name", s.source) } else { s.source.to_owned() }
-                                })
-                                .text_size(px(SMALL))
-                                .text_color(muted()),
-                            ),
-                    )
-                    .child(
-                        text(move || skill.get().description)
-                            .text_size(px(SMALL))
-                            .text_color(secondary())
-                            .number_of_lines(move || if open.get() { 0_u32 } else { 2_u32 }),
-                    )
-                    .child(when(move || open.get(), move || {
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(text(move || skill.get().folder).flex_1().text_size(px(SMALL)).text_color(muted()).number_of_lines(1))
-                            .child(button("Open folder", move || {
-                                let url = format!("file://{}", skill.get_untracked().folder);
-                                spawn(async move {
-                                    let _ = open_url(url).await;
-                                });
-                            }))
-                    }))
-            })),
-    )
 }
 
 /// A one-line search input.

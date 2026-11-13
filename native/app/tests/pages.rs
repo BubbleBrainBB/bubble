@@ -209,17 +209,6 @@ fn the_sidebar_pages_work() {
     app.wait_for_within("text:From its routine; finished", long).unwrap();
     app.press("id:bot-details-toggle").unwrap();
 
-    // Skills: listed, and found by what they do.
-    app.press("id:nav-settings").unwrap();
-    app.press("id:settings-tools").unwrap();
-    app.press("id:nav-skills").unwrap();
-    app.wait_for("release-notes").unwrap();
-    app.type_text("id:skills-search", "merged pull").unwrap();
-    app.wait_for("release-notes").unwrap();
-    app.clear("id:skills-search").unwrap();
-    app.type_text("id:skills-search", "nothing like it").unwrap();
-    app.wait_for_gone("release-notes", long).unwrap();
-
     // Search: a task found by what was said in it.
     app.press("id:nav-search").unwrap();
     app.wait_for("id:search").unwrap();

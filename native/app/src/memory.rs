@@ -43,27 +43,6 @@ pub fn root() -> PathBuf {
     bubble_home().join("native").join("memory")
 }
 
-/// How many notes are kept: the bots' own, each project's and the team's.
-pub fn count() -> usize {
-    fn notes_in(folder: &std::path::Path) -> usize {
-        let Ok(files) = std::fs::read_dir(folder) else { return 0 };
-        files
-            .flatten()
-            .map(|file| {
-                let path = file.path();
-                if path.is_dir() {
-                    notes_in(&path)
-                } else if path.extension().is_some_and(|e| e == "md") {
-                    std::fs::read_to_string(&path).map(|text| text.lines().filter_map(text_of).count()).unwrap_or(0)
-                } else {
-                    0
-                }
-            })
-            .sum()
-    }
-    notes_in(&root())
-}
-
 fn path(scope: &Scope) -> PathBuf {
     match scope {
         Scope::Bot(id) => root().join("bots").join(format!("{id}.md")),

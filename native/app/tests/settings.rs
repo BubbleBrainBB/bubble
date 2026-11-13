@@ -102,13 +102,21 @@ fn settings_is_a_dialog_with_one_access_for_every_bot_and_rules_kept_in_the_agen
         // The other sections.
         app.press("id:settings-projects").unwrap();
         app.wait_for("text:Folders your bots work in").unwrap();
-        app.press("id:settings-tools").unwrap();
-        app.wait_for("text:MCP servers").unwrap();
-        app.wait_for("text:Hooks").unwrap();
-        // What the agent has built in (web search) is not a setting.
-        assert!(!app.shows("text:Web search"));
+        // Memory: what every bot reads, added and taken off here. What
+        // tools the bots have is not something a person is shown.
+        assert!(!app.shows("id:settings-tools"));
+        app.press("id:settings-memory").unwrap();
+        app.wait_for("text:Every bot").unwrap();
+        app.wait_for("text:/^Nothing yet/").unwrap();
+        app.press("id:add-note").unwrap();
+        app.type_text("id:note", "Answer in Chinese").unwrap();
+        app.press("label:Add the note").unwrap();
+        app.wait_for("text:Answer in Chinese").unwrap();
+        assert!(std::fs::read_to_string(home.join("native/memory/team.md")).unwrap().contains("Answer in Chinese"));
+        app.press("label:Remove note: Answer in Chinese").unwrap();
+        app.wait_for("text:/^Nothing yet/").unwrap();
         app.press("id:settings-close").unwrap();
-        assert!(!app.shows("text:MCP servers"));
+        assert!(!app.shows("text:Every bot"));
     }
     // The access chosen is kept.
     let store = Store::open(home.join("native/bubble.db")).unwrap();

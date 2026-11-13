@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use bubble_core::delegate::{self, Children};
-use bubble_core::hooks::Hooks;
 use bubble_core::{
     AgentEvent, ChatMessage, Config, Decision, Level as ThinkingLevel, Permission, bubble_home,
 };
@@ -91,16 +90,6 @@ fn subagents_key(task_id: &str) -> String {
 fn run_cause_key(run_id: &str) -> String {
     format!("run_cause:{run_id}")
 }
-/// An MCP server as Settings shows it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ServerRow {
-    pub name: String,
-    pub scope: &'static str,
-    pub status: String,
-    pub failed: bool,
-    pub connected: bool,
-}
-
 /// A folder the bots work in, as Settings shows it: the GitHub repository
 /// it is of, when it is one, and how far Bubble may go there.
 #[derive(Clone, Debug, PartialEq)]
@@ -120,31 +109,6 @@ pub struct Catalog {
     levels: HashMap<String, Vec<ThinkingLevel>>,
 }
 
-fn server_row(server: &bubble_host::McpServer) -> ServerRow {
-    let (status, failed) = match &server.state {
-        bubble_host::McpState::Connected { tools, .. } => (format!("{tools} tool{}", if *tools == 1 { "" } else { "s" }), false),
-        bubble_host::McpState::Failed(error) => (error.lines().next().unwrap_or_default().to_owned(), true),
-        bubble_host::McpState::Disabled => ("Turned off".to_owned(), false),
-    };
-    let scope = match server.scope.as_str() {
-        "project" => "project",
-        "local" => "local",
-        _ => "user",
-    };
-    let connected = matches!(server.state, bubble_host::McpState::Connected { .. });
-    ServerRow { name: server.name.clone(), scope, status, failed, connected }
-}
-
-/// What Settings says about skills.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct SkillsSummary {
-    pub count: usize,
-    pub folders: Vec<String>,
-    pub problems: usize,
-    /// What was wrong with the first one that could not be used.
-    pub first_problem: Option<String>,
-}
-
 /// Where the window is.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Route {
@@ -155,22 +119,11 @@ pub enum Route {
     /// The form that makes a bot.
     NewBot,
     PullRequests,
-    Skills,
     Search,
 }
 
 pub use crate::transcript::{Line, LineKind, ToolStatus, TurnStatus};
 use crate::transcript;
-
-/// A skill as the Skills page lists it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SkillRow {
-    pub name: String,
-    pub description: String,
-    pub source: &'static str,
-    pub folder: String,
-    pub manual_only: bool,
-}
 
 /// A subscription sign-in as Settings shows it.
 #[derive(Clone, Debug, PartialEq)]
@@ -206,10 +159,6 @@ pub struct AppState {
     pub(crate) hosts: Stored<Arc<Hosts>>,
     /// The models the agent can run, once it has said.
     pub catalog: Signal<Arc<Catalog>>,
-    pub mcp_servers: Signal<Vec<ServerRow>>,
-    pub skills: Signal<SkillsSummary>,
-    /// The person's hooks (settings.json), as Settings shows them.
-    pub hook_rules: Signal<Vec<String>>,
     pub route: Signal<Route>,
     pub tasks: Signal<Vec<TaskSummary>>,
     /// The newest thing said in each bot's conversation.
@@ -242,8 +191,6 @@ pub struct AppState {
     pub settings: Signal<Option<crate::settings::Section>>,
     /// Prompts that start tasks on a schedule.
     pub automations: Signal<Vec<crate::automations::Automation>>,
-    /// The person's skills, for the Skills page.
-    pub skill_list: Signal<Vec<SkillRow>>,
     pub manager_model: Signal<Option<String>>,
     pub task_model: Signal<Option<String>>,
     pub max_runs: Signal<u32>,
@@ -302,9 +249,6 @@ impl AppState {
             accounts: signal(Vec::new()),
             hosts: stored(Arc::new(Hosts::default())),
             catalog: signal(Arc::new(Catalog::default())),
-            mcp_servers: signal(Vec::new()),
-            skills: signal(SkillsSummary::default()),
-            hook_rules: signal(Vec::new()),
             problem: signal((!problems.is_empty()).then(|| problems.join("\n"))),
             // The conversation that was open comes back, as a messenger's does.
             route: signal(match setting(OPEN_BOT) {
@@ -323,7 +267,6 @@ impl AppState {
             linking: signal(false),
             changes_open: signal(false),
             automations: signal(crate::automations::load(setting(crate::automations::KEY).as_deref())),
-            skill_list: signal(Vec::new()),
             appearance: signal(appearance_of(setting(APPEARANCE).as_deref())),
             full_access: signal(setting(ACCESS).as_deref() == Some("full")),
             settings: signal(None),
@@ -355,7 +298,6 @@ impl AppState {
         github::start(state);
         crate::automations::start(state);
         state.refresh_catalog();
-        state.show_hooks();
         state.import_sessions();
         state
     }
@@ -385,28 +327,11 @@ impl AppState {
         });
     }
 
-    /// Finds the person's skills and connects their own MCP servers, so
-    /// Settings shows what works before a task needs it.
-    /// What Settings says about hooks: the agent runs them; the app only
-    /// shows that they are there.
-    fn show_hooks(&self) {
-        let hooks = Hooks::load(&bubble_home(), None);
-        self.hook_rules.set(
-            hooks
-                .rules
-                .iter()
-                .map(|r| format!("{}: {}{}", r.events.join(", "), r.command, r.matcher.as_ref().map(|m| format!(" (matching {m})")).unwrap_or_default()))
-                .collect(),
-        );
-    }
-
-    /// Asks the agent what it offers (models and accounts, skills, MCP
-    /// servers) and shows it. The first call also starts the agent.
+    /// Asks the agent what it offers (models and accounts) and shows it.
+    /// The first call also starts the agent.
     pub fn refresh_catalog(&self) {
         self.show_accounts_from_disk();
         self.load_models(false);
-        self.load_skills();
-        self.refresh_servers();
     }
 
     /// The agent could not be reached; said where the app's problems show.
@@ -539,85 +464,6 @@ impl AppState {
                 Ok(Ok(())) => app.load_models(true),
                 Ok(Err(error)) => app.set_account_status(subscription, format!("{error:#}")),
                 Err(error) => app.set_account_status(subscription, format!("{error}")),
-            }
-        });
-    }
-
-    /// The person's skills, as the agent finds them.
-    fn load_skills(&self) {
-        let app = *self;
-        let hosts = self.hosts.get();
-        spawn(async move {
-            let found = background(async move { hosts.get().await?.skills(None).await }).await;
-            let Ok(Ok(found)) = found else { return };
-            let user_home = dirs_home();
-            let short = |folder: &str| match std::path::Path::new(folder).strip_prefix(&user_home) {
-                Ok(rest) => format!("~/{}", rest.display()),
-                Err(_) => folder.to_owned(),
-            };
-            let mut folders: Vec<String> = Vec::new();
-            for skill in &found.skills {
-                let folder = short(&skill.folder);
-                if !folders.contains(&folder) {
-                    folders.push(folder);
-                }
-            }
-            app.skills.set(SkillsSummary {
-                count: found.skills.iter().filter(|s| s.enabled && !s.manual_only).count(),
-                folders,
-                problems: found.problems.len(),
-                first_problem: found.problems.first().map(|d| match d.split_once("SKILL.md: ") {
-                    Some((path, why)) => format!("{why} in {}", path.trim_end_matches('/').rsplit('/').next().unwrap_or_default()),
-                    None => d.clone(),
-                }),
-            });
-            let mut rows: Vec<SkillRow> = found
-                .skills
-                .into_iter()
-                .filter(|skill| skill.enabled)
-                .map(|skill| SkillRow {
-                    source: match skill.source.as_str() {
-                        "project" => "project",
-                        "configured" => "configured",
-                        _ => "user",
-                    },
-                    name: skill.name,
-                    description: skill.description,
-                    folder: skill.folder,
-                    manual_only: skill.manual_only,
-                })
-                .collect();
-            rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-            app.skill_list.set(rows);
-        });
-    }
-
-    /// Shows the person's MCP servers as the agent has them.
-    pub fn refresh_servers(&self) {
-        let app = *self;
-        let hosts = self.hosts.get();
-        spawn(async move {
-            let found = background(async move { hosts.get().await?.mcp_servers(None).await }).await;
-            if let Ok(Ok(servers)) = found {
-                app.mcp_servers.set(servers.iter().map(server_row).collect());
-            }
-        });
-    }
-
-    /// Tries a failed server again.
-    pub fn retry_server(&self, name: &str) {
-        let app = *self;
-        let hosts = self.hosts.get();
-        let server = name.to_owned();
-        spawn(async move {
-            let _ = background(async move { hosts.get().await?.reconnect_mcp_server(None, &server).await }).await;
-            app.refresh_servers();
-        });
-        self.mcp_servers.update(|rows| {
-            for row in rows.iter_mut().filter(|r| r.name == name) {
-                row.status = "Connecting…".into();
-                row.failed = false;
-                row.connected = false;
             }
         });
     }
@@ -2119,7 +1965,6 @@ impl Conversation {
                 }
                 let joined = job.await;
                 conversation.abort.replace(None);
-                app.refresh_servers();
                 let (stopped, result) = match joined {
                     Ok(Ok(Ending::Stopped)) => (true, Ok(())),
                     Ok(Ok(Ending::Completed)) => (false, Ok(())),
@@ -2735,6 +2580,3 @@ mod tests {
     }
 }
 
-fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
-}

@@ -1,4 +1,4 @@
-//! Skills, MCP servers and web tools, in Settings and in a task: a stand-in
+//! Skills, MCP servers and web tools in a task, and full access: a stand-in
 //! model loads an MCP tool with tool_search, then calls it after the
 //! person's yes.
 
@@ -149,17 +149,6 @@ fn tasks_use_mcp_tools_and_settings_show_what_is_there() {
     let long = Duration::from_secs(10);
 
     app.wait_for("What should we work on?").unwrap();
-
-    // Settings: the person's servers, connected or not, and their skills.
-    app.press("id:nav-settings").unwrap();
-    app.press("id:settings-tools").unwrap();
-    app.wait_for_within("text:1 tool", long).unwrap();
-    app.wait_for("text:Connected").unwrap();
-    // The one that cannot start says so in the agent's words, and can be tried again.
-    app.wait_for_within("label:Retry gone", long).unwrap();
-    // Only the test's own folder is certain; the person's may add more.
-    app.wait_for("text:/^\\d+ skills?$/").unwrap();
-    app.press("id:settings-close").unwrap();
 
     // A task loads the tool, asks before calling it, and gets its answer.
     app.press("id:side-Echo").unwrap();

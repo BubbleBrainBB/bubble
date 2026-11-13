@@ -22,11 +22,11 @@ pub enum Section {
     Models,
     Permissions,
     Projects,
-    Tools,
+    Memory,
 }
 
 impl Section {
-    const ALL: [Section; 5] = [Section::General, Section::Models, Section::Permissions, Section::Projects, Section::Tools];
+    const ALL: [Section; 5] = [Section::General, Section::Models, Section::Permissions, Section::Projects, Section::Memory];
 
     fn name(self) -> &'static str {
         match self {
@@ -34,7 +34,7 @@ impl Section {
             Section::Models => "Models",
             Section::Permissions => "Permissions",
             Section::Projects => "Projects",
-            Section::Tools => "Tools",
+            Section::Memory => "Memory",
         }
     }
 
@@ -44,7 +44,7 @@ impl Section {
             Section::Models => "settings-models",
             Section::Permissions => "settings-permissions",
             Section::Projects => "settings-projects",
-            Section::Tools => "settings-tools",
+            Section::Memory => "settings-memory",
         }
     }
 
@@ -54,7 +54,7 @@ impl Section {
             Section::Models => CHIP_ICON,
             Section::Permissions => SHIELD_ICON,
             Section::Projects => FOLDER_ICON,
-            Section::Tools => TOOL_ICON,
+            Section::Memory => BOOKMARK_ICON,
         }
     }
 }
@@ -87,7 +87,7 @@ const CHIP_ICON: &str = line_icon!(
 );
 const SHIELD_ICON: &str = line_icon!("M12 3a12 12 0 0 0 8.5 3a12 12 0 0 1 -8.5 15a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3");
 const FOLDER_ICON: &str = line_icon!("M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2");
-const TOOL_ICON: &str = line_icon!("M7 10h3v-3l-3.5 -3.5a6 6 0 0 1 8 8l6 6a2 2 0 0 1 -3 3l-6 -6a6 6 0 0 1 -8 -8l3.5 3.5");
+const BOOKMARK_ICON: &str = line_icon!("M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4");
 const CLOSE_ICON: &str = line_icon!("M18 6l-12 12", "M6 6l12 12");
 const ARROW_ICON: &str = line_icon!("M6 9l6 6l6 -6");
 const CHECK_ICON: &str = line_icon!("M5 12l5 5l10 -10");
@@ -164,7 +164,7 @@ pub fn dialog(app: AppState) -> impl IntoElement {
                                     Section::Models => models(app),
                                     Section::Permissions => permissions(app),
                                     Section::Projects => projects(app),
-                                    Section::Tools => tools(app),
+                                    Section::Memory => memory(app),
                                 };
                                 page.child(when(move || app.problem.get().is_some(), move || {
                                     text(move || app.problem.get().unwrap_or_default()).pl(px(4.0)).text_size(px(SMALL)).text_color(failed())
@@ -452,14 +452,6 @@ fn from_home(path: &Path) -> String {
     match std::env::var("HOME") {
         Ok(home) if !home.is_empty() && shown.starts_with(&home) => format!("~{}", &shown[home.len()..]),
         _ => shown,
-    }
-}
-
-fn counted(count: usize, one: &str, many: &str) -> String {
-    match count {
-        0 => "None".to_owned(),
-        1 => format!("1 {one}"),
-        n => format!("{n} {many}"),
     }
 }
 
@@ -834,82 +826,155 @@ fn projects(app: AppState) -> View {
         ))
 }
 
-// --- Tools -----------------------------------------------------------------------
+// --- Memory ----------------------------------------------------------------------
 
-fn tools(app: AppState) -> View {
+/// What the bots keep across conversations: the notes every bot reads,
+/// then each project's and each bot's own, where there are any.
+fn memory(app: AppState) -> View {
+    use crate::memory::{Scope, entries};
+    let problem = signal(None::<String>);
+    // Who else has notes: the projects, then the bots.
+    let others = move || {
+        app.memory_revision.get();
+        let mut others: Vec<(Scope, String, &'static str)> = Vec::new();
+        for folder in app.projects() {
+            let scope = Scope::Project(folder.clone());
+            if !entries(&scope).is_empty() {
+                others.push((scope, project_name(&folder), "Read by whichever bot works in this project"));
+            }
+        }
+        for bot in app.bots() {
+            let scope = Scope::Bot(bot.task.id.clone());
+            if !entries(&scope).is_empty() {
+                others.push((scope, bot.task.title.clone(), "Its own"));
+            }
+        }
+        others
+    };
     page()
-        .child(group(
-            "MCP servers",
-            card()
-                .child(when(move || app.mcp_servers.get().is_empty(), || {
+        .child(card().child(
+            row("Notes", note("What your bots keep across conversations, as plain files"))
+                .child(quiet_button(if cfg!(target_os = "macos") { "Show in Finder" } else { "Show folder" }, || show_folder(&crate::memory::root()))),
+        ))
+        .child(note_list(app, Scope::Team, "Every bot".to_owned(), "Read by all of them", true, problem))
+        .child(each(
+            others,
+            |(scope, name, _): &(Scope, String, &'static str)| format!("{scope:?}:{name}"),
+            move |other, _| {
+                let (scope, name, about) = other.get_untracked();
+                note_list(app, scope, name, about, false, problem)
+            },
+        ))
+        .child(dynamic(move || problem.get().map(|message| text(message).pl(px(4.0)).text_size(px(SMALL)).text_color(failed()))))
+}
+
+/// The notes of one reader: each with a way to take it off, and, for the
+/// notes every bot reads, a way to add one.
+fn note_list(app: AppState, scope: crate::memory::Scope, name: String, about: &'static str, addable: bool, problem: Signal<Option<String>>) -> View {
+    use crate::memory::{entries, forget, remember};
+    let adding = signal(false);
+    let draft = signal(String::new());
+    let scope = stored(scope);
+    let notes = move || {
+        app.memory_revision.get();
+        entries(&scope.get()).into_iter().enumerate().collect::<Vec<_>>()
+    };
+    let changed = move || app.memory_revision.update(|revision| *revision += 1);
+    let add = Rc::new(move || match remember(&scope.get(), &draft.get_untracked()) {
+        Ok(_) => {
+            draft.set(String::new());
+            adding.set(false);
+            problem.set(None);
+            changed();
+        }
+        Err(message) => problem.set(Some(message)),
+    });
+    let cancel = move || {
+        draft.set(String::new());
+        adding.set(false);
+        problem.set(None);
+    };
+    let action = if addable { add_button("Add a note", "add-note", move || adding.set(true)).into_element() } else { view().into_element() };
+    group_with(
+        view().child(text(name).text_size(px(BODY)).text_color(ink())).child(text(about).text_size(px(SMALL)).text_color(muted())),
+        action,
+        card()
+            .child(when(move || adding.get(), {
+                let add = add.clone();
+                move || {
+                    let (on_enter, on_press) = (add.clone(), add.clone());
                     view()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
                         .min_h(px(44.0))
-                        .justify_center()
-                        .px(px(16.0))
-                        .child(text("None yet. Add them under mcpServers in settings.json.").text_size(px(BODY)).text_color(muted()))
-                }))
-                .child(each(
-                    move || app.mcp_servers.get(),
-                    |server: &crate::state::ServerRow| format!("{}:{}", server.scope, server.name),
-                    move |server, _| {
-                        let name = server.with_untracked(|s| s.name.clone());
-                        let about = text(move || {
-                            let server = server.get();
-                            match server.scope {
-                                "user" => server.status,
-                                scope => format!("{}, from the {scope} settings", server.status),
-                            }
-                        })
-                        .text_size(px(SMALL))
-                        .text_color(move || if server.get().failed { failed() } else { muted() });
-                        row(name, Some(about.into_element())).child(dynamic(move || {
-                            let now = server.get();
-                            if now.failed {
-                                let name = now.name.clone();
-                                quiet_button("Retry", move || app.retry_server(&name)).label(format!("Retry {}", now.name)).into_element()
-                            } else if now.connected {
-                                working("Connected").into_element()
-                            } else {
-                                view().into_element()
-                            }
-                        }))
-                    },
-                )),
-        ))
-        .child(group(
-            "Skills",
-            card().child(
-                row(
-                    move || counted(app.skills.get().count, "skill", "skills").replace("None", "No skills"),
-                    note(move || {
-                        let skills = app.skills.get();
-                        match (skills.problems, &skills.first_problem) {
-                            (0, _) => "Listed for the bots, which load one when the work matches".to_owned(),
-                            (n, Some(first)) => format!("{n} could not be used (first: {first})"),
-                            (n, None) => format!("{n} could not be used"),
-                        }
-                    }),
-                )
-                .child(
-                    quiet_button("Show", move || {
-                        app.settings.set(None);
-                        app.route.set(Route::Skills);
-                    })
-                    .test_id("nav-skills"),
-                ),
-            ),
-        ))
-        .child(group(
-            "Hooks and memory",
-            card()
-                .child(row("Hooks", note("Commands run on agent events, from settings.json")).child(value(move || counted(app.hook_rules.get().len(), "hook", "hooks"))))
-                .child(
-                    row("Memory", note("The bots' own notes, each project's, and the team's"))
-                        .child(value(move || {
-                            app.memory_revision.get();
-                            counted(crate::memory::count(), "note", "notes")
-                        }))
-                        .child(quiet_button("Show folder", || show_folder(&crate::memory::root()))),
-                ),
-        ))
+                        .pl(px(12.0))
+                        .pr(px(14.0))
+                        .py(px(8.0))
+                        .child(
+                            nsh_base::input()
+                                .value(draft)
+                                .placeholder("Something every bot should remember".to_owned())
+                                .placeholder_color(move || color(muted()))
+                                .auto_focus(true)
+                                .flex_1()
+                                .h(px(28.0))
+                                .px(px(10.0))
+                                .rounded(px(8.0))
+                                .border(px(LINE))
+                                .border_color(border())
+                                .bg(paper())
+                                .text_size(px(BODY))
+                                .text_color(ink())
+                                .test_id("note")
+                                .on_change(move |v: &str| draft.set(v.to_owned()))
+                                .on_submit(move |_: &str| on_enter()),
+                        )
+                        .child(quiet_button("Add", move || on_press()).label("Add the note"))
+                        .child(quiet_button("Cancel", cancel).label("Cancel adding the note"))
+                }
+            }))
+            .child(when(move || !adding.get() && notes().is_empty(), || {
+                view()
+                    .min_h(px(44.0))
+                    .justify_center()
+                    .px(px(16.0))
+                    .child(text("Nothing yet. Tell a bot to remember something for every bot, or add it here.").text_size(px(BODY)).text_color(muted()))
+            }))
+            .child(each(
+                notes,
+                |(index, note): &(usize, String)| format!("{index}:{note}"),
+                move |entry, _| {
+                    let note = entry.with_untracked(|(_, note)| note.clone());
+                    let removed = note.clone();
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(12.0))
+                        .min_h(px(44.0))
+                        .pl(px(16.0))
+                        .pr(px(14.0))
+                        .py(px(8.0))
+                        .child(text(note.clone()).flex_1().text_size(px(BODY)).text_color(ink()))
+                        .child(
+                            view()
+                                .size(px(28.0))
+                                .flex_shrink_0()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(8.0))
+                                .cursor(Cursor::Pointer)
+                                .hover(|s| s.bg(tertiary()))
+                                .label(format!("Remove note: {note}"))
+                                .on_press(move || {
+                                    if let Err(message) = forget(&scope.get(), &removed) {
+                                        problem.set(Some(message));
+                                    }
+                                    changed();
+                                })
+                                .child(icon(CLOSE_ICON, 14.0).text_color(muted())),
+                        )
+                },
+            )),
+    )
 }
