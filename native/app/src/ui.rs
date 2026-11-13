@@ -834,9 +834,23 @@ pub fn composer(
     let project = move || {
         bot.get().and_then(|id| app.bot_project(&id)).filter(|p| std::path::Path::new(p).is_dir())
     };
+    // The composer is one line, with its buttons on that line, until what
+    // is written takes more than one; then the words get its whole width
+    // and the buttons a row of their own under them. It goes back to one
+    // line when it is empty again.
+    let expanded = signal(false);
+    let settle = move || {
+        use nsh_core::{LayoutAnimation, LayoutCurve, LayoutTransition};
+        animate_layout(LayoutAnimation {
+            create: Some(LayoutTransition::new(LayoutCurve::EaseOut, 160.0)),
+            update: Some(LayoutTransition::new(LayoutCurve::Spring { damping: 0.82 }, 300.0)),
+            delete: None,
+        })
+    };
     let add_image = move |result: Result<Image, String>| match result {
         Ok(image) => {
             problem.set(None);
+            settle();
             images.update(|list| list.push(image));
         }
         Err(message) => problem.set(Some(message)),
@@ -894,6 +908,21 @@ pub fn composer(
             && (draft.with(|d| d.is_empty())
                 || recall.get().is_some_and(|i| sent_before(conversation).get(i) == Some(&draft.get())))
     };
+    let tall = computed(move || {
+        expanded.get() || images.with(|i| !i.is_empty()) || !suggestions().is_empty() || problem.with(Option::is_some)
+    });
+    // Whatever changes the draft (typing, sending, Up and Down, a mention
+    // taken), its shape follows, moving rather than jumping.
+    let lines = stored(0usize);
+    effect(move || {
+        let (empty, breaks) = draft.with(|d| (d.is_empty(), d.matches('\n').count()));
+        let next = if empty { false } else { breaks > 0 || expanded.get_untracked() };
+        if next != expanded.get_untracked() || breaks != lines.get() {
+            settle();
+        }
+        lines.with(|lines| *lines = breaks);
+        expanded.set(next);
+    });
     let send_on_submit = send.clone();
     let send_on_press = send.clone();
     let can_send =
@@ -913,6 +942,53 @@ pub fn composer(
             }
         });
     };
+    let attach_button = move || {
+        view()
+            .size(px(28.0))
+            .flex_shrink_0()
+            .rounded_full()
+            .items_center()
+            .justify_center()
+            .cursor(Cursor::Pointer)
+            .hover(|s| s.bg(tertiary()))
+            .label("Attach images")
+            .on_press(attach)
+            .child(icon(ATTACH_ICON, 16.0).text_color(secondary()))
+    };
+    // Where the bot works, and send (or stop, while it is at work).
+    let actions = Rc::new(move || {
+        let send_on_press = send_on_press.clone();
+        view().flex_row().items_center().flex_shrink_0().gap(px(6.0)).child(bot.get().map(|id| project_picker(app, id, files))).child(dynamic(move || {
+            let send_on_press = send_on_press.clone();
+            if conversation.busy.get() {
+                view()
+                    .size(px(32.0))
+                    .rounded_full()
+                    .items_center()
+                    .justify_center()
+                    .bg(ink())
+                    .cursor(Cursor::Pointer)
+                    .on_press(move || conversation.stop(app))
+                    .label("Stop")
+                    .child(icon(STOP_ICON, 15.0).text_color(paper()))
+                    .into_element()
+            } else {
+                view()
+                    .size(px(32.0))
+                    .rounded_full()
+                    .items_center()
+                    .justify_center()
+                    .bg(ink())
+                    .opacity(move || if can_send() { 1.0_f32 } else { 0.2_f32 })
+                    .cursor(Cursor::Pointer)
+                    .on_press(move || send_on_press())
+                    .label("Send")
+                    .child(icon(SEND_ICON, 15.0).text_color(paper()))
+                    .into_element()
+            }
+        }))
+    });
+    let (actions_beside, actions_under) = (actions.clone(), actions);
     view().px(px(24.0)).pb(px(18.0)).pt(px(6.0)).child(
         view()
             .w_full()
@@ -921,7 +997,9 @@ pub fn composer(
             .bg(pane())
             .border(px(LINE))
             .border_color(border())
-            .rounded(px(22.0))
+            .rounded(move || px(if tall.get() { 18.0 } else { 22.0 }))
+            .transition_all()
+            .duration(200.0)
             .shadow_lg()
             .shadow_color(shadow())
             .child(when(recalling, move || {
@@ -1019,95 +1097,73 @@ pub fn composer(
                 ))
             }))
             .child(
-                nsh_base::input()
-                    .value(draft)
-                    .placeholder({
-                        let placeholder = placeholder.clone();
-                        move || placeholder()
-                    })
-                    .placeholder_color(move || color(muted()))
-                    .multiline(true)
-                    .submit_behavior(SubmitBehavior::Submit)
-                    .auto_focus(true)
-                    .min_h(px(46.0))
-                    .px(px(18.0))
-                    .pt(px(14.0))
-                    .text_size(px(BODY))
-                    .text_color(ink())
-                    .test_id("composer")
-                    .on_focus(move || focused.set(true))
-                    .on_blur(move || focused.set(false))
-                    .on_change(on_change)
-                    .on_paste(move |paste: &PasteEvent| {
-                        for file in paste.files.iter().filter(|f| f.mime.starts_with("image/")) {
-                            add_image(Image::from_bytes(&file.data, &file.mime));
-                        }
-                        for uri in &paste.uris {
-                            let path = std::path::PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri));
-                            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-                            if Image::media_type_of(ext).is_some() {
-                                add_image(Image::read(&path));
-                            }
-                        }
-                    })
-                    .on_submit(move |_: &str| send_on_submit()),
-            )
-            .child(dynamic(move || {
-                problem.get().map(|message| {
-                    text(message).px(px(18.0)).pt(px(4.0)).text_size(px(SMALL)).text_color(failed())
-                })
-            }))
-            .child(
+                // The words, with the buttons beside them while they are one line.
                 view()
                     .flex_row()
                     .items_center()
-                    .gap(px(6.0))
-                    .pl(px(10.0))
-                    .pr(px(10.0))
-                    .pb(px(10.0))
+                    .child(when(move || !tall.get(), move || view().pl(px(8.0)).child(attach_button())))
                     .child(
-                        view()
-                            .size(px(28.0))
-                            .rounded_full()
-                            .items_center()
-                            .justify_center()
-                            .cursor(Cursor::Pointer)
-                            .hover(|s| s.bg(tertiary()))
-                            .label("Attach images")
-                            .on_press(attach)
-                            .child(icon(ATTACH_ICON, 16.0).text_color(secondary())),
+                        nsh_base::input()
+                            .value(draft)
+                            .placeholder({
+                                let placeholder = placeholder.clone();
+                                move || placeholder()
+                            })
+                            .placeholder_color(move || color(muted()))
+                            .multiline(true)
+                            .submit_behavior(SubmitBehavior::Submit)
+                            .auto_focus(true)
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .min_h(px(44.0))
+                            .px(move || px(if tall.get() { 16.0 } else { 8.0 }))
+                            .pt(move || px(if tall.get() { 14.0 } else { 12.0 }))
+                            .pb(move || px(if tall.get() { 6.0 } else { 12.0 }))
+                            .text_size(px(BODY))
+                            .text_color(ink())
+                            .test_id("composer")
+                            .on_focus(move || focused.set(true))
+                            .on_blur(move || focused.set(false))
+                            // One line that no longer fits beside the buttons is more than one.
+                            .on_layout(move |frame: &Bounds<Points>| {
+                                if frame.size.height.0 > 50.0 && !expanded.get_untracked() && !draft.with_untracked(|d| d.is_empty()) {
+                                    settle();
+                                    expanded.set(true);
+                                }
+                            })
+                            .on_change(on_change)
+                            .on_paste(move |paste: &PasteEvent| {
+                                for file in paste.files.iter().filter(|f| f.mime.starts_with("image/")) {
+                                    add_image(Image::from_bytes(&file.data, &file.mime));
+                                }
+                                for uri in &paste.uris {
+                                    let path = std::path::PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri));
+                                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+                                    if Image::media_type_of(ext).is_some() {
+                                        add_image(Image::read(&path));
+                                    }
+                                }
+                            })
+                            .on_submit(move |_: &str| send_on_submit()),
                     )
+                    .child(when(move || !tall.get(), move || view().pr(px(6.0)).child(actions_beside()))),
+            )
+            .child(dynamic(move || {
+                problem.get().map(|message| {
+                    text(message).px(px(16.0)).pt(px(4.0)).text_size(px(SMALL)).text_color(failed())
+                })
+            }))
+            .child(when(move || tall.get(), move || {
+                view()
+                    .flex_row()
+                    .items_center()
+                    .pl(px(8.0))
+                    .pr(px(6.0))
+                    .pb(px(6.0))
+                    .pt(px(2.0))
+                    .child(attach_button())
                     .child(view().flex_1())
-                    .child(bot.get().map(|id| project_picker(app, id, files)))
-                    .child(dynamic(move || {
-                        let send_on_press = send_on_press.clone();
-                        if conversation.busy.get() {
-                            view()
-                                .size(px(32.0))
-                                .rounded_full()
-                                .items_center()
-                                .justify_center()
-                                .bg(ink())
-                                .cursor(Cursor::Pointer)
-                                .on_press(move || conversation.stop(app))
-                                .label("Stop")
-                                .child(icon(STOP_ICON, 15.0).text_color(paper()))
-                                .into_element()
-                        } else {
-                            view()
-                                .size(px(32.0))
-                                .rounded_full()
-                                .items_center()
-                                .justify_center()
-                                .bg(ink())
-                                .opacity(move || if can_send() { 1.0_f32 } else { 0.2_f32 })
-                                .cursor(Cursor::Pointer)
-                                .on_press(move || send_on_press())
-                                .label("Send")
-                                .child(icon(SEND_ICON, 15.0).text_color(paper()))
-                                .into_element()
-                        }
-                    })),
-            ),
+                    .child(actions_under())
+            })),
     )
 }
