@@ -250,7 +250,8 @@ native/
   - 权限：一个设置管所有 bot（store 里的 `access`，"full" 或没有），取代原来每个 bot 输入框旁的切换（`task_access:<id>` 不再读）。Full access 下 GitHub 和 Routine 来的活也不再问；仓库级别留给人的那些（评论、推送、开 PR）仍然问；规则里禁止的仍然拒绝。
   - 规则（`native/app/src/rules.rs`）：「Allow without asking」和「Never allow」两个列表，就是核心自己的 `permissions.allow` / `permissions.deny`，存在 BUBBLE_HOME 下的 settings.json，文件里其余内容和顺序不动（serde_json 开了 `preserve_order`）。界面里写的是命令开头（"git status"），存成 `Bash(git status:*)`；手写的其他工具规则原样显示。核心每回合开头读一次，所以改动从下一回合生效。
   - 测试：Rust 全工作区 230 个通过，新增 `app/tests/settings.rs`。
-  - 没做：Web search 没有开关（核心没有对应的设置，界面只显示 On）；项目文件夹不能从列表里移除；没有 Grok 那样的「总是询问」列表（核心没有这种规则）。
+  - Tools 分区不列内置工具：web search 是 Bubble agent 自带的，不是一项设置（用户定）。
+  - 没做：项目文件夹不能从列表里移除；没有 Grok 那样的「总是询问」列表（核心没有这种规则）。
 
 ## 修订记录
 

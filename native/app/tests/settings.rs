@@ -103,10 +103,12 @@ fn settings_is_a_dialog_with_one_access_for_every_bot_and_rules_kept_in_the_agen
         app.press("id:settings-projects").unwrap();
         app.wait_for("text:Folders your bots work in").unwrap();
         app.press("id:settings-tools").unwrap();
-        app.wait_for("text:Web search").unwrap();
+        app.wait_for("text:MCP servers").unwrap();
         app.wait_for("text:Hooks").unwrap();
-        app.press("id:settings-close").unwrap();
+        // What the agent has built in (web search) is not a setting.
         assert!(!app.shows("text:Web search"));
+        app.press("id:settings-close").unwrap();
+        assert!(!app.shows("text:MCP servers"));
     }
     // The access chosen is kept.
     let store = Store::open(home.join("native/bubble.db")).unwrap();

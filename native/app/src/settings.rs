@@ -839,10 +839,6 @@ fn projects(app: AppState) -> View {
 fn tools(app: AppState) -> View {
     page()
         .child(group(
-            "Built in",
-            card().child(row("Web search", note("Search and page reading through Exa's hosted service")).child(value("On"))),
-        ))
-        .child(group(
             "MCP servers",
             card()
                 .child(when(move || app.mcp_servers.get().is_empty(), || {
