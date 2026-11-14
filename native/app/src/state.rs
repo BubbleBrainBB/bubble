@@ -186,6 +186,8 @@ pub struct AppState {
     /// The main bot is sorting what came in from GitHub: something came
     /// in and it has not said yet what becomes of it.
     pub sorting: Signal<bool>,
+    /// What it is doing as it sorts, in a few words.
+    pub sorting_step: Signal<String>,
     /// The task page's "link an issue or PR" row is open.
     pub linking: Signal<bool>,
     /// The task page's Changes panel is open.
@@ -273,6 +275,7 @@ impl AppState {
             pointer: signal(None),
             seen: signal(setting(BOTS_SEEN).and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default()),
             sorting: signal(false),
+            sorting_step: signal(crate::triage::READING.to_owned()),
             linking: signal(false),
             changes_open: signal(false),
             automations: signal(crate::automations::load(setting(crate::automations::KEY).as_deref())),
@@ -569,7 +572,12 @@ impl AppState {
     /// sorted by the main bot (and there is a model to sort it with).
     pub fn refresh_sorting(&self) {
         let waiting = self.with_store(|s| s.untriaged_events()).is_some_and(|events| !events.is_empty());
-        self.sorting.set(waiting && self.model_for(RunRole::Triage).is_some());
+        let sorting = waiting && self.model_for(RunRole::Triage).is_some();
+        if !sorting {
+            // The next batch begins with reading it.
+            self.sorting_step.set(crate::triage::READING.to_owned());
+        }
+        self.sorting.set(sorting);
     }
 
     pub fn refresh_tasks(&self) {

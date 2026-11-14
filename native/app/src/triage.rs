@@ -47,6 +47,25 @@ Whether new work begins at once is not yours to say: it does when it comes from 
 and waits for the person's yes when it comes from anyone else.\n\
 Decide every item; then answer with one line saying what you did.";
 
+/// What the main bot is doing before it has done anything with a batch.
+pub const READING: &str = "Reading what came in";
+
+/// What a step of sorting is, in a few words, as the person reads it
+/// beside the main bot's face while it sorts.
+fn step_of(call: &ToolCall) -> String {
+    let args: Value = serde_json::from_str(&call.arguments).unwrap_or_default();
+    let bot = args["bot"].as_str().or_else(|| args["name"].as_str()).map(str::trim).filter(|name| !name.is_empty());
+    match (call.name.as_str(), bot) {
+        ("list_bots" | "get_bot", _) => "Looking at who is free".to_owned(),
+        ("create_bot", Some(name)) => format!("Making {name}"),
+        ("create_bot", None) => "Making a bot".to_owned(),
+        ("give_event_to_bot", Some(name)) => format!("Handing it to {name}"),
+        ("give_event_to_bot" | "attach_event", _) => "Handing it to a bot".to_owned(),
+        ("ignore_event", _) => "Setting aside what needs nothing".to_owned(),
+        _ => READING.to_owned(),
+    }
+}
+
 pub fn specs() -> Vec<ToolSpec> {
     let manager = crate::manager::specs();
     let mut specs: Vec<ToolSpec> = manager.into_iter().filter(|s| matches!(s.name.as_str(), "list_bots" | "get_bot")).collect();
@@ -314,6 +333,7 @@ pub fn maybe_run(app: AppState) {
         while let Some(event) = receiver.recv().await {
             match event {
                 TurnEvent::Agent(AgentEvent::HostCall { call, respond }) => {
+                    app.sorting_step.set(step_of(&call));
                     let _ = respond.send(execute(app, &call, &batch));
                 }
                 TurnEvent::Agent(AgentEvent::ApprovalNeeded { respond, .. }) => {
@@ -336,4 +356,21 @@ pub fn maybe_run(app: AppState) {
         app.refresh_tasks();
         app.refresh_sorting();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_step_of_sorting_has_a_few_words() {
+        let call = |name: &str, arguments: &str| ToolCall { id: "c".into(), name: name.into(), arguments: arguments.into() };
+        assert_eq!(step_of(&call("list_bots", "{}")), "Looking at who is free");
+        assert_eq!(step_of(&call("give_event_to_bot", r#"{"bot":"Dev","title":"Fix it"}"#)), "Handing it to Dev");
+        assert_eq!(step_of(&call("give_event_to_bot", "{}")), "Handing it to a bot");
+        assert_eq!(step_of(&call("create_bot", r#"{"name":"Scribe","role":"Writer"}"#)), "Making Scribe");
+        assert_eq!(step_of(&call("ignore_event", r#"{"event_id":"e"}"#)), "Setting aside what needs nothing");
+        // Anything else is still reading.
+        assert_eq!(step_of(&call("something_new", "not json")), READING);
+    }
 }

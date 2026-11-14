@@ -387,7 +387,7 @@ fn block_view(app: AppState, conversation: Conversation, block: ReadSignal<Block
 
 /// Words with a light passing over them, a letter at a time: the sign
 /// that a bot is at work. Still, and dimmer, while it waits.
-fn shimmer(phrase: String, waiting: bool) -> AnyElement {
+pub fn shimmer(phrase: String, waiting: bool) -> AnyElement {
     if waiting {
         return text(phrase).text_size(px(BODY)).text_color(muted()).into_element();
     }
@@ -427,19 +427,6 @@ fn shimmer(phrase: String, waiting: bool) -> AnyElement {
 }
 
 /// Three dots that rise one after another: someone is writing back.
-/// The dots of someone at work on something other than a reply: the same
-/// beat as [`typing_dots`], without a message's bubble around them.
-pub fn working_dots() -> impl IntoElement {
-    let beat = animated_value(0.0);
-    let _ = Animation::timing(&beat, 1.0, Timing::new(1400.0, Easing::Linear)).looped(None).start();
-    view().flex_row().items_center().gap(px(4.0)).h(px(28.0)).children([0.229_f32, 0.114, 0.0].map(|lead| {
-        let at = beat.add(lead).modulo(1.0);
-        let rise = at.interpolate(&[0.0, 0.3, 0.6, 1.0], &[0.0, -2.0, 0.0, 0.0]);
-        let glow = at.interpolate(&[0.0, 0.3, 0.6, 1.0], &[0.35, 1.0, 0.35, 0.35]);
-        view().size(px(6.0)).rounded_full().bg(secondary()).bind_translate_y(&rise).bind_opacity(&glow)
-    }))
-}
-
 fn typing_dots() -> impl IntoElement {
     let beat = animated_value(0.0);
     let _ = Animation::timing(&beat, 1.0, Timing::new(1400.0, Easing::Linear)).looped(None).start();

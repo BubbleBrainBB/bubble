@@ -357,10 +357,12 @@ pub fn home(app: AppState) -> impl IntoElement {
         .child(composer(app, conversation, Rc::new(|| format!("Message {}", crate::manager::MAIN_BOT)), ComposerFor::Manager))
 }
 
-/// The main bot is sorting what came in from GitHub: its face at work and
-/// the dots of someone busy, over the composer, and no words. What it makes
-/// of it is said in the conversation when it is done. While the main bot
-/// is answering the person, the conversation's own row says it is at work.
+/// The main bot is sorting what came in from GitHub: over the composer,
+/// its face at work and a few words on what it is doing now, with a light
+/// passing over them, as a bot's own row shows while it works. What it
+/// makes of it is said in the conversation when it is done. While the main
+/// bot is answering the person, the conversation's own row says it is at
+/// work.
 fn sorting_row(app: AppState) -> impl IntoElement {
     let conversation = app.manager_conversation();
     when(move || app.sorting.get() && !conversation.busy.get(), move || {
@@ -376,9 +378,16 @@ fn sorting_row(app: AppState) -> impl IntoElement {
                 .gap(px(10.0))
                 .test_id("sorting")
                 .accessible(true)
-                .label("Bubble is sorting what came in")
-                .child(crate::avatar::main_doing(app, 28.0, || crate::avatar::Mood::Reading))
-                .child(working_dots()),
+                .label(move || format!("Bubble: {}", app.sorting_step.get()))
+                .child(crate::avatar::main_doing(app, 28.0, move || {
+                    if app.sorting_step.with(|step| step.starts_with("Handing") || step.starts_with("Making")) {
+                        crate::avatar::Mood::Messaging
+                    } else {
+                        crate::avatar::Mood::Reading
+                    }
+                }))
+                // The light starts over when the words change.
+                .child(dynamic(move || shimmer(app.sorting_step.get(), false))),
         )
     })
 }
