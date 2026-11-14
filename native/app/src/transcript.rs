@@ -142,6 +142,45 @@ pub struct Line {
     /// A file change as diff lines (`+`, `-` or ` ` first), for edits.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub diff: String,
+    /// What the bot said this step is, in its own words and the person's
+    /// language, when it said (see [`said_of`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub saying: String,
+}
+
+/// The argument our own tools take for the bot's few words on what it is
+/// doing with a call (see [`with_doing`]).
+pub const DOING: &str = "doing";
+
+/// What the bot said a call is for, in a few words of its own: a
+/// command's description, or the `doing` of one of the app's tools. One
+/// line, short enough to sit beside a face; empty when it said nothing.
+pub fn said_of(call: &bubble_core::ToolCall) -> String {
+    const LONGEST: usize = 60;
+    let args = call.arguments_json();
+    let said = match call.name.as_str() {
+        "bash" => args["description"].as_str().or_else(|| args[DOING].as_str()),
+        _ => args[DOING].as_str(),
+    };
+    let line = said.unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = line.trim_end_matches(['.', '\u{3002}']).to_owned();
+    if line.chars().count() > LONGEST { format!("{}\u{2026}", line.chars().take(LONGEST - 1).collect::<String>()) } else { line }
+}
+
+/// The app's own tools, each taking a few words from the bot on what it
+/// is doing with the call: what shows beside its face while it works.
+pub fn with_doing(mut specs: Vec<bubble_core::ToolSpec>) -> Vec<bubble_core::ToolSpec> {
+    for spec in &mut specs {
+        if let Some(properties) = spec.parameters.get_mut("properties").and_then(|p| p.as_object_mut()) {
+            properties.entry(DOING).or_insert_with(|| {
+                serde_json::json!({
+                    "type": "string",
+                    "description": "Three to six words on what you are doing with this call, shown to the person beside your face while you work. Write them in the language the person writes in."
+                })
+            });
+        }
+    }
+    specs
 }
 
 /// How much of a running command's output a line keeps.
@@ -177,6 +216,7 @@ impl Line {
             child_ids: Vec::new(),
             live: String::new(),
             diff: String::new(),
+            saying: String::new(),
         }
     }
 
@@ -299,6 +339,7 @@ pub fn assistant(lines: &mut Vec<Line>, turn: &str, id: &str, message: &ChatMess
         lines.push(Line {
             call_id: Some(call.id.clone()),
             diff: change_of(call),
+            saying: said_of(call),
             ..Line::new(
                 format!("{id}:tool-{index}"),
                 LineKind::Tool {
@@ -618,6 +659,28 @@ mod tests {
         let ids: Vec<&str> = lines.iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["u", "turn-u", "reply", "told", "u2"]);
         assert_eq!(lines[2].text, "as the turn kept it");
+    }
+
+    #[test]
+    fn a_step_is_named_in_the_bots_own_words_when_it_gave_any() {
+        let call = |name: &str, arguments: &str| bubble_core::ToolCall { id: "c".into(), name: name.into(), arguments: arguments.into() };
+        // A command comes with its description.
+        assert_eq!(said_of(&call("bash", r#"{"command":"git log -5","description":"查看最近的提交记录。"}"#)), "查看最近的提交记录");
+        // The app's tools take a few words of their own.
+        assert_eq!(said_of(&call("message_bot", r#"{"bot":"Dev","doing":"Asking Dev\n about the tests."}"#)), "Asking Dev about the tests");
+        // A tool that does not take them says nothing; nor does one that left them out.
+        assert_eq!(said_of(&call("read", r#"{"path":"a.rs","description":"not a status"}"#)), "");
+        assert_eq!(said_of(&call("bash", r#"{"command":"ls"}"#)), "");
+        // Too long to sit beside a face: cut.
+        let long = said_of(&call("bash", &format!(r#"{{"command":"x","description":"{}"}}"#, "word ".repeat(40))));
+        assert!(long.chars().count() == 60 && long.ends_with('…'), "{long}");
+        // Each of the app's tools is given the argument, once.
+        let specs = with_doing(vec![bubble_core::ToolSpec {
+            name: "list_bots".into(),
+            description: String::new(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }]);
+        assert!(specs[0].parameters["properties"][DOING]["description"].as_str().unwrap().contains("language the person writes in"));
     }
 
     #[test]

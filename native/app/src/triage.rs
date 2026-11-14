@@ -53,6 +53,11 @@ pub const READING: &str = "Reading what came in";
 /// What a step of sorting is, in a few words, as the person reads it
 /// beside the main bot's face while it sorts.
 fn step_of(call: &ToolCall) -> String {
+    // In its own words when it said, else in ours.
+    let said = crate::transcript::said_of(call);
+    if !said.is_empty() {
+        return said;
+    }
     let args: Value = serde_json::from_str(&call.arguments).unwrap_or_default();
     let bot = args["bot"].as_str().or_else(|| args["name"].as_str()).map(str::trim).filter(|name| !name.is_empty());
     match (call.name.as_str(), bot) {
@@ -301,7 +306,21 @@ pub fn maybe_run(app: AppState) {
     let Some(reference) = app.model_for(RunRole::Triage) else { return };
     RUNNING.with(|r| r.set(true));
     let listing: Vec<String> = batch.iter().map(describe).collect();
-    let message = format!("Notifications to decide (id | reason in repository #number | title):\n{}", listing.join("\n"));
+    // The person reads what it says it is doing, so it says it in their
+    // language: that of what they last wrote to the main bot.
+    let last_said = app
+        .with_store(|s| {
+            let run = s.manager_run(None)?;
+            Ok(s.messages(&run.id)?.into_iter().rev().find(|m| m.role == bubble_store::MessageRole::User).map(|m| m.text))
+        })
+        .flatten()
+        .map(|text| text.chars().take(120).collect::<String>())
+        .filter(|text| !text.trim().is_empty());
+    let language = match last_said {
+        Some(said) => format!("\n\nWrite each call's `doing` in the language of what the person last wrote to you: \"{said}\""),
+        None => String::new(),
+    };
+    let message = format!("Notifications to decide (id | reason in repository #number | title):\n{}{language}", listing.join("\n"));
     // A session of its own that nothing lists, gone when the turn is done.
     let session = format!("desk-triage-{}", bubble_store::now_ms());
     let turn = HostTurn {
@@ -317,7 +336,7 @@ pub fn maybe_run(app: AppState) {
         system_prompt: Some(PROMPT.to_owned()),
         // Only the triage tools: it decides, it does not work.
         allowed_tools: Some(Vec::new()),
-        host_tools: specs(),
+        host_tools: crate::transcript::with_doing(specs()),
         recap: None,
     };
     let batch = Arc::new(batch);
@@ -372,5 +391,7 @@ mod tests {
         assert_eq!(step_of(&call("ignore_event", r#"{"event_id":"e"}"#)), "Setting aside what needs nothing");
         // Anything else is still reading.
         assert_eq!(step_of(&call("something_new", "not json")), READING);
+        // What the bot says it is doing comes before our words for it.
+        assert_eq!(step_of(&call("give_event_to_bot", r#"{"bot":"Dev","doing":"把崩溃问题交给 Dev。"}"#)), "把崩溃问题交给 Dev");
     }
 }

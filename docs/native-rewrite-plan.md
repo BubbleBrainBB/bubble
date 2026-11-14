@@ -265,6 +265,7 @@ native/
   - 代价（1c 自带的）：不能一次全部同意；事情多时会把对话顶上去。
   - 什么时候要人点头才开工（用户定，同一天）：仓库级别是 Prepare 或 Act 时，GitHub 来的活直接开工，不再逐个问；只有陌生人提的才问。"认识的"由程序判断，不由模型判断：本人开的、仓库的 owner / member / collaborator 开的（`author_association`）、指派给本人或请本人 review 的、本人发起的话题上的动静。提及、普通评论等算陌生人的。事件的 payload 里记 `known`，分派工具不再有 `start` 参数。Prepare 和 Act 的区别只剩"发布（评论、推送、开 PR）要不要问"，和设置里写的说明一致了。原因：公开仓库谁都能开 issue，不能让陌生人写的话直接驱动 bot（尤其全局 Full access 时）。
   - 输入框上方那行"While you were away, GitHub brought…"也去掉了（用户：像 AI slop，不需要说明文字）。主 bot 在分派 GitHub 来的事时，输入框上方是它的头像和一小句带流光的话，说它此刻在做什么（Reading what came in / Looking at who is free / Handing it to Dev…，由分派时调用的工具决定，`triage::step_of`）（`pages.rs` 的 `sorting_row`，`AppState::sorting`），侧栏的主 bot 头像同时是干活的样子；分派完就消失，结果在对话里说。只被记录、没有派给 bot 的事（Observe 级别、依赖更新的 PR）不再在界面上出现。
+  - 头像旁那句话优先用模型自己写的（用户："我们不能用模型写吗"），不另外调用模型：核心的 bash 工具本来就要求模型给每条命令写一句说明（`description`，按用户的语言），直接拿来用；应用自己的工具（bot 间协作、记忆、Routine、GitHub、分派）统一多一个可选参数 `doing`（`transcript::with_doing` / `said_of`）。模型没写时退回固定短语。核心里读文件、改文件、搜索这些工具没有这个参数，仍是固定短语；要它们也由模型写，得改 TS 核心的工具定义。
   - 没做：系统通知。NSH 0.4 没有通知接口；macOS 的通知中心要求应用有包标识，现在直接跑的开发版没有，所以要等打包那一步一起做。
 
 ## 修订记录

@@ -202,7 +202,9 @@ pub fn activity(lines: &[Line], turn: &str, status: TurnStatus) -> Activity {
     let step = mine.iter().rev().find(|l| matches!(l.kind, LineKind::Tool { status: ToolStatus::Running, .. }));
     if let Some(step) = step {
         let LineKind::Tool { name, .. } = &step.kind else { unreachable!("a tool line") };
-        return Activity { phrase: doing(name, &step.text, &step.id), mood: look(name) };
+        // In its own words when it said, else in ours.
+        let phrase = if step.saying.is_empty() { doing(name, &step.text, &step.id) } else { step.saying.clone() };
+        return Activity { phrase, mood: look(name) };
     }
     // It has used no tool yet: it read the message and is writing back, as
     // far as anyone can tell. Once it has, the pauses between its steps
@@ -252,6 +254,16 @@ mod tests {
     }
     fn ids(blocks: &[Block]) -> Vec<&str> {
         blocks.iter().map(Block::id).collect()
+    }
+
+    #[test]
+    fn a_running_step_shows_in_the_bots_own_words_when_it_gave_any() {
+        let step = Line { saying: "查看最近的提交记录".into(), ..tool("t", "bash", "Ran git log -5", ToolStatus::Running) };
+        let lines = vec![Line::new("u", LineKind::Message(MessageRole::User), "do it"), header(TurnStatus::Working), step];
+        assert_eq!(activity(&lines, "", TurnStatus::Working).phrase, "查看最近的提交记录");
+        // Without them, ours.
+        let lines = vec![Line::new("u", LineKind::Message(MessageRole::User), "do it"), header(TurnStatus::Working), tool("t", "bash", "Ran x", ToolStatus::Running)];
+        assert_eq!(activity(&lines, "", TurnStatus::Working).phrase, "Running commands");
     }
 
     #[test]

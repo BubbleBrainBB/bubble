@@ -2008,7 +2008,7 @@ impl Conversation {
             agent_name,
             append_system_prompt,
             system_prompt,
-            host_tools,
+            host_tools: transcript::with_doing(host_tools),
             recap,
         };
         let hosts = app.hosts.get();
