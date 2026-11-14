@@ -334,6 +334,6 @@ pub fn maybe_run(app: AppState) {
         }
         RUNNING.with(|r| r.set(false));
         app.refresh_tasks();
-        app.refresh_away();
+        app.refresh_sorting();
     });
 }

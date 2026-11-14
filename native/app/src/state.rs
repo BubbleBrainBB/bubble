@@ -183,9 +183,9 @@ pub struct AppState {
     pub pointer: Signal<Option<(f32, f32)>>,
     /// When the person last looked at each bot's conversation.
     seen: Signal<HashMap<String, i64>>,
-    /// GitHub events since the person last wrote to the Manager (Home's
-    /// "while you were away").
-    pub away: Signal<Vec<bubble_store::Event>>,
+    /// The main bot is sorting what came in from GitHub: something came
+    /// in and it has not said yet what becomes of it.
+    pub sorting: Signal<bool>,
     /// The task page's "link an issue or PR" row is open.
     pub linking: Signal<bool>,
     /// The task page's Changes panel is open.
@@ -272,7 +272,7 @@ impl AppState {
             details_open: signal(false),
             pointer: signal(None),
             seen: signal(setting(BOTS_SEEN).and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default()),
-            away: signal(Vec::new()),
+            sorting: signal(false),
             linking: signal(false),
             changes_open: signal(false),
             automations: signal(crate::automations::load(setting(crate::automations::KEY).as_deref())),
@@ -292,7 +292,7 @@ impl AppState {
         };
         state.refresh_tasks();
         state.refresh_tickets();
-        state.refresh_away();
+        state.refresh_sorting();
         // Which conversation is open is kept for the next start.
         effect(move || {
             let open = match state.route.get() {
@@ -565,16 +565,11 @@ impl AppState {
         })
     }
 
-    /// GitHub's events since the person last wrote to the Manager (the
-    /// last day, before they ever have).
-    pub fn refresh_away(&self) {
-        let events = self.with_store(|s| {
-            let run = s.manager_run(None)?;
-            let last = s.messages(&run.id)?.iter().filter(|m| m.role == MessageRole::User).map(|m| m.created_at).max();
-            let since = last.unwrap_or_else(|| bubble_store::now_ms() - 24 * 3600 * 1000);
-            Ok(s.events_since(since)?.into_iter().filter(|e| e.source == "github").collect::<Vec<_>>())
-        });
-        self.away.set(events.unwrap_or_default());
+    /// Whether something that came in from GitHub still waits to be
+    /// sorted by the main bot (and there is a model to sort it with).
+    pub fn refresh_sorting(&self) {
+        let waiting = self.with_store(|s| s.untriaged_events()).is_some_and(|events| !events.is_empty());
+        self.sorting.set(waiting && self.model_for(RunRole::Triage).is_some());
     }
 
     pub fn refresh_tasks(&self) {
@@ -1838,10 +1833,6 @@ impl Conversation {
         self.lines.update(|lines| transcript::begin_turn(lines, &turn, saved.created_at, if start_now { TurnStatus::Working } else { TurnStatus::Queued }));
         self.checkpoint(app, true);
         self.changed();
-        if task_id.is_none() {
-            // The person is back: what happened is no longer "while away".
-            app.refresh_away();
-        }
         let pending = format!("pending-{}", saved.id);
         if start_now {
             self.start_turn(app);

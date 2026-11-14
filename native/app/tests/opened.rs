@@ -158,18 +158,22 @@ fn a_newly_opened_issue_is_weighed_and_proposed_to_the_repositorys_bot() {
     app.wait_for("text:Prepare").unwrap();
     app.press("id:settings-close").unwrap();
 
-    // The issue is weighed and proposed to the repository's bot; the
-    // updater's pull request is written down, and Home says both.
+    // The issue is a stranger's, so the main bot asks about it in its
+    // conversation. The updater's pull request is only written down:
+    // nothing is said of it, and no line of description sits over the
+    // composer.
     app.press("id:nav-home").unwrap();
-    if let Err(e) = app.wait_for_within("text:/While you were away, GitHub brought 2 things: 1 work for a bot, 1 recorded/", long) {
+    if let Err(e) = app.wait_for_within(
+        "text:/^acme\\/demo#12 came in from @\\S+, who does not work on the repository: Fix the crash on start\\. Give it to Set up\\?$/",
+        long,
+    ) {
         panic!("{e}\nTEXTS: {:?}", app.screen().texts());
     }
-    app.press("label:While you were away").unwrap();
-    app.wait_for("text:/acme\\/demo #13 opened: Bump serde \\(recorded\\)/").unwrap();
-    app.wait_for("text:/acme\\/demo #12 opened: Crash on start \\(work for a bot\\)/").unwrap();
-    app.press("text:/acme\\/demo #12 opened/").unwrap();
-    // It opens the bot that looks after the repository, with the work
-    // waiting for a yes there.
+    // Sorting shows as the main bot at work, and ends.
+    app.wait_for_gone("id:sorting", long).unwrap();
+    assert!(!app.shows("text:/Bump serde/") && !app.shows("text:/While you were away/"));
+    // The bot it waits at says so too, and the yes can be given there.
+    app.press("id:side-Set up").unwrap();
     app.wait_for("text:Message Set up").unwrap();
     app.wait_for("Fix the crash on start").unwrap();
     app.wait_for("Give it to the bot").unwrap();

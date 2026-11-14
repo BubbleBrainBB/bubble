@@ -90,7 +90,7 @@ fn needs_person(app: AppState, bot: &TaskSummary) -> bool {
 pub fn sidebar(app: AppState) -> impl IntoElement {
     let home_current = computed(move || app.route.get() == Route::Home);
     // The main bot marks what waits on the person anywhere: a question, or a failure.
-    let main_busy = move || app.manager_conversation().busy.get();
+    let main_busy = move || app.manager_conversation().busy.get() || app.sorting.get();
     let main_waits = move || app.manager_conversation().waits_on_person();
     view()
         .w(px(SIDEBAR_WIDTH))

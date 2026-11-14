@@ -153,17 +153,19 @@ fn a_mention_is_triaged_into_a_task_and_shown_on_home() {
     app.wait_for("text:Prepare").unwrap();
     app.press("id:settings-close").unwrap();
 
-    // The mention is triaged into work proposed to the repository's bot,
-    // and Home says so.
+    // A mention can be anyone's, so the main bot asks about the work it
+    // made of it, in its conversation.
     app.press("id:nav-home").unwrap();
-    if let Err(e) = app.wait_for_within("text:/While you were away, GitHub brought 1 thing: 1 work for a bot/", long) {
+    if let Err(e) = app.wait_for_within(
+        "text:acme/demo#9 came in from someone who may not work on the repository: Fix the docs typo. Give it to Set up?",
+        long,
+    ) {
         panic!("{e}\nTEXTS: {:?}", app.screen().texts());
     }
-    app.press("label:While you were away").unwrap();
-    app.wait_for("text:/acme\\/demo #9 mention: Docs typo in setup guide \\(work for a bot\\)/").unwrap();
-    app.press("text:/acme\\/demo #9 mention/").unwrap();
-    // It opens the bot that already looks after the repository, with the
-    // work waiting for a yes there.
+    app.wait_for_gone("id:sorting", long).unwrap();
+    assert!(!app.shows("text:/While you were away/"));
+    // The bot it waits at says so too, and the yes can be given there.
+    app.press("id:side-Set up").unwrap();
     app.wait_for("text:Message Set up").unwrap();
     app.wait_for("Fix the docs typo").unwrap();
     app.wait_for("Give it to the bot").unwrap();

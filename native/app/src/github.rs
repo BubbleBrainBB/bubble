@@ -185,7 +185,7 @@ async fn tick(app: AppState, gh: &Gh, me: Option<&str>, looked: &mut Looked) {
     follow_links(app, gh, &watched, pace).await;
     deliver_pending(app);
     crate::triage::maybe_run(app);
-    app.refresh_away();
+    app.refresh_sorting();
 }
 
 fn level_of(repos: &[&Repo], repo: &str) -> Option<Level> {

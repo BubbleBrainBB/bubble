@@ -353,88 +353,34 @@ pub fn home(app: AppState) -> impl IntoElement {
             "What should we work on?",
             "Tell Bubble what needs doing; it hands the work to your bots.",
         ))
-        .child(away_row(app))
+        .child(sorting_row(app))
         .child(composer(app, conversation, Rc::new(|| format!("Message {}", crate::manager::MAIN_BOT)), ComposerFor::Manager))
 }
 
-/// What a GitHub event became, in a few words.
-fn outcome(disposition: &str) -> &'static str {
-    match disposition {
-        "attached" => "went to its bot",
-        "pending" => "on its way to a bot",
-        "created" => "work for a bot",
-        "untriaged" => "being sorted",
-        "ignored" => "needed nothing",
-        _ => "recorded",
-    }
-}
-
-/// "While you were away": what GitHub brought since the person last wrote
-/// to the Manager, and what became of it; it opens to the list.
-fn away_row(app: AppState) -> impl IntoElement {
-    let open = signal(false);
-    let summary = move || {
-        let events = app.away.get();
-        let count = |d: &[&str]| events.iter().filter(|e| d.contains(&e.disposition.as_str())).count();
-        let parts: Vec<String> = [
-            (count(&["attached", "pending"]), "went to bots"),
-            (count(&["created"]), "work for a bot"),
-            (count(&["untriaged"]), "being sorted"),
-            (count(&["ignored"]), "needed nothing"),
-            (count(&["noted"]), "recorded"),
-        ]
-        .into_iter()
-        .filter(|(n, _)| *n > 0)
-        .map(|(n, what)| format!("{n} {what}"))
-        .collect();
-        let things = if events.len() == 1 { "1 thing".to_owned() } else { format!("{} things", events.len()) };
-        format!("While you were away, GitHub brought {things}: {}", parts.join(", "))
-    };
-    when(move || !app.away.with(Vec::is_empty), move || {
-        view()
-            .w_full()
-            .max_w(px(READING_WIDTH - 48.0))
-            .mx(auto())
-            .px(px(24.0))
-            .pt(px(8.0))
-            .gap(px(6.0))
-            .child(
-                text(summary)
-                    .text_size(px(SMALL))
-                    .text_color(secondary())
-                    .cursor(Cursor::Pointer)
-                    .on_press(move || open.update(|o| *o = !*o))
-                    .label("While you were away"),
-            )
-            .child(when(move || open.get(), move || {
-                view().gap(px(4.0)).child(each(
-                    move || app.away.get(),
-                    |event: &bubble_store::Event| event.id.clone(),
-                    move |event, _| away_item(app, event),
-                ))
-            }))
+/// The main bot is sorting what came in from GitHub: its face at work and
+/// the dots of someone busy, over the composer, and no words. What it makes
+/// of it is said in the conversation when it is done. While the main bot
+/// is answering the person, the conversation's own row says it is at work.
+fn sorting_row(app: AppState) -> impl IntoElement {
+    let conversation = app.manager_conversation();
+    when(move || app.sorting.get() && !conversation.busy.get(), move || {
+        // In line with the composer under it.
+        view().px(px(24.0)).pt(px(8.0)).child(
+            view()
+                .w_full()
+                .max_w(px(READING_WIDTH - 48.0))
+                .mx(auto())
+                .pl(px(4.0))
+                .flex_row()
+                .items_center()
+                .gap(px(10.0))
+                .test_id("sorting")
+                .accessible(true)
+                .label("Bubble is sorting what came in")
+                .child(crate::avatar::main_doing(app, 28.0, || crate::avatar::Mood::Reading))
+                .child(working_dots()),
+        )
     })
-}
-
-fn away_item(app: AppState, event: ReadSignal<bubble_store::Event>) -> impl IntoElement {
-    let line = move || {
-        let e = event.get();
-        let title = serde_json::from_str::<serde_json::Value>(&e.payload)
-            .ok()
-            .and_then(|p| p["title"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| e.payload.lines().next().unwrap_or_default().chars().take(80).collect());
-        format!("{} #{} {}: {} ({})", e.repo.unwrap_or_default(), e.number.unwrap_or_default(), e.kind.replace('_', " "), title, outcome(&e.disposition))
-    };
-    text(line)
-        .text_size(px(SMALL))
-        .text_color(muted())
-        .number_of_lines(1u32)
-        .cursor(Cursor::Pointer)
-        .on_press(move || {
-            if let Some(task) = event.get_untracked().task_id {
-                app.route.set(Route::Task(task));
-            }
-        })
 }
 
 // --- Task lists ----------------------------------------------------------------
