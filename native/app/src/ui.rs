@@ -334,10 +334,31 @@ pub fn conversation_view(
                 move |block, _| block_view(app, conversation, block),
             )),
     )).child(when(move || !following.get(), move || {
-        button("Jump to latest", move || {
-            following.set(true);
-            list.scroll_to_end(true);
-        }).self_center().mb(px(8.0))
+        // Over the end of the conversation, in the middle: a small round
+        // button with an arrow down, which takes no room of its own.
+        view()
+            .absolute()
+            .bottom(px(8.0))
+            .left(percentage(0.5))
+            .ml(px(-14.0))
+            .size(px(28.0))
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(paper())
+            .border(px(LINE))
+            .border_color(border())
+            .shadow_md()
+            .shadow_color(shadow())
+            .cursor(Cursor::Pointer)
+            .hover(|s| s.bg(tertiary()))
+            .label("Jump to latest")
+            .test_id("jump-to-latest")
+            .on_press(move || {
+                following.set(true);
+                list.scroll_to_end(true);
+            })
+            .child(icon(DOWN_ICON, 14.0).text_color(secondary()))
     }))
 }
 
@@ -728,6 +749,7 @@ fn approval_card(app: AppState, conversation: Conversation, line: ReadSignal<Lin
         .into_element()
 }
 
+const DOWN_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M8 3v10M3.5 8.5L8 13l4.5-4.5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const STOP_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect x="4.5" y="4.5" width="7" height="7" rx="1.5" fill="currentColor"/></svg>"##;
 const SEND_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5" stroke="currentColor" stroke-width="1.75" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 
