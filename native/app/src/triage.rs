@@ -43,8 +43,8 @@ and do not ask for a pull request unless the item does. Set priority to first fo
 name, to later for what can wait, and leave it out otherwise. You need not check whether the bot is busy: work for a busy bot goes to a \
 free bot of its role, or to a copy of it.\n\
 - When no bot's role fits the work, make one first with create_bot (a name, a role, instructions), then give it the work.\n\
-New work waits for the person's yes unless start is true and the repository allows that; set start only when the work is clear and safe \
-to begin without them.\n\
+Whether new work begins at once is not yours to say: it does when it comes from the person or someone who works on the repository, \
+and waits for the person's yes when it comes from anyone else.\n\
 Decide every item; then answer with one line saying what you did.";
 
 pub fn specs() -> Vec<ToolSpec> {
@@ -75,7 +75,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "give_event_to_bot".into(),
-            description: "Make an item into work for a bot, done in the item's project folder. It waits for the person's yes unless start is true and the repository allows that.".into(),
+            description: "Make an item into work for a bot, done in the item's project folder. It begins at once when it comes from the person or someone who works on the repository; from anyone else it waits for the person's yes.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -83,8 +83,7 @@ pub fn specs() -> Vec<ToolSpec> {
                     "bot": { "type": "string", "description": "The id or name of the bot whose role fits" },
                     "title": { "type": "string" },
                     "brief": { "type": "string" },
-                    "priority": { "type": "string", "enum": ["first", "normal", "later"] },
-                    "start": { "type": "boolean" }
+                    "priority": { "type": "string", "enum": ["first", "normal", "later"] }
                 },
                 "required": ["event_id", "bot", "title", "brief"]
             }),
@@ -192,7 +191,17 @@ fn execute(app: AppState, call: &ToolCall, batch: &[Event]) -> ToolOutput {
                 app.with_store(|s| s.set_event_disposition(&id, "attached", Some(&holder)));
                 return ok(format!("Bot {holder} already has {repo}#{number}; nothing was added."));
             }
-            let start = args["start"] == true && home.level == Some(Level::Act);
+            // Where bots may work, work begins without asking (what they
+            // publish is another matter, and has its own asking). Except
+            // what a stranger wrote: that waits for the person.
+            let known = p["known"] == true;
+            let start = matches!(home.level, Some(Level::Prepare | Level::Act)) && known;
+            let author = p["author"].as_str().filter(|a| !a.is_empty()).map(|a| format!("@{a}"));
+            let why = match (known, &author) {
+                (true, _) => None,
+                (false, Some(author)) => Some(format!("from {author}, who does not work on the repository")),
+                (false, None) => Some("from someone who may not work on the repository".to_owned()),
+            };
             let priority = match args["priority"].as_str().or_else(|| p["priority"].as_str()) {
                 Some("first") => crate::manager::FIRST,
                 Some("later") => crate::manager::LATER,
@@ -209,6 +218,7 @@ fn execute(app: AppState, call: &ToolCall, batch: &[Event]) -> ToolOutput {
                 // The work is in the repository's folder.
                 project: Some(home.project.as_str()),
                 priority,
+                why_asked: why.as_deref(),
             };
             // Whichever bot of that role is free takes it.
             let Some(ticket) = crate::manager::bring(app, &bot, work, standing, true) else {

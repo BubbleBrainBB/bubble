@@ -177,24 +177,18 @@ fn an_assigned_issue_becomes_a_task_that_answers_comments() {
     app.wait_for("text:Prepare").unwrap();
     app.press("id:settings-close").unwrap();
 
-    // The main bot hands the assignment to the bot whose role fits, as
-    // work proposed to it and linked to the issue. No bot is made for it,
-    // and nothing starts until the person says so.
+    // The main bot hands the assignment to the bot whose role fits, linked
+    // to the issue. No bot is made for it. The person was asked for it by
+    // name, which only those who work on the repository can do, so the bot
+    // begins without asking; what it publishes is asked about further on.
     app.press("id:side-Set up").unwrap();
-    app.wait_for_within("#7 Login breaks", long).unwrap();
-    // The bot list says first what needs the person, and why.
-    app.wait_for("text:Needs you").unwrap();
-    app.wait_for("text:Wants a yes: #7 Login breaks").unwrap();
-    app.wait_for("text:/^From GitHub, acme\\/demo#7\\. Nobody asked the bot for this yet\\.$/").unwrap();
-    app.wait_for("Issue #7").unwrap();
+    app.wait_for_within("Issue #7", long).unwrap();
     assert!(!app.shows("id:side-#7 Login breaks"), "an issue is not a bot");
-    assert!(!app.shows("Looking into it."), "proposed work waits for the yes");
-    app.press("Give it to the bot").unwrap();
     app.wait_for("From GitHub").unwrap();
     app.wait_for_within("Looking into it.", long).unwrap();
+    assert!(!app.shows("Give it to the bot"), "there is nothing to say yes to");
     // The work is done in the repository's folder, which came with it.
     app.wait_for("demo").unwrap();
-    app.wait_for_gone("Give it to the bot", long).unwrap();
 
     // A new comment on the issue reaches the agent; its answer on GitHub
     // asks first, and "allow for this task" is not offered.

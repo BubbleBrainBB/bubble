@@ -263,6 +263,7 @@ native/
   - 同一天改了放法（用户在对比稿「Bubble · Main bot inbox」第 1 轮里选了 1c，嫌卡片丑）：输入框上方的两张卡（等点头的、做完的）都去掉，改成主 bot 对话里的消息。做完的：一行"acme/demo#12 done by [头像] Dev"（点了去那个 bot），下面是那个 bot 的原话。等点头的：主 bot 的一句"acme/tools#5 came in: … Give it to Dev?"，下面两个按钮，答过之后变成一行"Given to Dev"或"Dismissed"。
   - 实现：消息多了一种角色 `MessageRole::Told`（"说给人听、不触发任何 bot 回合"），`AppState::tell` 写入主 bot 的对话；主 bot 正在说话时来的，等它说完再显示；主 bot 的模型在下一条消息的开头被告知这些内容一次（`prompt_of`）。恢复已保存的回合时保留它们（`transcript::overlay`）。人在别处时主 bot 头像上有个点。
   - 代价（1c 自带的）：不能一次全部同意；事情多时会把对话顶上去。
+  - 什么时候要人点头才开工（用户定，同一天）：仓库级别是 Prepare 或 Act 时，GitHub 来的活直接开工，不再逐个问；只有陌生人提的才问。"认识的"由程序判断，不由模型判断：本人开的、仓库的 owner / member / collaborator 开的（`author_association`）、指派给本人或请本人 review 的、本人发起的话题上的动静。提及、普通评论等算陌生人的。事件的 payload 里记 `known`，分派工具不再有 `start` 参数。Prepare 和 Act 的区别只剩"发布（评论、推送、开 PR）要不要问"，和设置里写的说明一致了。原因：公开仓库谁都能开 issue，不能让陌生人写的话直接驱动 bot（尤其全局 Full access 时）。
   - 没做：系统通知。NSH 0.4 没有通知接口；macOS 的通知中心要求应用有包标识，现在直接跑的开发版没有，所以要等打包那一步一起做。
 
 ## 修订记录

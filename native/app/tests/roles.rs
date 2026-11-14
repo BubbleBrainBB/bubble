@@ -1,10 +1,11 @@
 //! Bots are roles, headless: three issues come in from two repositories and
 //! the main bot hands them to the one developer. The first starts at once;
 //! the second, which finds the developer busy, goes to a copy of it, in a
-//! checkout of its own of the same repository; the third, in a repository
-//! that only prepares, waits for the person's yes in the one digest, and
-//! then the developer does it in that other folder, in the same
-//! conversation.
+//! checkout of its own of the same repository. Those two were opened by
+//! people who work on the repository, so they began without asking. The
+//! third was opened by a stranger: it waits for the person's yes, asked
+//! in the main bot's conversation, and then the developer does it in that
+//! other folder, in the same conversation.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -128,9 +129,9 @@ case "$*" in
   "api user --jq .login") echo tester ;;
   api\ notifications*) echo '[]' ;;
   api\ repos/acme/demo/issues\?state=open*)
-    echo '[{"number":12,"title":"Crash on start","created_at":"2099-01-01T00:00:00Z","user":{"login":"alice","type":"User"}},{"number":13,"title":"Wrong total","created_at":"2099-01-01T00:01:00Z","user":{"login":"bob","type":"User"}}]' ;;
+    echo '[{"number":12,"title":"Crash on start","created_at":"2099-01-01T00:00:00Z","author_association":"MEMBER","user":{"login":"alice","type":"User"}},{"number":13,"title":"Wrong total","created_at":"2099-01-01T00:01:00Z","author_association":"COLLABORATOR","user":{"login":"bob","type":"User"}}]' ;;
   api\ repos/acme/tools/issues\?state=open*)
-    echo '[{"number":5,"title":"Flag ignored","created_at":"2099-01-01T00:02:00Z","user":{"login":"carol","type":"User"}}]' ;;
+    echo '[{"number":5,"title":"Flag ignored","created_at":"2099-01-01T00:02:00Z","author_association":"NONE","user":{"login":"carol","type":"User"}}]' ;;
   issue\ view*) echo '{"title":"An issue","state":"OPEN","url":"https://github.com/acme/x/issues/1","comments":[]}' ;;
   *) echo "unexpected: $*" >&2; exit 1 ;;
 esac
@@ -173,14 +174,14 @@ fn work_goes_to_a_role_and_the_folder_comes_with_the_work() {
         format!(r#"{{"providers":[{{"id":"mock","name":"Mock","baseURL":"{url}","apiKey":"k","enabled":true}}],"defaultModel":"mock:test-model"}}"#),
     )
     .unwrap();
-    // One developer, tied to no folder; two known projects, one where bots
-    // may start on their own and one where they wait for a yes.
+    // One developer, tied to no folder; two known projects, in both of
+    // which bots may work (what they publish waits for the person).
     {
         let store = Store::open(home.join("native/bubble.db")).unwrap();
         let dev = store.create_task(NewTask { title: "Dev", project_cwd: None, origin: Origin::User }).unwrap();
         store.set_setting(&format!("bot_role:{}", dev.id), Some("Developer")).unwrap();
         store.set_setting("projects", Some(&json!([demo.to_string_lossy(), tools.to_string_lossy()]).to_string())).unwrap();
-        store.set_setting("github:acme/demo", Some("act")).unwrap();
+        store.set_setting("github:acme/demo", Some("prepare")).unwrap();
         store.set_setting("github:acme/tools", Some("prepare")).unwrap();
     }
     let gh = fake_gh(&root);
@@ -238,11 +239,13 @@ fn work_goes_to_a_role_and_the_folder_comes_with_the_work() {
     app.press("id:side-Dev 2").unwrap();
     app.wait_for_within("Dev 2 did it in demo, in a checkout of its own.", long).unwrap();
 
-    // What waits for a yes is in one place, with the bot that would take it.
+    // What a stranger opened does not set a bot going by itself.
     app.press("id:nav-home").unwrap();
     // The main bot asks, in the conversation, with the two answers under it.
-    app.wait_for_within("text:acme/tools#5 came in: Fix #5. Give it to Dev?", long).unwrap();
+    app.wait_for_within("text:acme/tools#5 came in from @carol, who does not work on the repository: Fix #5. Give it to Dev?", long).unwrap();
     app.wait_for("text:Give to Dev").unwrap();
+    // The bot list says so too.
+    app.wait_for("text:Wants a yes: Fix #5").unwrap();
     app.press("label:Give: Fix #5").unwrap();
     app.wait_for("text:Given to Dev").unwrap();
     assert!(!app.shows("label:Give: Fix #5"), "answered once");

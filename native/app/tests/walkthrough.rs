@@ -169,9 +169,10 @@ fn the_whole_flow_with_a_real_model() {
         return;
     };
 
-    // 2. The person says yes in the digest; the bot does the work in the repository's folder.
+    // 2. The issues are a stranger's, so the main bot asks in its conversation;
+    // the person says yes there, and the bot does the work in the repository's folder.
     app.press("id:nav-home").unwrap();
-    app.wait_for_within("text:/wants? your yes/", Duration::from_secs(10)).unwrap();
+    app.wait_for_within(&format!("label:Give: {}", ticket.title), Duration::from_secs(10)).unwrap();
     app.press(&format!("label:Give: {}", ticket.title)).unwrap();
     let worker = store.get_ticket(&ticket.id).unwrap().unwrap().task_id;
     let name = bots(&store).into_iter().find(|(id, ..)| *id == worker).map(|(_, name, ..)| name).unwrap_or_default();

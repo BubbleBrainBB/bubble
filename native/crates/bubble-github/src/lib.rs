@@ -356,6 +356,10 @@ pub struct Opened {
     pub author: String,
     /// Opened by an app (a dependency updater, a workflow), not a person.
     pub by_app: bool,
+    /// The author works on the repository: its owner, a member of its
+    /// organization or a collaborator. Anyone else can open an issue on a
+    /// public repository.
+    pub by_collaborator: bool,
     /// When, as GitHub writes it (RFC 3339, UTC).
     pub created_at: String,
 }
@@ -379,6 +383,7 @@ pub fn parse_opened(json: &str) -> Result<Vec<Opened>> {
                 title: item["title"].as_str().unwrap_or_default().to_owned(),
                 author: item["user"]["login"].as_str().unwrap_or_default().to_owned(),
                 by_app: item["user"]["type"].as_str() == Some("Bot"),
+                by_collaborator: matches!(item["author_association"].as_str(), Some("OWNER" | "MEMBER" | "COLLABORATOR")),
                 created_at: item["created_at"].as_str()?.to_owned(),
             })
         })
@@ -616,15 +621,19 @@ mod tests {
     #[test]
     fn opened_items_tell_issues_from_pull_requests_and_people_from_apps() {
         let json = r#"[
-          {"number": 12, "title": "Crash on start", "created_at": "2026-11-12T08:00:00Z",
+          {"number": 12, "title": "Crash on start", "created_at": "2026-11-12T08:00:00Z", "author_association": "NONE",
            "user": {"login": "alice", "type": "User"}},
+          {"number": 14, "title": "Tidy the docs", "created_at": "2026-11-12T08:02:00Z", "author_association": "MEMBER",
+           "user": {"login": "bo", "type": "User"}},
           {"number": 13, "title": "Bump serde", "created_at": "2026-11-12T08:05:00Z",
            "user": {"login": "dependabot[bot]", "type": "Bot"}, "pull_request": {"url": "x"}}
         ]"#;
         let found = parse_opened(json).unwrap();
-        assert_eq!(found.len(), 2);
+        assert_eq!(found.len(), 3);
         assert_eq!((found[0].kind, found[0].number, found[0].by_app), (Kind::Issue, 12, false));
-        assert_eq!((found[1].kind, found[1].by_app), (Kind::PullRequest, true));
+        // Anyone can open an issue; who works on the repository is told apart.
+        assert_eq!((found[0].by_collaborator, found[1].by_collaborator), (false, true));
+        assert_eq!((found[2].kind, found[2].by_app), (Kind::PullRequest, true));
         assert_eq!(found[0].dedupe_key("acme/demo"), "gh:opened:acme/demo#12");
     }
 

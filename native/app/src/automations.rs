@@ -144,6 +144,7 @@ pub fn run_now(app: AppState, id: &str) {
             // It runs in the folder its bot worked in when it was written.
             project: Some(automation.project.as_str()).filter(|p| !p.is_empty()),
             priority: crate::manager::NORMAL,
+            why_asked: None,
         },
         crate::manager::Standing::Accept,
         false,

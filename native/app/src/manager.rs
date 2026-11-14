@@ -690,6 +690,8 @@ pub struct Work<'a> {
     /// The folder it is done in.
     pub project: Option<&'a str>,
     pub priority: i64,
+    /// Why it waits for the person's yes, when it does: said to them.
+    pub why_asked: Option<&'a str>,
 }
 
 /// Work for a bot that an event or a routine brings: a ticket, given to
@@ -729,7 +731,10 @@ pub fn bring(app: AppState, bot_id: &str, work: Work<'_>, standing: Standing, po
         // It waits for the person's yes: the main bot asks, where they talk.
         let bot = Sender::Bot(bot_id.clone()).name(app);
         let shown = match origin {
-            TicketOrigin::Github => format!("{} came in: {}. Give it to {bot}?", work.asker, work.title),
+            TicketOrigin::Github => match work.why_asked {
+                Some(why) => format!("{} came in {why}: {}. Give it to {bot}?", work.asker, work.title),
+                None => format!("{} came in: {}. Give it to {bot}?", work.asker, work.title),
+            },
             _ => format!("{} is ready for {bot}. Give it?", work.title),
         };
         app.tell(&shown, &format!("{shown} It waits for the person's yes."), None, Some(&ticket.id));

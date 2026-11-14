@@ -393,8 +393,19 @@ fn handle_opened(app: AppState, repo: &Repo, level: Level, item: &Opened, me: Op
         Kind::PullRequest => format!("gh pr view {} --repo {} --comments", item.number, repo.name),
     };
     let brief = format!("@{} opened {what} in {}: \"{}\". Read it with `{read}`.", item.author, repo.name, item.title);
-    let payload =
-        json!({ "reason": "opened", "title": item.title, "brief": brief, "kind": item.kind.as_str(), "author": item.author }).to_string();
+    // The person's own, or from someone who works on the repository: work
+    // on it begins without asking. Anyone can open an issue on a public
+    // repository, and what a stranger writes is not to set a bot going.
+    let known = me == Some(item.author.as_str()) || item.by_collaborator;
+    let payload = json!({
+        "reason": "opened",
+        "title": item.title,
+        "brief": brief,
+        "kind": item.kind.as_str(),
+        "author": item.author,
+        "known": known,
+    })
+    .to_string();
     app.with_store(|s| {
         s.record_event(NewEvent {
             source: SOURCE,
@@ -430,6 +441,10 @@ fn handle_notification(app: AppState, repo: &Repo, level: Level, n: &Notificatio
         "brief": brief_for(n),
         "kind": n.kind.as_str(),
         "priority": if starts_work { "first" } else { "normal" },
+        // Asked of the person by name (only those who work on the
+        // repository can), or on something the person began: work on it
+        // begins without asking. A mention can be anyone's.
+        "known": starts_work || n.reason == "author",
     })
     .to_string();
     app.with_store(|s| {
