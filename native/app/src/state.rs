@@ -40,6 +40,8 @@ pub const APPEARANCE: &str = "appearance";
 const OPEN_BOT: &str = "open_bot";
 /// When each bot's conversation was last looked at, as JSON.
 const BOTS_SEEN: &str = "bots_seen";
+/// When the person last said "got it" to what bots finished on their own.
+const ENDED_CLEARED: &str = "ended_cleared";
 
 /// Which bot a message in a conversation came from, by the message's id.
 fn from_key(message_id: &str) -> String {
@@ -164,6 +166,8 @@ pub struct AppState {
     pub proposed: Signal<Vec<bubble_store::Ticket>>,
     /// Bumped when a ticket is made or moves on.
     pub tickets_revision: Signal<u32>,
+    /// When the person last cleared what bots finished on their own.
+    ended_cleared: Signal<i64>,
     /// Bumped when a bot's or the team's notes change.
     pub memory_revision: Signal<u32>,
     /// The open bot's details show beside its conversation.
@@ -256,6 +260,7 @@ impl AppState {
             previews: signal(HashMap::new()),
             proposed: signal(Vec::new()),
             tickets_revision: signal(0),
+            ended_cleared: signal(setting(ENDED_CLEARED).and_then(|v| v.parse().ok()).unwrap_or(0)),
             memory_revision: signal(0),
             details_open: signal(false),
             pointer: signal(None),
@@ -608,6 +613,34 @@ impl AppState {
         let latest = |t: &TaskSummary| previews.get(&t.task.id).map_or(t.task.updated_at, |p| p.at.max(t.task.created_at));
         bots.sort_by(|a, b| latest(b).cmp(&latest(a)));
         bots
+    }
+
+    /// What bots did on their own (work from GitHub or a routine) that
+    /// ended and that the person has not seen: not cleared, and its bot's
+    /// conversation not looked at since. Newest first.
+    pub fn ended(&self) -> Vec<bubble_store::Ticket> {
+        self.tickets_revision.get();
+        let cleared = self.ended_cleared.get();
+        let ended = self.with_store(|s| s.ended_tickets(cleared)).unwrap_or_default();
+        self.seen.with(|seen| ended.into_iter().filter(|t| t.updated_at > seen.get(&t.task_id).copied().unwrap_or(0)).collect())
+    }
+
+    /// "Got it": what ended up to now needs no more telling.
+    pub fn clear_ended(&self) {
+        let now = bubble_store::now_ms();
+        self.with_store(|s| s.set_setting(ENDED_CLEARED, Some(&now.to_string())));
+        self.ended_cleared.set(now);
+    }
+
+    /// The person looked at a bot's conversation now, whether or not it
+    /// said anything new: what it ended before this is seen.
+    pub fn looked_at(&self, bot_id: &str) {
+        let now = bubble_store::now_ms();
+        self.seen.update(|seen| {
+            seen.insert(bot_id.to_owned(), now);
+        });
+        let json = self.seen.with_untracked(|seen| serde_json::to_string(seen).ok());
+        self.with_store(|s| s.set_setting(BOTS_SEEN, json.as_deref()));
     }
 
     /// Whether a bot said something the person has not looked at.
@@ -1625,6 +1658,10 @@ impl Conversation {
                         _ => bubble_store::TicketStatus::Finished,
                     };
                     app.with_store(|s| s.set_ticket_status(ticket, status, Some(&text)));
+                    // Ended under the person's eyes: they need no telling.
+                    if let Some(id) = self.task_id.get().filter(|id| app.route.get_untracked() == Route::Task(id.clone())) {
+                        app.looked_at(&id);
+                    }
                     app.refresh_tickets();
                 }
                 let me = match self.task_id.get() {

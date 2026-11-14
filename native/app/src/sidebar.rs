@@ -65,7 +65,7 @@ fn preview_of(app: AppState, bot: &TaskSummary) -> String {
 
 /// A message as one line of plain words: its markdown marks say nothing
 /// in a list.
-fn plain(text: &str) -> String {
+pub fn plain(text: &str) -> String {
     let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut line = String::with_capacity(words.len());
     for word in words.split(' ') {

@@ -209,6 +209,23 @@ fn work_goes_to_a_role_and_the_folder_comes_with_the_work() {
     assert_eq!(app.screen().count("text:Developer").unwrap(), 2, "the copy has the role too");
     assert!(!app.shows("id:side-Dev 3"), "the work that waits for a yes made no bot");
 
+    // Nobody asked for this work in a conversation: it came from GitHub.
+    // So how it went is told in one place, where the person talks to the
+    // main bot: what each bot did, in its own words.
+    app.wait_for_within("text:2 things were finished", long).unwrap();
+    app.wait_for("text:acme/demo#12, done by Dev").unwrap();
+    app.wait_for("text:acme/demo#13, done by Dev 2").unwrap();
+    app.wait_for("text:Dev did it in demo.").unwrap();
+    // Looking at a bot's conversation is being told: its work goes from the list.
+    app.press("label:Open: Fix #13").unwrap();
+    app.wait_for_within("Dev 2 did it in demo, in a checkout of its own.", long).unwrap();
+    app.press("id:nav-home").unwrap();
+    app.wait_for("text:1 thing was finished").unwrap();
+    assert!(!app.shows("text:acme/demo#13, done by Dev 2"));
+    // "Got it" takes the rest.
+    app.press("Got it").unwrap();
+    app.wait_for_gone("text:1 thing was finished", long).unwrap();
+
     // Each did its issue in the repository's folder, which came with the
     // work; the copy in a checkout of its own, since the developer was in
     // that folder.
@@ -231,6 +248,9 @@ fn work_goes_to_a_role_and_the_folder_comes_with_the_work() {
     app.wait_for_within("Dev did it in tools.", long).unwrap();
     app.wait_for("Dev did it in demo.").unwrap();
     assert!(!app.shows("id:side-Dev 3"));
+    // It ended under the person's eyes, so there is nothing to tell them.
+    app.press("id:nav-home").unwrap();
+    assert!(!app.shows("id:ended"));
 
     drop(app);
     std::fs::remove_dir_all(&root).ok();

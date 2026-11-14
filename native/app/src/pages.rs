@@ -354,6 +354,7 @@ pub fn home(app: AppState) -> impl IntoElement {
             "Tell Bubble what needs doing; it hands the work to your bots.",
         ))
         .child(digest(app))
+        .child(ended(app))
         .child(away_row(app))
         .child(composer(app, conversation, Rc::new(|| format!("Message {}", crate::manager::MAIN_BOT)), ComposerFor::Manager))
 }
@@ -456,6 +457,114 @@ fn digest(app: AppState) -> impl IntoElement {
                     ))
                     .child(when(move || count() > SHOWN, move || {
                         text(move || format!("And {} more.", count().saturating_sub(SHOWN))).text_size(px(SMALL)).text_color(muted())
+                    })),
+            )
+    })
+}
+
+/// What bots did on their own and how it went, in one place: work that
+/// GitHub or a routine brought, which nobody asked for in a conversation
+/// and so nobody was told about there. Each goes when its bot's
+/// conversation is looked at; "Got it" takes them all.
+fn ended(app: AppState) -> impl IntoElement {
+    use bubble_store::{TicketOrigin, TicketStatus};
+    const SHOWN: usize = 6;
+    let all = move || app.ended();
+    let summary = move || {
+        let ended = all();
+        let count = |status: TicketStatus| ended.iter().filter(|t| t.status == status).count();
+        let (done, failed, stopped) = (count(TicketStatus::Finished), count(TicketStatus::Failed), count(TicketStatus::Stopped));
+        match (done, failed, stopped) {
+            (1, 0, 0) => "1 thing was finished".to_owned(),
+            (n, 0, 0) => format!("{n} things were finished"),
+            _ => [(done, "finished"), (failed, "failed"), (stopped, "stopped")]
+                .into_iter()
+                .filter(|(n, _)| *n > 0)
+                .map(|(n, how)| format!("{n} {how}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    };
+    let line = move |ticket: &bubble_store::Ticket| {
+        let bot = app.tasks.with(|tasks| tasks.iter().find(|t| t.task.id == ticket.task_id).map(|t| t.task.title.clone())).unwrap_or_else(|| "a bot".to_owned());
+        let from = match (ticket.origin, &ticket.asker) {
+            (TicketOrigin::Github, Some(asker)) => asker.clone(),
+            (TicketOrigin::Routine, _) => "A routine".to_owned(),
+            _ => "On its own".to_owned(),
+        };
+        match ticket.status {
+            TicketStatus::Failed => format!("{from}, {bot} could not finish"),
+            TicketStatus::Stopped => format!("{from}, {bot} was stopped"),
+            _ => format!("{from}, done by {bot}"),
+        }
+    };
+    when(move || !all().is_empty(), move || {
+        view()
+            .w_full()
+            .max_w(px(READING_WIDTH - 48.0))
+            .mx(auto())
+            .px(px(24.0))
+            .pt(px(8.0))
+            .test_id("ended")
+            .child(
+                view()
+                    .p(px(12.0))
+                    .gap(px(8.0))
+                    .rounded(px(12.0))
+                    .border(px(LINE))
+                    .border_color(border())
+                    .bg(pane())
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(text(summary).flex_1().text_size(px(BODY)).font_weight(FontWeight::SEMIBOLD).text_color(ink()))
+                            .child(button("Got it", move || app.clear_ended())),
+                    )
+                    .child(each(
+                        move || all().into_iter().take(SHOWN).collect::<Vec<_>>(),
+                        |ticket: &bubble_store::Ticket| format!("{}:{}", ticket.id, ticket.status.as_str()),
+                        move |ticket, _| {
+                            let (bot, title) = ticket.with_untracked(|t| (t.task_id.clone(), t.title.clone()));
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .pt(px(8.0))
+                                .border_t(px(LINE))
+                                .border_color(hairline())
+                                .child(
+                                    view()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .gap(px(2.0))
+                                        .child(text(move || ticket.get().title).text_size(px(BODY)).text_color(ink()).number_of_lines(1))
+                                        .child(
+                                            text(move || line(&ticket.get()))
+                                                .text_size(px(SMALL))
+                                                .text_color(move || if ticket.get().status == TicketStatus::Failed { failed() } else { muted() })
+                                                .number_of_lines(1),
+                                        )
+                                        // What the bot said of it, as it would read in a list.
+                                        .child(
+                                            text(move || crate::sidebar::plain(&ticket.get().report.unwrap_or_default()))
+                                                .text_size(px(SMALL))
+                                                .text_color(secondary())
+                                                .number_of_lines(2),
+                                        ),
+                                )
+                                .child(
+                                    button("Open", move || {
+                                        app.looked_at(&bot);
+                                        app.route.set(Route::Task(bot.clone()));
+                                    })
+                                    .label(format!("Open: {title}")),
+                                )
+                        },
+                    ))
+                    .child(when(move || all().len() > SHOWN, move || {
+                        text(move || format!("And {} more.", all().len().saturating_sub(SHOWN))).text_size(px(SMALL)).text_color(muted())
                     })),
             )
     })

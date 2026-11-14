@@ -688,6 +688,19 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Work that ended (finished, failed or stopped) after `since`, newest
+    /// first, that came from GitHub or a routine: nobody asked for it in a
+    /// conversation, so nobody was told there how it went.
+    pub fn ended_tickets(&self, since: i64) -> Result<Vec<Ticket>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare(
+            "SELECT * FROM tickets WHERE status IN ('finished', 'failed', 'stopped') AND origin IN ('github', 'routine') \
+             AND updated_at > ?1 ORDER BY updated_at DESC, rowid DESC LIMIT 100",
+        )?;
+        let rows = statement.query_map(params![since], ticket_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Tickets given to a bot that it never answered: the app closed, or
     /// the bot was archived, while it worked. They are marked stopped.
     pub fn close_unanswered_tickets(&self) -> Result<usize> {
