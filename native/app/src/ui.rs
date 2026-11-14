@@ -157,7 +157,8 @@ fn reply_bubble(source: &str) -> AnyElement {
 /// line in the middle of the conversation with the other bot's face and
 /// name ("Message from", "Messaged"). What was said is in the other bot's
 /// conversation, and a press on the mark goes there.
-fn bot_mark(app: AppState, verb: &'static str, name: String) -> AnyElement {
+fn bot_mark(app: AppState, verb: &str, name: String) -> AnyElement {
+    let verb = verb.to_owned();
     // Where the other bot's conversation is: the main bot's is home.
     let (face, there) = if name == crate::manager::MAIN_BOT {
         (Some(crate::avatar::main(16.0).into_element()), Some(crate::state::Route::Home))
@@ -173,7 +174,7 @@ fn bot_mark(app: AppState, verb: &'static str, name: String) -> AnyElement {
         .flex_row()
         .items_center()
         .gap(px(6.0))
-        .child(text(verb).text_size(px(SMALL)).text_color(muted()))
+        .child(text(verb.clone()).text_size(px(SMALL)).text_color(muted()))
         .child(face)
         .child(text(name.clone()).text_size(px(SMALL)).text_color(secondary()).number_of_lines(1));
     match there {
@@ -188,6 +189,56 @@ fn bot_mark(app: AppState, verb: &'static str, name: String) -> AnyElement {
             })
             .into_element(),
         None => mark.into_element(),
+    }
+}
+
+/// Something told to the person in the main bot's conversation. A bot's
+/// report on work nobody asked for there: whose it is and what of, then
+/// what the bot said. Or work that waits for their yes: the main bot asks,
+/// with the two answers under it until one is given.
+fn told(app: AppState, line: ReadSignal<Line>) -> AnyElement {
+    use bubble_store::{TicketOrigin, TicketStatus};
+    let (id, words) = line.with_untracked(|line| (line.id.clone(), line.text.clone()));
+    let bot_of = move |ticket: &bubble_store::Ticket| {
+        app.tasks.with(|tasks| tasks.iter().find(|t| t.task.id == ticket.task_id).map(|t| t.task.title.clone())).unwrap_or_else(|| "a bot".to_owned())
+    };
+    match app.told_from(&id) {
+        Some(name) => {
+            let verb = match untracked(|| app.told_ticket(&id)) {
+                Some(ticket) => {
+                    let what = match (ticket.origin, &ticket.asker) {
+                        (TicketOrigin::Github, Some(asker)) => asker.clone(),
+                        _ => "A routine".to_owned(),
+                    };
+                    match ticket.status {
+                        TicketStatus::Failed => format!("{what} failed, says"),
+                        TicketStatus::Stopped => format!("{what} stopped, says"),
+                        _ => format!("{what} done by"),
+                    }
+                }
+                None => "Message from".to_owned(),
+            };
+            view().gap(px(8.0)).child(bot_mark(app, &verb, name)).child(reply_bubble(&words)).into_element()
+        }
+        None => view()
+            .gap(px(8.0))
+            .child(reply_bubble(&words))
+            .child(dynamic(move || {
+                let ticket = app.told_ticket(&id)?;
+                let bot = bot_of(&ticket);
+                let (accept, dismiss, title) = (ticket.id.clone(), ticket.id.clone(), ticket.title.clone());
+                Some(match ticket.status {
+                    TicketStatus::Proposed => view()
+                        .flex_row()
+                        .gap(px(8.0))
+                        .child(primary_button(&format!("Give to {bot}"), move || crate::manager::accept_ticket(app, &accept)).label(format!("Give: {title}")))
+                        .child(button("Dismiss", move || crate::manager::dismiss_ticket(app, &dismiss)).label(format!("Dismiss: {title}")))
+                        .into_element(),
+                    TicketStatus::Dismissed => text("Dismissed").pl(px(4.0)).text_size(px(SMALL)).text_color(muted()).into_element(),
+                    _ => text(format!("Given to {bot}")).pl(px(4.0)).text_size(px(SMALL)).text_color(muted()).into_element(),
+                })
+            }))
+            .into_element(),
     }
 }
 
@@ -488,6 +539,7 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>) 
             view().child((!current.text.trim().is_empty()).then(|| reply_bubble(&current.text))).into_element()
         }),
         LineKind::Message(MessageRole::Tool | MessageRole::Checkpoint) => view().into_element(),
+        LineKind::Message(MessageRole::Told) => told(app, line),
         LineKind::Message(MessageRole::External) => said_to_bot(|| "From GitHub".to_owned(), line),
         // A bot's answer coming back is a mark in passing: this bot says
         // what came of it, and the whole of it is in that bot's

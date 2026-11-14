@@ -423,6 +423,9 @@ pub fn overlay(lines: &mut Vec<Line>, checkpoints: Vec<(String, String)>) {
                 )
             })
             .map_or(lines.len(), |n| start + 1 + n);
+        // What the person was told while the turn ran, or after it, is no
+        // part of the turn: it stays, after it.
+        saved.extend(lines[start + 1..end].iter().filter(|l| l.kind == LineKind::Message(MessageRole::Told)).cloned());
         lines.splice(start + 1..end, saved);
     }
 }
@@ -597,6 +600,24 @@ mod tests {
         anchor_children(&mut lines, &children); // repeated notifications do not duplicate rows
         assert_eq!(lines[0].child_ids, ["Ada"]);
         assert_eq!(lines[1].child_ids, ["Bo"]);
+    }
+
+    #[test]
+    fn what_was_told_during_a_turn_stays_after_it_when_the_turn_is_restored() {
+        let mut lines = vec![
+            Line::new("u", LineKind::Message(MessageRole::User), "hello"),
+            Line::new("told", LineKind::Message(MessageRole::Told), "Dev finished"),
+            Line::new("reply", LineKind::Message(MessageRole::Assistant), "as the messages have it"),
+            Line::new("u2", LineKind::Message(MessageRole::User), "next"),
+        ];
+        let saved = vec![
+            Line::new("turn-u", LineKind::Turn { status: TurnStatus::Completed, completed_at: Some(1) }, "").in_turn("turn-u"),
+            Line::new("reply", LineKind::Message(MessageRole::Assistant), "as the turn kept it").in_turn("turn-u"),
+        ];
+        overlay(&mut lines, vec![("u".into(), serde_json::to_string(&saved).unwrap())]);
+        let ids: Vec<&str> = lines.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, ["u", "turn-u", "reply", "told", "u2"]);
+        assert_eq!(lines[2].text, "as the turn kept it");
     }
 
     #[test]

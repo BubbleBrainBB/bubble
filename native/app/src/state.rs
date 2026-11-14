@@ -40,8 +40,11 @@ pub const APPEARANCE: &str = "appearance";
 const OPEN_BOT: &str = "open_bot";
 /// When each bot's conversation was last looked at, as JSON.
 const BOTS_SEEN: &str = "bots_seen";
-/// When the person last said "got it" to what bots finished on their own.
-const ENDED_CLEARED: &str = "ended_cleared";
+/// The ticket something told to the person in the main bot's conversation
+/// is about, by the message's id.
+fn told_ticket_key(message_id: &str) -> String {
+    format!("told_ticket:{message_id}")
+}
 
 /// Which bot a message in a conversation came from, by the message's id.
 fn from_key(message_id: &str) -> String {
@@ -166,8 +169,11 @@ pub struct AppState {
     pub proposed: Signal<Vec<bubble_store::Ticket>>,
     /// Bumped when a ticket is made or moves on.
     pub tickets_revision: Signal<u32>,
-    /// When the person last cleared what bots finished on their own.
-    ended_cleared: Signal<i64>,
+    /// How much was told in the main bot's conversation while the person
+    /// was looking elsewhere.
+    pub told_unseen: Signal<u32>,
+    /// Told while the main bot was speaking: shown when it is done.
+    told_later: Stored<Vec<Line>>,
     /// Bumped when a bot's or the team's notes change.
     pub memory_revision: Signal<u32>,
     /// The open bot's details show beside its conversation.
@@ -260,7 +266,8 @@ impl AppState {
             previews: signal(HashMap::new()),
             proposed: signal(Vec::new()),
             tickets_revision: signal(0),
-            ended_cleared: signal(setting(ENDED_CLEARED).and_then(|v| v.parse().ok()).unwrap_or(0)),
+            told_unseen: signal(0),
+            told_later: stored(Vec::new()),
             memory_revision: signal(0),
             details_open: signal(false),
             pointer: signal(None),
@@ -295,6 +302,11 @@ impl AppState {
                 _ => return,
             };
             untracked(|| state.with_store(|s| s.set_setting(OPEN_BOT, open.as_deref())));
+        });
+        effect(move || {
+            if state.route.get() == Route::Home {
+                state.told_unseen.set(0);
+            }
         });
         state.resume_queue();
         github::start(state);
@@ -615,32 +627,64 @@ impl AppState {
         bots
     }
 
-    /// What bots did on their own (work from GitHub or a routine) that
-    /// ended and that the person has not seen: not cleared, and its bot's
-    /// conversation not looked at since. Newest first.
-    pub fn ended(&self) -> Vec<bubble_store::Ticket> {
-        self.tickets_revision.get();
-        let cleared = self.ended_cleared.get();
-        let ended = self.with_store(|s| s.ended_tickets(cleared)).unwrap_or_default();
-        self.seen.with(|seen| ended.into_iter().filter(|t| t.updated_at > seen.get(&t.task_id).copied().unwrap_or(0)).collect())
-    }
-
-    /// "Got it": what ended up to now needs no more telling.
-    pub fn clear_ended(&self) {
-        let now = bubble_store::now_ms();
-        self.with_store(|s| s.set_setting(ENDED_CLEARED, Some(&now.to_string())));
-        self.ended_cleared.set(now);
-    }
-
-    /// The person looked at a bot's conversation now, whether or not it
-    /// said anything new: what it ended before this is seen.
-    pub fn looked_at(&self, bot_id: &str) {
-        let now = bubble_store::now_ms();
-        self.seen.update(|seen| {
-            seen.insert(bot_id.to_owned(), now);
+    /// Tells the person something in the main bot's conversation, as a
+    /// message there that sets no bot going: `shown` is what they read,
+    /// `read` what the main bot is told of it with the next message,
+    /// `from` the bot whose words it is (a report), `ticket` the work it
+    /// is about. While the main bot is speaking it waits for it to finish.
+    pub fn tell(&self, shown: &str, read: &str, from: Option<&str>, ticket: Option<&str>) {
+        // Its lines first: a conversation opened after the message is
+        // saved would have it already.
+        let conversation = self.manager_conversation();
+        let content = serde_json::to_string(read).ok();
+        let saved = self.with_store(|s| {
+            let run = s.manager_run(None)?;
+            let saved = s.append_message_with(&run.id, MessageRole::Told, shown, content.as_deref())?;
+            if let Some(from) = from {
+                s.set_setting(&from_key(&saved.id), Some(from))?;
+            }
+            if let Some(ticket) = ticket {
+                s.set_setting(&told_ticket_key(&saved.id), Some(ticket))?;
+            }
+            Ok(saved)
         });
-        let json = self.seen.with_untracked(|seen| serde_json::to_string(seen).ok());
-        self.with_store(|s| s.set_setting(BOTS_SEEN, json.as_deref()));
+        let Some(saved) = saved else { return };
+        let line = Line { at: saved.created_at, ..Line::new(saved.id, LineKind::Message(MessageRole::Told), shown) };
+        if conversation.busy.get_untracked() {
+            self.told_later.with(|later| later.push(line));
+        } else {
+            conversation.push(line);
+            conversation.changed();
+        }
+        if self.route.get_untracked() != Route::Home {
+            self.told_unseen.update(|unseen| *unseen += 1);
+        }
+    }
+
+    /// The main bot is done speaking: what was told meanwhile shows.
+    fn show_told(&self) {
+        let later: Vec<Line> = self.told_later.with(std::mem::take);
+        if later.is_empty() {
+            return;
+        }
+        let conversation = self.manager_conversation();
+        for line in later {
+            conversation.push(line);
+        }
+        conversation.changed();
+    }
+
+    /// The bot whose words something told to the person is, when it is a
+    /// bot's report.
+    pub fn told_from(&self, message_id: &str) -> Option<String> {
+        self.with_store(|s| s.setting(&from_key(message_id))).flatten()
+    }
+
+    /// The work something told to the person is about, as it stands now.
+    pub fn told_ticket(&self, message_id: &str) -> Option<bubble_store::Ticket> {
+        self.tickets_revision.get();
+        let id = self.with_store(|s| s.setting(&told_ticket_key(message_id))).flatten()?;
+        self.with_store(|s| s.get_ticket(&id)).flatten()
     }
 
     /// Whether a bot said something the person has not looked at.
@@ -1658,11 +1702,21 @@ impl Conversation {
                         _ => bubble_store::TicketStatus::Finished,
                     };
                     app.with_store(|s| s.set_ticket_status(ticket, status, Some(&text)));
-                    // Ended under the person's eyes: they need no telling.
-                    if let Some(id) = self.task_id.get().filter(|id| app.route.get_untracked() == Route::Task(id.clone())) {
-                        app.looked_at(&id);
-                    }
                     app.refresh_tickets();
+                    // Work GitHub or a routine brought was asked for in no
+                    // conversation: how it went is told where the person
+                    // talks to the main bot, in this bot's words.
+                    let ended = app.with_store(|s| s.get_ticket(ticket)).flatten();
+                    if let (Some(ended), Some(id)) = (ended, self.task_id.get()) {
+                        if matches!(ended.origin, bubble_store::TicketOrigin::Github | bubble_store::TicketOrigin::Routine) {
+                            let name = Sender::Bot(id).name(app);
+                            let what = match (ended.origin, &ended.asker) {
+                                (bubble_store::TicketOrigin::Github, Some(asker)) => format!("{asker} ({})", ended.title),
+                                _ => format!("its routine {}", ended.title),
+                            };
+                            app.tell(&text, &format!("{name} reports on {what}, which is {outcome}: {text}"), Some(&name), Some(&ended.id));
+                        }
+                    }
                 }
                 let me = match self.task_id.get() {
                     Some(id) => Sender::Bot(id),
@@ -1675,6 +1729,9 @@ impl Conversation {
                     }
                 }
             }
+        }
+        if !self.busy.get_untracked() && self.task_id.get().is_none() {
+            app.show_told();
         }
         if !self.busy.get_untracked() {
             if let Some(next) = self.next_waiting() {
@@ -2334,6 +2391,16 @@ fn prompt_of(messages: &[Message]) -> (String, Vec<bubble_host::Picture>, Option
     let opener = messages.iter().rposition(|m| matches!(m.role, MessageRole::User | MessageRole::System | MessageRole::External));
     let Some(index) = opener else { return (String::new(), Vec::new(), None) };
     let message = &messages[index];
+    // What the person was told in the conversation since the bot last
+    // heard anything: it hears of it now.
+    let mut told: Vec<String> = messages[..index]
+        .iter()
+        .rev()
+        .take_while(|m| !matches!(m.role, MessageRole::User | MessageRole::System | MessageRole::External))
+        .filter(|m| m.role == MessageRole::Told)
+        .map(|m| m.content.as_deref().and_then(|c| serde_json::from_str::<String>(c).ok()).unwrap_or_else(|| m.text.clone()))
+        .collect();
+    told.reverse();
     let (text, pictures) = match message.content.as_deref().and_then(|c| serde_json::from_str::<ChatMessage>(c).ok()) {
         Some(ChatMessage::User { text, images }) => (
             text,
@@ -2341,8 +2408,16 @@ fn prompt_of(messages: &[Message]) -> (String, Vec<bubble_host::Picture>, Option
         ),
         _ => (message.text.clone(), Vec::new()),
     };
+    let text = if told.is_empty() {
+        text
+    } else {
+        format!("{TOLD_NOTE}\n{}\n\n{text}", told.iter().map(|told| format!("- {told}")).collect::<Vec<_>>().join("\n"))
+    };
     (text, pictures, engine::recap_of(&history_of(&messages[..index])))
 }
+
+/// Before what the person was told in the conversation, in the next prompt.
+const TOLD_NOTE: &str = "Since you last spoke, the person was told this in your conversation. It is for you to know; do not repeat it unless they ask:";
 
 fn task_prompt(name: &str, role: &str, instruction: &str, project: Option<&str>, has_tools: bool, full: bool) -> String {
     let place = match (project, has_tools) {
@@ -2555,6 +2630,24 @@ mod tests {
             content: content.map(|c| serde_json::to_string(&c).unwrap()),
             created_at: 0,
         }
+    }
+
+    #[test]
+    fn what_the_person_was_told_reaches_the_bot_with_its_next_message_once() {
+        use MessageRole::*;
+        let said = |role: MessageRole, text: &str| Message { text: text.into(), ..message(role, None) };
+        let told = |read: &str| Message { content: Some(serde_json::to_string(read).unwrap()), ..said(Told, "as the person read it") };
+        let mut messages = vec![said(User, "first"), said(Assistant, "ok"), told("Dev reports on a#1"), told("b#2 came in"), said(User, "what now")];
+        let (text, _, _) = prompt_of(&messages);
+        assert!(text.starts_with(TOLD_NOTE), "{text}");
+        assert!(text.contains("- Dev reports on a#1\n- b#2 came in"), "{text}");
+        assert!(text.ends_with("\n\nwhat now"), "{text}");
+        // It is no turn of the bot's own history.
+        assert_eq!(history_of(&messages).len(), 3);
+        // The message after hears nothing of it again.
+        messages.push(said(Assistant, "this"));
+        messages.push(said(User, "again"));
+        assert_eq!(prompt_of(&messages).0, "again");
     }
 
     #[test]

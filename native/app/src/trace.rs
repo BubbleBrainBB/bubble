@@ -43,7 +43,7 @@ fn says_something(line: &Line) -> bool {
 /// Whether a line is the person's to see.
 fn shown(line: &Line) -> bool {
     match &line.kind {
-        LineKind::Message(MessageRole::User | MessageRole::System | MessageRole::External) => true,
+        LineKind::Message(MessageRole::User | MessageRole::System | MessageRole::External | MessageRole::Told) => true,
         LineKind::Message(MessageRole::Assistant) => says_something(line),
         LineKind::Message(_) => false,
         // Asked and not yet answered: the person's move. Once decided it

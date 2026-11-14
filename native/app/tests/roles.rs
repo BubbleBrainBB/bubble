@@ -209,22 +209,26 @@ fn work_goes_to_a_role_and_the_folder_comes_with_the_work() {
     assert_eq!(app.screen().count("text:Developer").unwrap(), 2, "the copy has the role too");
     assert!(!app.shows("id:side-Dev 3"), "the work that waits for a yes made no bot");
 
-    // Nobody asked for this work in a conversation: it came from GitHub.
-    // So how it went is told in one place, where the person talks to the
-    // main bot: what each bot did, in its own words.
-    app.wait_for_within("text:2 things were finished", long).unwrap();
-    app.wait_for("text:acme/demo#12, done by Dev").unwrap();
-    app.wait_for("text:acme/demo#13, done by Dev 2").unwrap();
-    app.wait_for("text:Dev did it in demo.").unwrap();
-    // Looking at a bot's conversation is being told: its work goes from the list.
-    app.press("label:Open: Fix #13").unwrap();
-    app.wait_for_within("Dev 2 did it in demo, in a checkout of its own.", long).unwrap();
+    // The person is looking at the developer when its first piece of work
+    // ends. Nobody asked for that work in a conversation (it came from
+    // GitHub), so how it went is told where the person talks to the main
+    // bot, and a mark on the main bot says something was told there.
+    app.press("id:side-Dev").unwrap();
+    app.wait_for_within("Dev did it in demo.", long).unwrap();
+    app.wait_for_within("id:main-dot", long).unwrap();
     app.press("id:nav-home").unwrap();
-    app.wait_for("text:1 thing was finished").unwrap();
-    assert!(!app.shows("text:acme/demo#13, done by Dev 2"));
-    // "Got it" takes the rest.
-    app.press("Got it").unwrap();
-    app.wait_for_gone("text:1 thing was finished", long).unwrap();
+    assert!(!app.shows("id:main-dot"));
+    // It is told as messages: whose work it was, and what that bot said of it.
+    app.wait_for_within("text:acme/demo#12 done by", long).unwrap();
+    app.wait_for_within("text:acme/demo#13 done by", long).unwrap();
+    app.wait_for("text:Dev did it in demo.").unwrap();
+    app.wait_for("text:Dev 2 did it in demo, in a checkout of its own.").unwrap();
+    // No cards over the composer: the conversation says it all.
+    assert!(!app.shows("id:digest") && !app.shows("id:ended"));
+    // A press on whose work it was goes to that bot.
+    app.press("label:acme/demo#13 done by Dev 2").unwrap();
+    app.wait_for("id:bot-details-toggle").unwrap();
+    app.press("id:nav-home").unwrap();
 
     // Each did its issue in the repository's folder, which came with the
     // work; the copy in a checkout of its own, since the developer was in
@@ -236,11 +240,12 @@ fn work_goes_to_a_role_and_the_folder_comes_with_the_work() {
 
     // What waits for a yes is in one place, with the bot that would take it.
     app.press("id:nav-home").unwrap();
-    app.wait_for_within("1 thing wants your yes", long).unwrap();
-    app.wait_for("text:Fix #5").unwrap();
-    app.wait_for("text:acme/tools#5, for Dev").unwrap();
+    // The main bot asks, in the conversation, with the two answers under it.
+    app.wait_for_within("text:acme/tools#5 came in: Fix #5. Give it to Dev?", long).unwrap();
+    app.wait_for("text:Give to Dev").unwrap();
     app.press("label:Give: Fix #5").unwrap();
-    app.wait_for_gone("1 thing wants your yes", long).unwrap();
+    app.wait_for("text:Given to Dev").unwrap();
+    assert!(!app.shows("label:Give: Fix #5"), "answered once");
 
     // The developer, free again, does it: in the other repository's
     // folder, in the same conversation as before.
@@ -248,9 +253,10 @@ fn work_goes_to_a_role_and_the_folder_comes_with_the_work() {
     app.wait_for_within("Dev did it in tools.", long).unwrap();
     app.wait_for("Dev did it in demo.").unwrap();
     assert!(!app.shows("id:side-Dev 3"));
-    // It ended under the person's eyes, so there is nothing to tell them.
+    // That too is told where the person talks to the main bot.
     app.press("id:nav-home").unwrap();
-    assert!(!app.shows("id:ended"));
+    app.wait_for("text:acme/tools#5 done by").unwrap();
+    app.wait_for("text:Dev did it in tools.").unwrap();
 
     drop(app);
     std::fs::remove_dir_all(&root).ok();

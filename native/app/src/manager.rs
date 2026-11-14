@@ -725,6 +725,15 @@ pub fn bring(app: AppState, bot_id: &str, work: Work<'_>, standing: Standing, po
         hand_over(app, &ticket, work.from);
     }
     app.refresh_tickets();
+    if standing == Standing::Propose {
+        // It waits for the person's yes: the main bot asks, where they talk.
+        let bot = Sender::Bot(bot_id.clone()).name(app);
+        let shown = match origin {
+            TicketOrigin::Github => format!("{} came in: {}. Give it to {bot}?", work.asker, work.title),
+            _ => format!("{} is ready for {bot}. Give it?", work.title),
+        };
+        app.tell(&shown, &format!("{shown} It waits for the person's yes."), None, Some(&ticket.id));
+    }
     Some(ticket)
 }
 

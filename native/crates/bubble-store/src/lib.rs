@@ -413,6 +413,11 @@ pub enum MessageRole {
     External,
     /// The model's history from here on, compacted (JSON list of messages).
     Checkpoint,
+    /// Something told to the person in a conversation that sets no bot
+    /// going: what a bot finished on its own, or work that waits for
+    /// their yes. Its content is what the bot is told of it with the next
+    /// message (a JSON string).
+    Told,
 }
 
 impl MessageRole {
@@ -424,6 +429,7 @@ impl MessageRole {
             MessageRole::Tool => "tool",
             MessageRole::External => "external",
             MessageRole::Checkpoint => "checkpoint",
+            MessageRole::Told => "told",
         }
     }
 
@@ -435,6 +441,7 @@ impl MessageRole {
             "tool" => MessageRole::Tool,
             "external" => MessageRole::External,
             "checkpoint" => MessageRole::Checkpoint,
+            "told" => MessageRole::Told,
             other => bail!("unknown message role {other:?}"),
         })
     }
@@ -685,19 +692,6 @@ impl Store {
         let conn = self.conn();
         let mut statement = conn.prepare("SELECT * FROM tickets WHERE status = 'proposed' ORDER BY priority ASC, created_at ASC, rowid ASC")?;
         let rows = statement.query_map([], ticket_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    /// Work that ended (finished, failed or stopped) after `since`, newest
-    /// first, that came from GitHub or a routine: nobody asked for it in a
-    /// conversation, so nobody was told there how it went.
-    pub fn ended_tickets(&self, since: i64) -> Result<Vec<Ticket>> {
-        let conn = self.conn();
-        let mut statement = conn.prepare(
-            "SELECT * FROM tickets WHERE status IN ('finished', 'failed', 'stopped') AND origin IN ('github', 'routine') \
-             AND updated_at > ?1 ORDER BY updated_at DESC, rowid DESC LIMIT 100",
-        )?;
-        let rows = statement.query_map(params![since], ticket_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -1235,12 +1229,17 @@ pub fn history(messages: &[Message]) -> Vec<bubble_core::ChatMessage> {
             }
             continue;
         }
+        // What the person was told is no turn of the model's: the bot hears
+        // of it with the message after.
+        if message.role == MessageRole::Told {
+            continue;
+        }
         let parsed = message.content.as_deref().and_then(|c| serde_json::from_str::<ChatMessage>(c).ok());
         let item = match (message.role, parsed) {
             (_, Some(parsed)) => parsed,
             (MessageRole::User, None) => ChatMessage::user(message.text.clone()),
             (MessageRole::Assistant, None) => ChatMessage::assistant(message.text.clone()),
-            (MessageRole::System | MessageRole::Tool | MessageRole::External | MessageRole::Checkpoint, None) => continue,
+            (MessageRole::System | MessageRole::Tool | MessageRole::External | MessageRole::Checkpoint | MessageRole::Told, None) => continue,
         };
         if let ChatMessage::Assistant { text, tool_calls, .. } = &item {
             if text.trim().is_empty() && tool_calls.is_empty() {

@@ -137,7 +137,9 @@ pub fn sidebar(app: AppState) -> impl IntoElement {
                                 avatar::Mood::Working
                             }
                         }))
-                        .child(when(main_busy, move || {
+                        // At work, waiting on the person, or with something
+                        // told that they have not seen.
+                        .child(when(move || main_busy() || app.told_unseen.get() > 0, move || {
                             view()
                                 .absolute()
                                 .right(px(6.0))
@@ -147,6 +149,7 @@ pub fn sidebar(app: AppState) -> impl IntoElement {
                                 .bg(move || if main_waits() { needs() } else { online() })
                                 .border(px(2.0))
                                 .border_color(side())
+                                .test_id("main-dot")
                         })),
                 )
                 .child(text(MAIN_BOT).text_size(px(SMALL)).text_color(ink())),
