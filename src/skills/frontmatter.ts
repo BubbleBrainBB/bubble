@@ -27,7 +27,8 @@ function parseFrontmatterBlock(block: string): Record<string, unknown> {
   const lines = block.split("\n");
   let currentListKey: string | null = null;
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
     if (!line.trim()) continue;
 
     const listMatch = line.match(/^\s*-\s+(.*)$/);
@@ -48,6 +49,22 @@ function parseFrontmatterBlock(block: string): Record<string, unknown> {
     }
 
     const [, key, rawValue] = keyValueMatch;
+    // A block scalar (`key: |` or `key: >`): the indented lines that follow
+    // are the value, kept as lines or folded into one.
+    const blockScalar = rawValue.trim().match(/^([|>])[+-]?\d*$/);
+    if (blockScalar) {
+      const collected: string[] = [];
+      while (index + 1 < lines.length && (/^\s+\S/.test(lines[index + 1]) || !lines[index + 1].trim())) {
+        collected.push(lines[++index]);
+      }
+      const indent = Math.min(
+        ...collected.filter((text) => text.trim()).map((text) => text.length - text.trimStart().length),
+      );
+      const text = collected.map((entry) => (entry.trim() ? entry.slice(indent) : ""));
+      attributes[key] = (blockScalar[1] === "|" ? text.join("\n") : text.join(" ").replace(/\s+/g, " ")).trim();
+      currentListKey = null;
+      continue;
+    }
     if (!rawValue.trim()) {
       attributes[key] = [];
       currentListKey = key;
