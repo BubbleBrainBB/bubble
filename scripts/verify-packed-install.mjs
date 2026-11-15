@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,6 +56,32 @@ try {
   `;
   run(process.execPath, ["--input-type=module", "--eval", smokeScript], sandbox);
   process.stdout.write("Packed Bubble install loaded SDK turn control and the bundled Pi TUI successfully.\n");
+
+  // `npm install -g` keeps every dependency inside the package's own
+  // node_modules, so a bundled dependency the tarball lacks is not found
+  // anywhere else, as it is in the install above. 0.0.67 was published
+  // without get-east-asian-width and did not start.
+  const globalPrefix = join(sandbox, "global");
+  run("npm", ["install", "-g", "--prefix", globalPrefix, "--no-audit", "--no-fund", join(sandbox, tarballs[0])], sandbox);
+  const globalRoot = join(
+    globalPrefix,
+    ...(process.platform === "win32" ? [] : ["lib"]),
+    "node_modules",
+    "@bubblebrain-ai",
+    "bubble",
+  );
+  const expectedVersion = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8")).version;
+  const started = spawnSync(process.execPath, [join(globalRoot, "dist", "bin.js"), "--version"], {
+    cwd: sandbox,
+    env: { ...process.env, BUBBLE_HOME: join(sandbox, "home") },
+    encoding: "utf8",
+  });
+  if (started.status !== 0 || !started.stdout.includes(expectedVersion)) {
+    process.stderr.write(started.stdout ?? "");
+    process.stderr.write(started.stderr ?? "");
+    throw new Error(`globally installed bubble did not start (exit code ${started.status})`);
+  }
+  process.stdout.write(`Globally installed Bubble started and reported ${expectedVersion}.\n`);
 } finally {
   await rm(sandbox, { recursive: true, force: true });
 }
