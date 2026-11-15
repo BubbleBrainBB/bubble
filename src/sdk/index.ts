@@ -156,6 +156,11 @@ export interface RunTurnOptions extends TurnHandlers {
    */
   appendSystemPrompt?: string;
   /**
+   * What the built system prompt calls the agent ("You are …"). A host with
+   * several agents names each one; "Bubble" when absent.
+   */
+  agentName?: string;
+  /**
    * Replaces the built system prompt, for a host whose agent has a role of its
    * own (a coordinator that hands work out and never touches files, say).
    * appendSystemPrompt still applies after it.
@@ -826,7 +831,7 @@ export class BubbleSdk {
       const memoryPrompt = options.systemPrompt === undefined ? buildMemoryPrompt(cwd) : undefined;
       const skills = tools.some((tool) => tool.name === "skill") ? skillRegistry.summaries() : [];
       const builtSystemPrompt = options.systemPrompt ?? buildSystemPrompt({
-        agentName: "Bubble",
+        agentName: options.agentName?.trim() || "Bubble",
         skills,
         skillCatalogChars: this.userConfig.getSkillCatalogChars(),
         configuredProvider: providerId || "none",

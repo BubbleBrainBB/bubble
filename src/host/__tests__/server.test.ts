@@ -240,6 +240,16 @@ describe("bubble host", () => {
     expect(system?.content).toBe("You coordinate tasks.");
   });
 
+  it("calls the agent by the name the app gives it", async () => {
+    const { provider, seen } = scripted([{ text: "On it." }]);
+    start(provider);
+    const session = await app.call("session/create", { cwd: project });
+    await app.call("turn/start", { sessionId: session.id, prompt: "hello", agentName: "Docs" });
+    expect(await app.terminal(session.id)).toEqual({ kind: "completed" });
+    const system = String(seen[0].messages.find((m) => m.role === "system")?.content ?? "");
+    expect(system.startsWith("You are Docs,")).toBe(true);
+  });
+
   it("continues a session a later process opens by id", async () => {
     const first = scripted([{ text: "First answer." }]);
     start(first.provider);
