@@ -18,7 +18,7 @@
  *   turn/steer        { sessionId, content }               -> { accepted, disposition, reason? }
  *   turn/stop         { sessionId, cancelQueued? }         -> { stopped }
  *   models/list       { refresh? }                         -> ModelsResult
- *   skills/list       { cwd?, skillPaths? }                -> { skills }
+ *   skills/list       { cwd?, skillPaths? }                -> { skills, problems }
  *   mcp/status        { cwd? }                             -> { servers }
  *   mcp/reconnect     { cwd?, name }                       -> { server }
  *   auth/list         {}                                   -> { accounts }
@@ -114,6 +114,22 @@ export interface ModelsResult {
   defaultModel: string;
   defaultThinkingLevel?: ThinkingLevel;
   providers: HostProvider[];
+}
+
+export interface HostSkill {
+  name: string;
+  description: string;
+  source: "user" | "project" | "configured";
+  /** The skills folder it was found in. */
+  folder: string;
+  /** Loaded only when the person names it; the model is not told about it. */
+  manualOnly: boolean;
+  enabled: boolean;
+}
+
+export interface HostSkillProblem {
+  message: string;
+  file?: string;
 }
 
 export interface HostAccount {
