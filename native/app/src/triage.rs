@@ -135,8 +135,15 @@ fn describe(event: &Event) -> String {
     let by = p["author"].as_str().map(|author| format!(" by @{author}")).unwrap_or_default();
     // Asked of the person by name: an assignment, a review request.
     let pressing = if p["priority"] == "first" { " | asked of the person by name" } else { "" };
+    // An issue asks for something and a pull request is there to be looked
+    // at: which it is decides what the work is, and how it is read.
+    let what = match p["kind"].as_str() {
+        Some("github_pr") => "pull request ",
+        Some("github_issue") => "issue ",
+        _ => "",
+    };
     format!(
-        "{} | {}{by} in {} #{} | \"{}\"{pressing}",
+        "{} | {}{by} in {} {what}#{} | \"{}\"{pressing}",
         event.id,
         event.kind,
         event.repo.as_deref().unwrap_or("?"),
@@ -380,6 +387,25 @@ pub fn maybe_run(app: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_item_says_whether_it_is_an_issue_or_a_pull_request() {
+        let event = |kind: &str| Event {
+            id: "evt_1".into(),
+            source: "github".into(),
+            dedupe_key: "k".into(),
+            kind: "opened".into(),
+            repo: Some("o/r".into()),
+            number: Some(26),
+            actor: Some("erin".into()),
+            payload: json!({ "title": "Fix typo in README", "author": "erin", "kind": kind }).to_string(),
+            task_id: None,
+            disposition: "untriaged".into(),
+            created_at: 0,
+        };
+        assert_eq!(describe(&event("github_pr")), "evt_1 | opened by @erin in o/r pull request #26 | \"Fix typo in README\"");
+        assert_eq!(describe(&event("github_issue")), "evt_1 | opened by @erin in o/r issue #26 | \"Fix typo in README\"");
+    }
 
     #[test]
     fn each_step_of_sorting_has_a_few_words() {

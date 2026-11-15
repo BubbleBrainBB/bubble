@@ -326,13 +326,16 @@ pub fn review_enabled() -> bool {
 /// What the review is asked: the notes there are, and the exchange.
 #[cfg(test)]
 pub fn review_prompt(notes: &[String], said: &str, answered: &str) -> String {
-    review_prompt_in(notes, None, said, answered)
+    review_prompt_in(notes, None, &[], said, answered)
 }
 
 /// `review_prompt`, for an assistant working in a project whose own notes
 /// are `project`: what is about the project is kept apart from what is
 /// about the person.
-pub fn review_prompt_in(notes: &[String], project: Option<&[String]>, said: &str, answered: &str) -> String {
+///
+/// `team` is what every bot reads already: the assistant may have saved
+/// something there during the exchange, and it is not to be kept twice.
+pub fn review_prompt_in(notes: &[String], project: Option<&[String]>, team: &[String], said: &str, answered: &str) -> String {
     let notes = if notes.is_empty() { "(none)".to_owned() } else { listed(notes) };
     let (about, shape) = match project {
         Some(about) => (
@@ -344,6 +347,11 @@ pub fn review_prompt_in(notes: &[String], project: Option<&[String]>, said: &str
             "{\"add\": [\"a new note about the person\"], \"project\": [\"a new note about the project\"], \"remove\": [\"the exact text of a note that is now wrong\"]}",
         ),
         None => (String::new(), "{\"add\": [\"a new note\"], \"remove\": [\"the exact text of a note that is now wrong\"]}"),
+    };
+    let about = if team.is_empty() {
+        about
+    } else {
+        format!("{about}\n\nNotes every assistant of the person reads, kept already (do not add what one of them says):\n{}", listed(team))
     };
     let cut = |text: &str, limit: usize| text.chars().take(limit).collect::<String>();
     format!(
@@ -398,7 +406,7 @@ pub fn review(app: AppState, bot_id: String, said: String, answered: String, mod
     let about = app.bot_project(&bot_id).map(Scope::Project);
     let scope = Scope::Bot(bot_id);
     let project_notes = about.as_ref().map(entries);
-    let prompt = review_prompt_in(&entries(&scope), project_notes.as_deref(), &said, &answered);
+    let prompt = review_prompt_in(&entries(&scope), project_notes.as_deref(), &entries(&Scope::Team), &said, &answered);
     let hosts = app.hosts.get();
     spawn(async move {
         let answer = background(async move { hosts.get().await?.complete(&prompt, model.as_deref()).await }).await;
@@ -411,7 +419,13 @@ pub fn review(app: AppState, bot_id: String, said: String, answered: String, mod
                 changed |= forget(about, text).is_ok_and(|gone| gone > 0);
             }
         }
-        for text in &add {
+        // What the bot saved for everyone during the turn is kept once.
+        let team = entries(&Scope::Team);
+        let shared = |text: &str| {
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            team.iter().any(|kept| kept.eq_ignore_ascii_case(&text))
+        };
+        for text in add.iter().filter(|text| !shared(text)) {
             changed |= remember(&scope, text).unwrap_or(false);
         }
         if let Some(about) = &about {
@@ -558,7 +572,10 @@ mod tests {
 
     #[test]
     fn a_review_in_a_project_keeps_what_is_about_the_project_apart() {
-        let prompt = review_prompt_in(&[], Some(&["Tests run with cargo test".into()]), "This repo uses pnpm", "Noted.");
+        let prompt = review_prompt_in(&[], Some(&["Tests run with cargo test".into()]), &[], "This repo uses pnpm", "Noted.");
+        assert!(!prompt.contains("kept already"), "no team notes, nothing said of them");
+        let with_team = review_prompt_in(&[], None, &["Two-space indentation".into()], "I indent with two spaces", "Noted.");
+        assert!(with_team.contains("kept already") && with_team.contains("- Two-space indentation"));
         assert!(prompt.contains("- Tests run with cargo test") && prompt.contains("\"project\""));
         assert_eq!(parse_project_notes("{\"add\": [], \"project\": [\"Uses pnpm\", \" \"], \"remove\": []}"), ["Uses pnpm"]);
         assert!(parse_project_notes("{\"add\": [\"Prefers tabs\"]}").is_empty());

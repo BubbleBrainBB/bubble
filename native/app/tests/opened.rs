@@ -24,7 +24,7 @@ fn events(body: &str) -> String {
         let listing = last["content"].as_str().unwrap_or_default();
         // Only the person's issue is to decide, and it says who opened it.
         let lines: Vec<&str> = listing.lines().filter(|l| l.starts_with("evt_")).collect();
-        if lines.len() != 1 || !lines[0].contains("opened by @alice in acme/demo #12") {
+        if lines.len() != 1 || !lines[0].contains("opened by @alice in acme/demo issue #12") {
             return say(&format!("Unexpected listing: {listing}"));
         }
         let id = lines[0].split(" | ").next().unwrap_or_default();

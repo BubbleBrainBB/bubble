@@ -40,7 +40,7 @@ fn model_server() -> String {
                 let request: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
                 let listing = request["messages"].as_array().and_then(|m| m.last()).and_then(|m| m["content"].as_str()).unwrap_or_default().to_owned();
                 let line = listing.lines().find(|l| l.starts_with("evt_")).unwrap_or_default();
-                if !line.contains("assign in acme/demo #7") || !line.ends_with("asked of the person by name") {
+                if !line.contains("assign in acme/demo issue #7") || !line.ends_with("asked of the person by name") {
                     text_events(&format!("Unexpected listing: {listing}"))
                 } else {
                     let arguments = serde_json::json!({
