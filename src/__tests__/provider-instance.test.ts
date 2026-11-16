@@ -220,6 +220,68 @@ describe("createProviderInstance", () => {
     expect(body.tool_choice).toBe("none");
   });
 
+  describe("GLM tool-call streaming", () => {
+    const writeTool: ToolDefinition = {
+      name: "write",
+      description: "Write a file",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" }, content: { type: "string" } },
+        required: ["path", "content"],
+      },
+    };
+
+    async function requestBody(
+      provider: { providerId: string; baseURL: string },
+      model: string,
+      tools?: ToolDefinition[],
+    ): Promise<any> {
+      let body: any;
+      createMock.mockImplementation(async (input) => {
+        body = input;
+        return fromArray([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }]);
+      });
+      const { createProviderInstance } = await import("../provider.js");
+      const instance = createProviderInstance({ ...provider, apiKey: "sk-test" });
+      await collect(instance.streamChat([{ role: "user", content: "hi" }], { model, tools }));
+      return body;
+    }
+
+    // GLM sends a tool call whole unless asked: without the flag a file being
+    // written shows nothing until it is finished.
+    it.each([
+      ["zhipuai-coding-plan", "https://open.bigmodel.cn/api/coding/paas/v4", "glm-5.3"],
+      ["zhipuai-coding-plan", "https://open.bigmodel.cn/api/coding/paas/v4", "glm-4.7"],
+      ["zhipuai", "https://open.bigmodel.cn/api/paas/v4", "glm-5.2"],
+      ["zai", "https://api.z.ai/api/paas/v4", "glm-5.1"],
+      ["zai-coding-plan", "https://api.z.ai/api/coding/paas/v4", "glm-5-turbo"],
+    ])("asks %s (%s) %s to stream tool calls", async (providerId, baseURL, model) => {
+      const body = await requestBody({ providerId, baseURL }, model, [writeTool]);
+
+      expect(body.tool_stream).toBe(true);
+      expect(body.stream).toBe(true);
+    });
+
+    it("leaves the flag out of a request that carries no tools", async () => {
+      const body = await requestBody(
+        { providerId: "zhipuai-coding-plan", baseURL: "https://open.bigmodel.cn/api/coding/paas/v4" },
+        "glm-5.3",
+      );
+
+      expect(body).not.toHaveProperty("tool_stream");
+    });
+
+    it("does not send the flag to other providers", async () => {
+      const body = await requestBody(
+        { providerId: "deepseek", baseURL: "https://api.deepseek.com" },
+        "deepseek-v4-pro",
+        [writeTool],
+      );
+
+      expect(body).not.toHaveProperty("tool_stream");
+    });
+  });
+
   it("uses Fireworks Kimi request defaults", async () => {
     let body: any;
     createMock.mockImplementation(async (input) => {

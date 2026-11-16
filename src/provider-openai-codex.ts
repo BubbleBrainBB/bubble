@@ -11,6 +11,7 @@ import {
   getProviderMaxRetries,
   isRetryableHttpStatus,
   ProviderStreamInterruptedError,
+  retryLimitFor,
   sleepBeforeRetry,
 } from "./network/retry.js";
 
@@ -735,7 +736,7 @@ function shouldRetryCodexTransportError(input: {
 }): boolean {
   if (input.signal?.aborted) return false;
   if (input.sawParsedSseEvent) return false;
-  if (input.attempt >= getProviderMaxRetries()) return false;
+  if (input.attempt >= retryLimitFor(input.error, getProviderMaxRetries())) return false;
   return isTransientCodexTransportError(input.error) || isRetryableCodexHttpError(input.error);
 }
 

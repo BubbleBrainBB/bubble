@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { delimiter } from "node:path";
-import { rootCertificates } from "node:tls";
-import { Agent, ProxyAgent, type Dispatcher } from "undici";
+import type { Dispatcher } from "undici";
+import { providerDispatcher } from "./provider-dispatcher.js";
+import { resolveIdleTimeoutMs } from "./request-timeout.js";
 import { getSystemProxyForUrl } from "./system-proxy.js";
 
 export type ChatGptFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -48,20 +49,12 @@ export function createChatGptFetch(options: ChatGptFetchOptions = {}): ChatGptFe
 export function createChatGptDispatcher(
   env: NodeJS.ProcessEnv = process.env,
   input?: RequestInfo | URL,
-): Dispatcher | undefined {
-  const ca = loadExtraCaCertificates(env);
-  const proxy = input ? nodeProxyForUrl(input, env) : defaultNodeProxy(env);
-  if (!proxy && ca.length === 0) return undefined;
-  const caOptions = ca.length > 0 ? { ca: [...rootCertificates, ...ca] } : undefined;
-
-  if (proxy) {
-    return new ProxyAgent({
-      uri: proxy,
-      ...(caOptions ? { requestTls: caOptions, proxyTls: caOptions } : {}),
-    });
-  }
-
-  return caOptions ? new Agent({ connect: caOptions }) : undefined;
+): Dispatcher {
+  return providerDispatcher({
+    proxy: input ? nodeProxyForUrl(input, env) : defaultNodeProxy(env),
+    ca: loadExtraCaCertificates(env),
+    idleTimeoutMs: resolveIdleTimeoutMs(env),
+  });
 }
 
 export function withChatGptNetworkOptions(
@@ -70,10 +63,7 @@ export function withChatGptNetworkOptions(
   env: NodeJS.ProcessEnv = process.env,
   dispatcher = createChatGptDispatcher(env, input),
 ): RequestInitWithDispatcher {
-  const next = { ...(init ?? {}) } as RequestInitWithDispatcher;
-
-  if (dispatcher) next.dispatcher = dispatcher;
-  return next;
+  return { ...(init ?? {}), dispatcher } as RequestInitWithDispatcher;
 }
 
 export function normalizeChatGptNetworkError(error: unknown, env: NodeJS.ProcessEnv = process.env): Error {
@@ -196,6 +186,7 @@ function networkEnvSignature(env: NodeJS.ProcessEnv): string {
     env.no_proxy,
     env.NODE_EXTRA_CA_CERTS,
     env.BUBBLE_EXTRA_CA_CERTS,
+    env.BUBBLE_PROVIDER_REQUEST_TIMEOUT_MS,
     // Invalidate the cached fetch when the user toggles the OS proxy
     // (e.g. turning Clash system proxy on/off mid-session).
     getSystemProxyForUrl(new URL("https://chatgpt.com/"), env),

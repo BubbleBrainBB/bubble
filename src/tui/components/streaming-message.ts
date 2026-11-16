@@ -436,7 +436,12 @@ export class StreamingMessageComponent extends VStack {
           : this.tail.reasoning
             ? "working through the request"
             : idlePhrase;
-      const streamedChars = this.tail.content.length + this.tail.reasoning.length;
+      // Everything the model has sent this turn. A file being written arrives
+      // as tool-call arguments, so leaving those out freezes the count for as
+      // long as the write takes.
+      const streamedChars = this.tail.content.length
+        + this.tail.reasoning.length
+        + this.tail.tools.reduce((total, tool) => total + (tool.rawArguments?.length ?? 0), 0);
       const tokenText = streamedChars > 0 ? ` (↓${approximateTokenLabel(streamedChars)} tok)` : "";
       text = `${phrase}${tokenText}`;
     } else if (this.commandActivity) {

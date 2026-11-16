@@ -16,6 +16,16 @@ const MAX_RETRY_AFTER_MS = 60_000;
 
 export const MAX_STREAM_INTERRUPTION_RETRIES = 10;
 
+/**
+ * A reply cut by the idle limit gets one more try, for the case where the
+ * connection stalled. A model that is simply working past the limit hits it
+ * again on every identical request, so each further retry only adds one more
+ * full wait before the person hears about it.
+ */
+const MAX_IDLE_TIMEOUT_RETRIES = 1;
+
+const IDLE_TIMEOUT_CODES = new Set(["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
+
 const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504, 529]);
 
 export class ProviderStreamInterruptedError extends Error {
@@ -38,8 +48,28 @@ export function isProviderStreamInterruption(error: unknown): error is ProviderS
 }
 
 export function providerStreamRetryLimit(error: ProviderStreamInterruptedError): number {
-  if (error.maxRetries === undefined) return MAX_STREAM_INTERRUPTION_RETRIES;
+  if (error.maxRetries === undefined) return retryLimitFor(error, MAX_STREAM_INTERRUPTION_RETRIES);
   return Math.max(0, Math.min(MAX_CONFIGURABLE_RETRIES, Math.floor(error.maxRetries)));
+}
+
+/**
+ * True when the provider stayed silent past the idle limit: no response
+ * headers, or no further piece of a body, in time. The transport reports it
+ * as a coded error somewhere under whatever wrapped it.
+ */
+export function isResponseIdleTimeout(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; current && typeof current === "object" && depth < 8; depth++) {
+    const { code, cause } = current as { code?: unknown; cause?: unknown };
+    if (typeof code === "string" && IDLE_TIMEOUT_CODES.has(code)) return true;
+    current = cause;
+  }
+  return false;
+}
+
+/** How many times a failed request may be re-issued, given a budget of `maxRetries`. */
+export function retryLimitFor(error: unknown, maxRetries: number): number {
+  return isResponseIdleTimeout(error) ? Math.min(maxRetries, MAX_IDLE_TIMEOUT_RETRIES) : maxRetries;
 }
 
 export function getProviderMaxRetries(env: NodeJS.ProcessEnv = process.env): number {
