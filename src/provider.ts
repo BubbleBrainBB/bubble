@@ -305,6 +305,10 @@ function buildProviderInstance(options: ProviderInstanceOptions): Provider {
       body.parallel_tool_calls = requestConfig.parallelToolCalls;
     }
 
+    if (tools && tools.length > 0 && requestConfig.toolStream) {
+      body.tool_stream = true;
+    }
+
     if (requestConfig.maxTokens !== undefined) {
       body.max_tokens = requestConfig.maxTokens;
     }

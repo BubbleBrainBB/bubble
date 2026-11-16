@@ -8,6 +8,12 @@ export interface ProviderRequestConfig {
   reasoningEffort?: ThinkingLevel;
   reasoningContentEcho?: "tool_calls" | "all" | "none" | "minimax";
   parallelToolCalls?: boolean;
+  /**
+   * Ask for tool-call arguments as they are written (`tool_stream`). Without
+   * it the provider holds a tool call back until it is complete, so a file
+   * being written shows nothing until it is done.
+   */
+  toolStream?: boolean;
   maxTokens?: number;
   extraBody?: Record<string, unknown>;
   omitTemperature?: boolean;
@@ -250,9 +256,14 @@ export function resolveProviderRequestConfig(
     // low/high/max. The catalog clamps 5.3 choices before this serialization
     // boundary. The effort field rides inside the body alongside `thinking`,
     // so it goes in extraBody, not the OpenRouter-style config field.
+    //
+    // GLM streams text and reasoning by default but sends each tool call
+    // whole unless `tool_stream` is set. Models that cannot stream tool calls
+    // accept the flag and answer as before (checked live on glm-4-plus).
     if (modelId === "glm-5.2" || modelId === "glm-5.3" || modelId === "glm-5.3-flash") {
       return {
         effectiveThinkingLevel,
+        toolStream: true,
         extraBody: modelId === "glm-5.2" && effectiveThinkingLevel === "off"
           ? { thinking: { type: "disabled" } }
           : {
@@ -263,6 +274,7 @@ export function resolveProviderRequestConfig(
     }
     return {
       effectiveThinkingLevel,
+      toolStream: true,
       extraBody: effectiveThinkingLevel === "off"
         ? undefined
         : {
