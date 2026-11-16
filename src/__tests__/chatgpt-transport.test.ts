@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Agent, ProxyAgent } from "undici";
 import {
   createChatGptDispatcher,
   createChatGptFetch,
@@ -25,9 +26,10 @@ describe("chatgpt transport", () => {
     vi.restoreAllMocks();
   });
 
-  it("does not attach an undici dispatcher without proxy or custom CA env", async () => {
+  it("connects directly without proxy or custom CA env", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeUndefined();
+      // Still a dispatcher of ours: Node's default one cuts a silent reply at 300 seconds.
+      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeInstanceOf(Agent);
       return new Response("ok");
     });
     const fetch = createChatGptFetch({ fetch: fetchMock, env: {} });
@@ -38,7 +40,7 @@ describe("chatgpt transport", () => {
 
   it("attaches an undici dispatcher when proxy env is configured", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeTruthy();
+      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeInstanceOf(ProxyAgent);
       return new Response("ok");
     });
     const fetch = createChatGptFetch({
@@ -56,7 +58,7 @@ describe("chatgpt transport", () => {
   it("falls back to the macOS system proxy when no proxy env is set", async () => {
     getSystemProxyForUrlMock.mockReturnValue("http://127.0.0.1:7897");
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeTruthy();
+      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeInstanceOf(ProxyAgent);
       return new Response("ok");
     });
     const fetch = createChatGptFetch({ fetch: fetchMock, env: {} });

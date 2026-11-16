@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { OAuthTokens } from "./types.js";
-import { withOAuthRefreshTimeout } from "./refresh-control.js";
+import { OAUTH_REFRESH_TIMEOUT_MS, withOAuthRefreshTimeout } from "./refresh-control.js";
 import { chatGptFetch, type ChatGptFetch } from "../network/chatgpt-transport.js";
 
 // Public OAuth client registered for the official Grok CLI ("Grok Build").
@@ -226,6 +226,8 @@ export async function loginGrok(
       client_id: CLIENT_ID,
       code_verifier: pkce.codeVerifier,
     }),
+    // The transport waits as long as a model may think; a token endpoint gets no such patience.
+    signal: AbortSignal.timeout(OAUTH_REFRESH_TIMEOUT_MS),
   });
 
   if (!response.ok) {

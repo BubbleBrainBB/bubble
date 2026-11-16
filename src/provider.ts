@@ -20,6 +20,7 @@ import { getChatGptFetch } from "./network/chatgpt-transport.js";
 import { createProviderFetch, type ProviderFetch } from "./network/provider-transport.js";
 import { withChatStreamCompletionCheck } from "./network/chat-stream-completion.js";
 import { createPlainProviderFetch } from "./network/plain-provider-fetch.js";
+import { resolveCompletionDeadlineMs, resolveIdleTimeoutMs, resolveRequestTimeoutMs } from "./network/request-timeout.js";
 import { chatRequestShape, isSpaceBunnyUpstreamRejection, recoverableSpaceBunnyError } from "./provider-zen-errors.js";
 import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
@@ -34,6 +35,8 @@ import { computeRetryDelayMs, isRetryableHttpStatus, ProviderStreamInterruptedEr
 import type { ProviderProtocol } from "./model-catalog.js";
 import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolChoiceMode, ToolDefinition } from "./types.js";
 import { assertProviderModelAllowed } from "./provider-model-policy.js";
+
+export { MAX_TIMER_MS, resolveRequestTimeoutMs } from "./network/request-timeout.js";
 
 // Diagnostic logger for tool-args byte-loss investigation. Activate with
 //   BUBBLE_DEBUG_TOOL_ARGS=/path/to/log.jsonl   (any writable path)
@@ -139,6 +142,51 @@ export function createUnavailableProvider(message: string): Provider {
 }
 
 export function createProviderInstance(options: ProviderInstanceOptions): Provider {
+  return withCompletionDeadline(buildProviderInstance(options));
+}
+
+/**
+ * Bound `complete` for every provider in one place, so none can be left
+ * waiting on a connection that has gone quiet.
+ *
+ * A caller that passes its own signal owns the wait, as a streamed reply's
+ * does: someone is watching and can stop it. A caller that passes none
+ * (titles, memory) cannot, so the call gets a deadline on its whole length.
+ * The deadline aborts the request, and releases the caller even if a
+ * transport ignores the abort.
+ */
+export function withCompletionDeadline(provider: Provider): Provider {
+  return {
+    streamChat: (messages, chatOptions) => provider.streamChat(messages, chatOptions),
+    complete: async (messages, chatOptions) => {
+      if (chatOptions?.abortSignal) return provider.complete(messages, chatOptions);
+
+      const deadlineMs = resolveCompletionDeadlineMs();
+      const deadline = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error(
+            `Provider request timed out: no complete reply after ${Math.round(deadlineMs / 1000)}s.`,
+          );
+          error.name = "TimeoutError";
+          reject(error);
+          deadline.abort(error);
+        }, deadlineMs);
+      });
+      const request = provider.complete(messages, { ...chatOptions, abortSignal: deadline.signal });
+      // Once the deadline has answered, the aborted request's own rejection has no listener.
+      request.catch(() => {});
+      try {
+        return await Promise.race([request, expired]);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+
+function buildProviderInstance(options: ProviderInstanceOptions): Provider {
   const protocol = resolveProviderProtocol(options);
   if (protocol === "anthropic-messages") {
     return createAnthropicMessagesProvider(options);
@@ -154,7 +202,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       // by model at send time: Space Bunny rejects /responses with 400
       // ModelProtocolUnsupported and uses /chat/completions instead.
       const responses = createOpenAIResponsesProvider(options);
-      const chat = createProviderInstance({ ...options, protocol: "openai-chat" });
+      const chat = buildProviderInstance({ ...options, protocol: "openai-chat" });
       const forModel = (model?: string) => model === "space-bunny-free" ? chat : responses;
       return {
         streamChat: (messages, chatOptions) => forModel(chatOptions.model).streamChat(messages, chatOptions),
@@ -200,7 +248,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       // No limit on how long the model may stay silent unless the person
       // set a request timeout: Node's fetch would otherwise cut a reply
       // after 300 seconds without a byte.
-      : createPlainProviderFetch({ idleTimeoutMs: requestTimeoutMs >= MAX_TIMER_MS ? 0 : requestTimeoutMs });
+      : createPlainProviderFetch({ idleTimeoutMs: resolveIdleTimeoutMs() });
   const client = new OpenAI({
     apiKey: options.apiKey,
     baseURL: options.baseURL,
@@ -255,6 +303,10 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
     if (tools && tools.length > 0 && requestConfig.parallelToolCalls !== undefined) {
       body.parallel_tool_calls = requestConfig.parallelToolCalls;
+    }
+
+    if (tools && tools.length > 0 && requestConfig.toolStream) {
+      body.tool_stream = true;
     }
 
     if (requestConfig.maxTokens !== undefined) {
@@ -999,35 +1051,6 @@ function mergeToolArgumentDelta(current: string, incoming: string, mode: ToolArg
 
   debugToolArgs({ stage: "merge", branch: mode === "delta" ? "delta-append" : "snapshot-fallback-concat", current, incoming, args: current + incoming, delta: incoming });
   return { args: current + incoming, delta: incoming };
-}
-
-function parsePositiveInt(raw: string | undefined): number | undefined {
-  if (!raw?.trim()) return undefined;
-  const value = Number(raw);
-  return Number.isInteger(value) && value > 0 ? value : undefined;
-}
-
-/**
- * Largest value that survives the OpenAI SDK's internal `timeout + 1000`
- * agent-grace (core.js minAgentTimeout) without overflowing Node's 32-bit
- * timers; ~24.8 days.
- */
-export const MAX_TIMER_MS = 2_147_482_647; // 2**31 - 1 - 1000
-
-/**
- * Resolve the provider request timeout (ms) from the operator override.
- *
- * Default is effectively NO TIMEOUT — safe for streaming APIs where the model
- * sends chunks continuously. But Node's timers are 32-bit: a duration above
- * 2**31-1 ms overflows, which makes Node print a TimeoutOverflowWarning to
- * stderr (corrupting the Ink TUI) AND silently clamp the timeout to 1ms,
- * aborting the request almost immediately. So we use the largest SAFE timer
- * value as the "no timeout" sentinel — never Number.MAX_SAFE_INTEGER — and
- * clamp any operator-supplied value into range too.
- */
-export function resolveRequestTimeoutMs(raw: string | undefined): number {
-  const requested = parsePositiveInt(raw);
-  return Math.min(requested ?? MAX_TIMER_MS, MAX_TIMER_MS);
 }
 
 function mergeStreamingText(current: string, incoming: string, mode: ToolArgsMergeMode): { args: string; delta: string } {

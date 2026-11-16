@@ -77,6 +77,26 @@ describe("pi-tui working trace parity", () => {
     expect(rows.indexOf("┃  ◆ Thinking…")).toBeLessThan(rows.findIndex((row) => row.includes("working through the request")));
   });
 
+  it("counts a file being written toward the received tokens", () => {
+    const component = new StreamingMessageComponent();
+    const write = (rawArguments: string) => {
+      const tool = { id: "w1", name: "write", args: { path: "engine.cpp" }, status: "pending" as const, rawArguments };
+      component.update({
+        content: "",
+        reasoning: "x".repeat(400),
+        tools: [tool],
+        parts: [{ type: "tools", toolCalls: [tool] }],
+        phase: "working",
+      }, 80);
+      return rendered(component).at(-1);
+    };
+
+    // 400 chars of reasoning, then the tool call's arguments as they stream in.
+    expect(write("")).toContain("writing changes (↓100 tok)");
+    expect(write("y".repeat(4_000))).toContain("writing changes (↓1.1k tok)");
+    expect(write("y".repeat(40_000))).toContain("writing changes (↓10k tok)");
+  });
+
   it("keeps the status cadence while Grok entries render above it", () => {
     const component = new StreamingMessageComponent();
 
