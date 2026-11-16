@@ -34,6 +34,8 @@ pub const TASK_MODEL: &str = "task_model";
 pub const MAX_RUNS: &str = "max_concurrent_runs";
 pub const DEFAULT_MAX_RUNS: u32 = 4;
 pub const THINKING: &str = "thinking_level";
+/// How hard the main bot thinks when it sorts what came in from GitHub.
+pub const SORTING_THINKING: &str = "sorting_thinking_level";
 /// "system", "light" or "dark".
 pub const APPEARANCE: &str = "appearance";
 /// The bot whose conversation was open when the app closed.
@@ -205,6 +207,10 @@ pub struct AppState {
     pub max_runs: Signal<u32>,
     /// How hard models think (config.json `defaultThinkingLevel`).
     pub thinking: Signal<ThinkingLevel>,
+    /// How hard the main bot thinks when it sorts what came in. Low unless
+    /// the person says otherwise: it decides from titles, in the background,
+    /// and work waits on it.
+    pub sorting_thinking: Signal<ThinkingLevel>,
     /// The models a person can pick: the default and the recent ones that
     /// resolve against config.json.
     pub models: Signal<Vec<String>>,
@@ -255,6 +261,7 @@ impl AppState {
                     .and_then(ThinkingLevel::parse)
                     .unwrap_or(ThinkingLevel::High),
             ),
+            sorting_thinking: signal(setting(SORTING_THINKING).as_deref().and_then(ThinkingLevel::parse).unwrap_or(ThinkingLevel::Low)),
             accounts: signal(Vec::new()),
             hosts: stored(Arc::new(Hosts::default())),
             catalog: signal(Arc::new(Catalog::default())),
@@ -488,6 +495,11 @@ impl AppState {
     pub fn set_thinking(&self, level: ThinkingLevel) {
         self.with_store(|s| s.set_setting(THINKING, Some(level.as_str())));
         self.thinking.set(level);
+    }
+
+    pub fn set_sorting_thinking(&self, level: ThinkingLevel) {
+        self.with_store(|s| s.set_setting(SORTING_THINKING, Some(level.as_str())));
+        self.sorting_thinking.set(level);
     }
 
     pub fn set_appearance(&self, appearance: nsh_core::platform::Appearance) {

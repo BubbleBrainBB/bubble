@@ -557,6 +557,20 @@ fn models(app: AppState) -> View {
             LEVELS.iter().map(|(name, level)| Choice::new(*name, *level == now, move || app.set_thinking(*level)).label(format!("Reasoning {name}"))).collect()
         },
     );
+    let sorting = dropdown(
+        "Sorting reasoning",
+        move || {
+            let now = app.sorting_thinking.get();
+            LEVELS.iter().find(|(_, level)| *level == now).map(|(name, _)| *name).unwrap_or("Max").to_owned()
+        },
+        move || {
+            let now = app.sorting_thinking.get();
+            LEVELS
+                .iter()
+                .map(|(name, level)| Choice::new(*name, *level == now, move || app.set_sorting_thinking(*level)).label(format!("Sorting reasoning {name}")))
+                .collect()
+        },
+    );
     let providers: Vec<String> = app.config.with(|config| config.providers.iter().filter(|p| p.enabled).map(|p| p.id.clone()).collect());
     let providers = match providers.as_slice() {
         [] => "None yet; add one in config.json".to_owned(),
@@ -572,7 +586,11 @@ fn models(app: AppState) -> View {
                         .child(model_dropdown(app, RunRole::Manager, "Main bot's model", app.manager_model)),
                 )
                 .child(row("Bots' model", note("Used by every bot unless you give one its own")).child(model_dropdown(app, RunRole::Task, "Bots' model", app.task_model)))
-                .child(row("Reasoning", note("How hard models think; each uses the nearest level it offers")).child(reasoning)),
+                .child(row("Reasoning", note("How hard models think; each uses the nearest level it offers")).child(reasoning))
+                .child(
+                    row("Reasoning when sorting", note("How hard the main bot thinks about what comes in from GitHub; lower sorts sooner"))
+                        .child(sorting),
+                ),
         ))
         .child(group(
             "Subscriptions",

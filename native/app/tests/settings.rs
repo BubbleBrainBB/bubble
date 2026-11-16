@@ -57,6 +57,11 @@ fn settings_is_a_dialog_with_one_access_for_every_bot_and_rules_kept_in_the_agen
         app.press("label:Reasoning").unwrap();
         app.press("label:Reasoning Low").unwrap();
         app.wait_for("text:Low").unwrap();
+        // Sorting what comes in has a level of its own, low until changed.
+        app.wait_for("text:Reasoning when sorting").unwrap();
+        app.press("label:Sorting reasoning").unwrap();
+        app.press("label:Sorting reasoning Medium").unwrap();
+        app.wait_for("text:Medium").unwrap();
 
         // Permissions: one choice, for every bot.
         app.press("id:settings-permissions").unwrap();
@@ -111,6 +116,9 @@ fn settings_is_a_dialog_with_one_access_for_every_bot_and_rules_kept_in_the_agen
     // The access chosen is kept.
     let store = Store::open(home.join("native/bubble.db")).unwrap();
     assert_eq!(store.setting("access").unwrap().as_deref(), Some("full"));
+    // So are the two reasoning levels, each on its own.
+    assert_eq!(store.setting("thinking_level").unwrap().as_deref(), Some("low"));
+    assert_eq!(store.setting("sorting_thinking_level").unwrap().as_deref(), Some("medium"));
     drop(store);
     let mut app = Headless::start(EngineConfig::new(Root::of::<bubble_app::App>())).unwrap();
     app.wait_for_within("What should we work on?", long).unwrap();

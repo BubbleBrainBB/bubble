@@ -340,9 +340,9 @@ pub fn maybe_run(app: AppState) {
         text: message,
         pictures: Vec::new(),
         model: reference,
-        // As the main bot thinks in conversation: sorting is the main bot's
-        // work too, and the person set one level for it.
-        thinking: app.thinking.get_untracked().as_str().to_owned(),
+        // The main bot's model, at the level Settings keeps for sorting
+        // (low unless the person changed it): work waits on this turn.
+        thinking: app.sorting_thinking.get_untracked().as_str().to_owned(),
         agent_name: None,
         append_system_prompt: None,
         system_prompt: Some(PROMPT.to_owned()),
