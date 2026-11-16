@@ -9,6 +9,7 @@ import {
   isRetryableHttpStatus,
   ProviderStreamInterruptedError,
   retryAfterMsFromResponse,
+  retryLimitFor,
   sleepBeforeRetry,
 } from "./network/retry.js";
 import type { ContentPart, Provider, ProviderMessage, ProviderRawContentBlock, StreamChunk, ThinkingLevel, ToolChoiceMode, ToolDefinition, TokenUsage } from "./types.js";
@@ -742,7 +743,7 @@ async function* streamAnthropicEventsWithRetry(
         }
         throw normalized;
       }
-      if (request.signal?.aborted || attempt >= maxRetries || !isProviderTransportError(error)) {
+      if (request.signal?.aborted || attempt >= retryLimitFor(error, maxRetries) || !isProviderTransportError(error)) {
         throw normalized;
       }
       await sleepBeforeRetry(computeRetryDelayMs(attempt + 1), request.signal);
@@ -779,7 +780,7 @@ async function fetchAnthropicResponseWithRetry(
       });
     } catch (error) {
       // No response received, so the request is safe to re-issue.
-      if (request.signal?.aborted || attempt >= maxRetries || !isProviderTransportError(error)) {
+      if (request.signal?.aborted || attempt >= retryLimitFor(error, maxRetries) || !isProviderTransportError(error)) {
         throw normalizeAnthropicTransportError(error, request.url);
       }
       await sleepBeforeRetry(computeRetryDelayMs(attempt + 1), request.signal);

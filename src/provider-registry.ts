@@ -176,6 +176,8 @@ const MODEL_DISCOVERY_DISK_TTL_MS = 24 * 60 * 60 * 1000;
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 // Per request: the ChatGPT backend is often reached through a user proxy.
 const OPENAI_CODEX_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
+// Google's list is one large page, and is likewise often behind a user proxy.
+const GEMINI_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
 // Included in the cache identity so a pre-single-model OpenRouter disk cache
 // can never repopulate the picker with the old full remote catalog.
 const OPENROUTER_CATALOG_SCOPE = "ox-alpha-only-v2";
@@ -934,6 +936,7 @@ export class ProviderRegistry {
         const descriptors = await fetchGeminiModels({
           apiKey: provider.apiKey,
           baseURL: provider.baseURL,
+          signal: AbortSignal.timeout(GEMINI_MODEL_DISCOVERY_TIMEOUT_MS),
         });
         return {
           models: descriptors.map((descriptor) => {

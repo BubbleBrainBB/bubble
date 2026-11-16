@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Agent, ProxyAgent } from "undici";
 import {
   createProviderDispatcher,
   createProviderFetch,
@@ -27,9 +28,9 @@ describe("provider transport", () => {
     vi.restoreAllMocks();
   });
 
-  it("does not attach an undici dispatcher without proxy or custom CA env", async () => {
+  it("connects directly without proxy or custom CA env", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeUndefined();
+      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeInstanceOf(Agent);
       return new Response("ok");
     });
     const fetch = createProviderFetch({ providerName: "Anthropic", fetch: fetchMock, env: {} });
@@ -40,7 +41,7 @@ describe("provider transport", () => {
 
   it("attaches an undici dispatcher when proxy env is configured", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeTruthy();
+      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeInstanceOf(ProxyAgent);
       return new Response("ok");
     });
     const fetch = createProviderFetch({
@@ -58,7 +59,7 @@ describe("provider transport", () => {
 
   it("bypasses proxy env when NO_PROXY matches the request host", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeUndefined();
+      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeInstanceOf(Agent);
       return new Response("ok");
     });
     const fetch = createProviderFetch({
@@ -76,7 +77,7 @@ describe("provider transport", () => {
 
   it("matches NO_PROXY entries with leading dot and port", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeUndefined();
+      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeInstanceOf(Agent);
       return new Response("ok");
     });
     const fetch = createProviderFetch({
@@ -97,7 +98,7 @@ describe("provider transport", () => {
   it("falls back to the macOS system proxy when no proxy env is set", async () => {
     getSystemProxyForUrlMock.mockReturnValue("http://127.0.0.1:7897");
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeTruthy();
+      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeInstanceOf(ProxyAgent);
       return new Response("ok");
     });
     const fetch = createProviderFetch({ providerName: "Anthropic", fetch: fetchMock, env: {} });
@@ -123,7 +124,7 @@ describe("provider transport", () => {
   it("does not consult the system proxy when NO_PROXY matches the host", async () => {
     getSystemProxyForUrlMock.mockReturnValue("http://127.0.0.1:7897");
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeUndefined();
+      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeInstanceOf(Agent);
       return new Response("ok");
     });
     const fetch = createProviderFetch({

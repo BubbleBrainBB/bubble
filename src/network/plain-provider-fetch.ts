@@ -14,20 +14,8 @@
  * is the socket closing, not a timer.
  */
 
-import { Agent } from "undici";
+import { providerDispatcher } from "./provider-dispatcher.js";
 import type { ProviderFetch } from "./provider-transport.js";
-
-/** One connection pool per timeout: provider instances are made every turn. */
-const dispatchers = new Map<number, Agent>();
-
-function dispatcherFor(idleTimeoutMs: number): Agent {
-  let dispatcher = dispatchers.get(idleTimeoutMs);
-  if (!dispatcher) {
-    dispatcher = new Agent({ headersTimeout: idleTimeoutMs, bodyTimeout: idleTimeoutMs });
-    dispatchers.set(idleTimeoutMs, dispatcher);
-  }
-  return dispatcher;
-}
 
 export interface PlainProviderFetchOptions {
   /**
@@ -39,8 +27,7 @@ export interface PlainProviderFetchOptions {
 }
 
 export function createPlainProviderFetch(options: PlainProviderFetchOptions = {}): ProviderFetch {
-  const requested = options.idleTimeoutMs ?? 0;
-  const dispatcher = dispatcherFor(Number.isFinite(requested) && requested > 0 ? Math.floor(requested) : 0);
+  const dispatcher = providerDispatcher({ idleTimeoutMs: options.idleTimeoutMs ?? 0 });
   const fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   return (input, init) => fetchImpl(input, { ...(init ?? {}), dispatcher } as RequestInit);
 }

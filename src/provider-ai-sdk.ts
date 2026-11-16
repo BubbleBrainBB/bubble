@@ -29,9 +29,12 @@ import {
   ProviderStreamInterruptedError,
   computeRetryDelayMs,
   getProviderMaxRetries,
+  isResponseIdleTimeout,
   isRetryableHttpStatus,
+  retryLimitFor,
   sleepBeforeRetry,
 } from "./network/retry.js";
+import { resolveIdleTimeoutMs } from "./network/request-timeout.js";
 import { createProviderFetch, isProviderTransportError, type ProviderFetch } from "./network/provider-transport.js";
 import type {
   Provider,
@@ -160,7 +163,7 @@ export function createAiSdkProvider(options: AiSdkProviderOptions): Provider {
             { cause: error },
           );
         }
-        if (attempt >= maxRetries || !isRetryableStreamError(error)) throw coerceError(error);
+        if (attempt >= retryLimitFor(error, maxRetries) || !isRetryableStreamError(error)) throw terminalError(error);
         await sleepBeforeRetry(computeRetryDelayMs(attempt + 1), chatOptions.abortSignal);
       }
     }
@@ -559,7 +562,7 @@ function handlePreStreamError(
   const retryable = APICallError.isInstance(error)
     ? (error.isRetryable || (typeof status === "number" && isRetryableHttpStatus(status)))
     : isProviderTransportError(error);
-  if (!retryable || context.attempt >= context.maxRetries) throw coerceError(error);
+  if (!retryable || context.attempt >= retryLimitFor(error, context.maxRetries)) throw terminalError(error);
 }
 
 function retryAfterMsFromError(error: unknown): number | undefined {
@@ -584,8 +587,44 @@ function coerceError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+/** The error a request ends on once nothing more will be retried. */
+function terminalError(error: unknown): Error {
+  if (isResponseIdleTimeout(error)) {
+    return new Error(`Gemini request timed out: ${errorMessage(error)}`, { cause: error });
+  }
+  return coerceError(error);
+}
+
+/**
+ * What went wrong, for the person. The SDK reports a failed read of a 200
+ * reply as "Failed to process successful response", which says where it
+ * failed and not why; the reason is the error underneath.
+ */
 function errorMessage(error: unknown): string {
+  if (isResponseIdleTimeout(error)) {
+    const idleTimeoutMs = resolveIdleTimeoutMs();
+    return idleTimeoutMs > 0
+      ? `the model sent nothing for ${formatSeconds(idleTimeoutMs)}s, the limit set by BUBBLE_PROVIDER_REQUEST_TIMEOUT_MS`
+      : "the connection timed out waiting for the model";
+  }
+  if (APICallError.isInstance(error) && error.message === "Failed to process successful response" && error.cause !== undefined) {
+    return rootCauseMessage(error.cause);
+  }
   return error instanceof Error ? error.message : String(error);
+}
+
+function rootCauseMessage(error: unknown): string {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8; depth++) {
+    const cause = current instanceof Error ? current.cause : undefined;
+    if (!(cause instanceof Error) || !cause.message) break;
+    current = cause;
+  }
+  return current instanceof Error ? current.message : String(current);
+}
+
+function formatSeconds(ms: number): string {
+  return String(Math.round(ms / 100) / 10);
 }
 
 // ============================================================================
@@ -620,6 +659,8 @@ export async function fetchGeminiModels(options: {
   baseURL?: string;
   fetch?: ProviderFetch;
   limit?: number;
+  /** Bounds the request: the transport itself waits as long as a model may think. */
+  signal?: AbortSignal;
 }): Promise<GeminiModelDescriptor[]> {
   const baseURL = normalizeBaseURL(options.baseURL || GEMINI_DEFAULT_BASE_URL);
   const fetchImpl = options.fetch ?? createProviderFetch({
@@ -628,6 +669,7 @@ export async function fetchGeminiModels(options: {
   });
   const response = await fetchImpl(`${baseURL}/models?pageSize=1000`, {
     headers: { "x-goog-api-key": options.apiKey },
+    signal: options.signal,
   });
   if (!response.ok) {
     throw new Error(`Gemini model list failed (${response.status}): ${await response.text().catch(() => response.statusText)}`);

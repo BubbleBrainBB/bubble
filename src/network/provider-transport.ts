@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { delimiter } from "node:path";
-import { rootCertificates } from "node:tls";
-import { Agent, ProxyAgent, type Dispatcher } from "undici";
+import type { Dispatcher } from "undici";
+import { providerDispatcher } from "./provider-dispatcher.js";
+import { resolveIdleTimeoutMs } from "./request-timeout.js";
 import { getSystemProxyForUrl } from "./system-proxy.js";
 
 export type ProviderFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -44,24 +45,20 @@ export function createProviderFetch(options: ProviderFetchOptions): ProviderFetc
   };
 }
 
+/**
+ * Every provider request gets a dispatcher, proxied or not: left on Node's
+ * default one, a reply is cut after 300 seconds of silence.
+ */
 export function createProviderDispatcher(
   env: NodeJS.ProcessEnv = process.env,
   input?: RequestInfo | URL,
   providerName = "provider",
-): Dispatcher | undefined {
-  const ca = loadExtraCaCertificates(env, providerName);
-  const proxy = input ? nodeProxyForUrl(input, env) : defaultNodeProxy(env);
-  if (!proxy && ca.length === 0) return undefined;
-  const caOptions = ca.length > 0 ? { ca: [...rootCertificates, ...ca] } : undefined;
-
-  if (proxy) {
-    return new ProxyAgent({
-      uri: proxy,
-      ...(caOptions ? { requestTls: caOptions, proxyTls: caOptions } : {}),
-    });
-  }
-
-  return caOptions ? new Agent({ connect: caOptions }) : undefined;
+): Dispatcher {
+  return providerDispatcher({
+    proxy: input ? nodeProxyForUrl(input, env) : defaultNodeProxy(env),
+    ca: loadExtraCaCertificates(env, providerName),
+    idleTimeoutMs: resolveIdleTimeoutMs(env),
+  });
 }
 
 export function withProviderNetworkOptions(
@@ -77,8 +74,7 @@ export function withProviderNetworkOptions(
   const providerName = options.providerName ?? "provider";
   const next = { ...(init ?? {}) } as RequestInitWithProviderOptions;
 
-  const dispatcher = createProviderDispatcher(env, input, providerName);
-  if (dispatcher) next.dispatcher = dispatcher;
+  next.dispatcher = createProviderDispatcher(env, input, providerName);
 
   if (shouldEnableFetchVerbose(env, options.verboseEnvVar)) {
     next.verbose = true;
