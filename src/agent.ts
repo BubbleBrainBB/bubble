@@ -179,6 +179,8 @@ export interface AgentOptions {
    * session-level summary entry would make resume skip earlier history.
    */
   onCompactionApplied?: (summary: string) => void;
+  /** Compact no later than this many tokens of context (context/budget.ts); the model's window alone decides when absent. */
+  compactAtTokens?: number;
   /** Required durable commit hook for hosts; exceptions abort the context switch. */
   onContextCheckpoint?: (checkpoint: ContextCheckpoint) => void;
   getContextRevision?: () => string;
@@ -284,6 +286,7 @@ export class Agent {
   private _modeVersion = 0;
   private onModeUpdate?: (mode: PermissionMode) => void;
   private onCompactionApplied?: (summary: string) => void;
+  private compactAtTokens?: number;
   private onContextCheckpoint?: (checkpoint: ContextCheckpoint) => void;
   private getContextRevision?: () => string;
   private lastCompactionId?: string;
@@ -343,6 +346,7 @@ export class Agent {
     this.onToolResult = options.onToolResult;
     this.onModeUpdate = options.onModeUpdate;
     this.onCompactionApplied = options.onCompactionApplied;
+    this.compactAtTokens = options.compactAtTokens;
     this.onContextCheckpoint = options.onContextCheckpoint;
     this.getContextRevision = options.getContextRevision;
     this.hookDefinitions = options.hooks ?? [];
@@ -1910,6 +1914,7 @@ export class Agent {
       tailMessages: tail,
       // Usage anchors already include the schemas sent with that request.
       additionalInputTokens: this.lastInputTokens === null ? additionalInputTokens : 0,
+      compactAtTokens: this.compactAtTokens,
     });
     if (!budget.shouldCompact) return;
 
@@ -1942,7 +1947,10 @@ export class Agent {
         for (const [passPath, pass] of passes) {
           const candidate = pass();
           if (!candidate.compacted || !candidate.messages) continue;
-          const candidateBudget = getContextBudget(this.providerId, this.apiModel, candidate.messages, { additionalInputTokens });
+          const candidateBudget = getContextBudget(this.providerId, this.apiModel, candidate.messages, {
+            additionalInputTokens,
+            compactAtTokens: this.compactAtTokens,
+          });
           if (candidateBudget.estimatedTokens < smallest) {
             smallest = candidateBudget.estimatedTokens;
             result = candidate;

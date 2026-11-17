@@ -88,6 +88,9 @@ pub struct TurnRequest {
     /// The session is a conversation that does not end: its agent moves on
     /// to an empty thread once its context holds too much.
     pub conversation: Option<ConversationTurn>,
+    /// Condense the session no later than this many tokens of context,
+    /// however large the model's window; the window alone decides when `None`.
+    pub compact_at_tokens: Option<u64>,
 }
 
 /// What a turn of a long conversation carries besides the message.
@@ -438,6 +441,9 @@ impl Host {
         }
         if let Some(tools) = turn.allowed_tools {
             fields.insert("allowedTools".into(), json!(tools));
+        }
+        if let Some(ceiling) = turn.compact_at_tokens {
+            fields.insert("compactAtTokens".into(), json!(ceiling));
         }
         if let Some(conversation) = turn.conversation {
             let mut carried = serde_json::Map::new();

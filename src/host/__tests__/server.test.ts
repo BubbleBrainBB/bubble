@@ -367,6 +367,32 @@ describe("bubble host", () => {
     expect(app.notifications.filter((n) => n.method === "conversation/fresh")).toEqual([]);
   });
 
+  it("compacts a session at the ceiling the app gives, long before the window is full", async () => {
+    const { provider, seen } = scripted([{ text: "One." }, { text: "Two." }, { text: "Three." }]);
+    start(provider, "google:gemini-4-carbon");
+    const session = await app.call("session/create", { cwd: project, id: "desk-bot" });
+    const turn = async (prompt: string, compactAtTokens?: number) => {
+      const before = app.events(session.id).filter((e) => e.terminal).length;
+      await app.call("turn/start", { sessionId: session.id, prompt, ...(compactAtTokens ? { compactAtTokens } : {}) });
+      await app.until(() => app.events(session.id).filter((e) => e.terminal).length > before, "the turn to end");
+    };
+    const compactions = () => app.events(session.id).filter((e) => e.event.type === "context_compaction").map((e) => e.event.status);
+    const sent = (request: { messages: Message[] }) => request.messages.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+
+    // About 60k tokens: nothing for a window of a million.
+    await turn(`first ${"filler ".repeat(60_000)}`);
+    await turn("second");
+    expect(compactions()).toEqual([]);
+    expect(sent(seen[1])).toContain("filler filler");
+
+    // With a ceiling under that, the next request is made on a condensed history.
+    await turn("third", 30_000);
+    expect(compactions()).toEqual(["started", "completed"]);
+    const third = sent(seen[seen.length - 1]);
+    expect(third).toContain("third");
+    expect(third.length).toBeLessThan(sent(seen[1]).length / 4);
+  });
+
   it("leaves a session alone that is not a long conversation", async () => {
     const { provider, seen } = scripted([{ text: "One." }, { text: "Two." }]);
     start(provider, "google:gemini-4-carbon");

@@ -29,6 +29,14 @@ export interface ContextBudgetOptions {
   tailMessages?: Message[];
   /** Tokens outside the message list, primarily serialized tool definitions. */
   additionalInputTokens?: number;
+  /**
+   * Compact no later than this many tokens, however large the window. The
+   * window alone puts the line where the context no longer fits: on a model
+   * with a million-token window that is about a million tokens, reread with
+   * every request. A host of long-lived agents sets a ceiling; without one
+   * the line is the window's.
+   */
+  compactAtTokens?: number;
 }
 
 export function estimateMessageTokens(message: Message, providerId?: string): number {
@@ -95,7 +103,7 @@ export function getContextBudget(
     contextWindow,
     percent,
     shouldPrune: shouldTriggerPrune(estimatedTokens, contextWindow),
-    shouldCompact: shouldTriggerCompact(estimatedTokens, contextWindow),
+    shouldCompact: shouldTriggerCompact(estimatedTokens, contextWindow, options.compactAtTokens),
   };
 }
 
@@ -153,13 +161,14 @@ function shouldTriggerPrune(estimatedTokens: number, contextWindow?: number): bo
   return estimatedTokens >= threshold;
 }
 
-function shouldTriggerCompact(estimatedTokens: number, contextWindow?: number): boolean {
-  if (!contextWindow) {
-    return estimatedTokens >= 32_000;
-  }
-  const threshold = contextWindow >= MIN_WINDOW_FOR_RESERVE
-    ? contextWindow - OUTPUT_RESERVE_TOKENS - AUTOCOMPACT_BUFFER_TOKENS
-    : contextWindow * 0.75;
+function shouldTriggerCompact(estimatedTokens: number, contextWindow?: number, ceiling?: number): boolean {
+  const ofWindow = !contextWindow
+    ? 32_000
+    : contextWindow >= MIN_WINDOW_FOR_RESERVE
+      ? contextWindow - OUTPUT_RESERVE_TOKENS - AUTOCOMPACT_BUFFER_TOKENS
+      : contextWindow * 0.75;
+  // A ceiling only ever brings the line forward.
+  const threshold = typeof ceiling === "number" && ceiling > 0 ? Math.min(ofWindow, ceiling) : ofWindow;
   return estimatedTokens >= threshold;
 }
 

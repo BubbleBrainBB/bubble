@@ -36,6 +36,25 @@ describe("context budget", () => {
     expect(budget.shouldCompact).toBe(true);
   });
 
+  it("compacts no later than a ceiling, however large the window", () => {
+    // A million-token window alone puts the line at about a million tokens.
+    const anchored = (used: number, compactAtTokens?: number) =>
+      getContextBudget("google", "gemini-4-carbon", [], { usageAnchorTokens: used, tailMessages: [], compactAtTokens }).shouldCompact;
+    expect(getContextBudget("google", "gemini-4-carbon", []).contextWindow).toBe(1_048_576);
+    expect(anchored(600_000)).toBe(false);
+    expect(anchored(600_000, 500_000)).toBe(true);
+    expect(anchored(499_999, 500_000)).toBe(false);
+    // A ceiling above the window's own line changes nothing, and one that is not a size is no ceiling.
+    expect(anchored(1_000_000, 5_000_000)).toBe(false);
+    expect(anchored(1_020_000, 5_000_000)).toBe(true);
+    expect(anchored(600_000, 0)).toBe(false);
+    // On a window whose own line is lower, the window's line stands.
+    const small = (used: number) =>
+      getContextBudget("openai-codex", "gpt-5.4", [], { usageAnchorTokens: used, tailMessages: [], compactAtTokens: 500_000 }).shouldCompact;
+    expect(small(238_000)).toBe(false);
+    expect(small(240_000)).toBe(true);
+  });
+
   it("uses fixed-reserve threshold on a large window", () => {
     // gpt-5.4 window 272k: compact threshold = 272k - 20k - 13k = 239k;
     // prune threshold = 272k - 20k - 50k = 202k.

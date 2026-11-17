@@ -69,6 +69,9 @@ pub struct HostTurn {
     /// The session is a conversation that does not end (the main bot's):
     /// what the app keeps outside it, and how things stand now.
     pub conversation: Option<bubble_host::ConversationTurn>,
+    /// Condense the session no later than this many tokens of context
+    /// (a bot's, which is one session for as long as the bot lives).
+    pub compact_at: Option<u64>,
 }
 
 /// What a turn reports beyond the agent's own events.
@@ -171,6 +174,7 @@ pub async fn run(host: Host, turn: HostTurn, events: mpsc::UnboundedSender<TurnE
             .map(|spec| HostTool { name: spec.name, description: spec.description, parameters: spec.parameters, read_only: true })
             .collect(),
         conversation: turn.conversation,
+        compact_at_tokens: turn.compact_at,
     })
     .await?;
 

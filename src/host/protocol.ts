@@ -92,6 +92,8 @@ export interface TurnStartParams {
   allowedTools?: string[];
   hostTools?: HostToolSpec[];
   skillPaths?: string[];
+  /** Compact the session no later than this many tokens of context, however large the model's window. */
+  compactAtTokens?: number;
   /**
    * This session is a conversation that does not end (sdk/conversation.ts):
    * `sessionId` stays the app's name for it, while the agent moves on to an

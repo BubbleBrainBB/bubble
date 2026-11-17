@@ -351,6 +351,7 @@ pub fn maybe_run(app: AppState) {
         host_tools: crate::transcript::with_doing(specs()),
         recap: None,
         conversation: None,
+        compact_at: None,
     };
     let batch = Arc::new(batch);
     let hosts = app.hosts.get();

@@ -669,3 +669,98 @@ fn a_fresh_context_with_a_real_model() {
     drop(app);
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// Minutes of a meeting, long enough that three of them outgrow a small
+/// ceiling: plain prose, so that reading is the only way to what they say.
+fn minutes(topic: &str, decision: &str) -> String {
+    let voices = ["Lena", "Marco", "Priya", "Tomas", "Yuki", "Amara"];
+    let mut text = format!("# Minutes: {topic}\n\n");
+    for round in 0..180 {
+        let who = voices[round % voices.len()];
+        let other = voices[(round * 5 + 2) % voices.len()];
+        text.push_str(&format!(
+            "{who} went back to point {round} of the {topic} agenda and said the numbers from last quarter still did not settle it. {other} disagreed, \
+             since the pilot in region {} had gone the other way, and asked for the raw figures before anyone committed to a date. They agreed to note \
+             the open question and move on, with {who} to circulate a one-page summary before the next session.\n\n",
+            round % 7 + 1
+        ));
+        if round == 131 {
+            text.push_str(&format!("Decision: {decision}\n\n"));
+        }
+    }
+    text
+}
+
+/// A bot is one session for as long as it lives. With a small ceiling in
+/// place of the half million tokens it has in the app, it reads more than
+/// the ceiling holds within one turn, so the agent condenses its session
+/// in place, and it is then asked about what it read and did.
+///
+///     cargo test -p bubble-app --test walkthrough a_bot_condenses -- --ignored --nocapture
+#[test]
+#[ignore = "spends the person's model allowance; run it by name"]
+fn a_bot_condenses_with_a_real_model() {
+    let real = PathBuf::from(std::env::var("HOME").unwrap()).join(".bubble");
+    let root = std::env::temp_dir().join(format!("bubble-walkthrough-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join("native")).unwrap();
+    for file in ["config.json", "auth.json"] {
+        if real.join(file).is_file() {
+            std::fs::copy(real.join(file), home.join(file)).unwrap();
+        }
+    }
+    let demo = root.join("demo");
+    std::fs::create_dir_all(demo.join("minutes")).unwrap();
+    std::fs::write(demo.join("minutes/pricing.md"), minutes("pricing", "the team plan goes from 12 to 15 dollars a seat on March 14.")).unwrap();
+    std::fs::write(demo.join("minutes/hiring.md"), minutes("hiring", "two backend engineers are hired in Lisbon, none in Berlin this year.")).unwrap();
+    std::fs::write(demo.join("minutes/launch.md"), minutes("launch", "the launch moves from April 2 to April 23, after the audit.")).unwrap();
+    repository(&demo, &format!("https://github.com/{REPO}.git"), &[("hello.sh", "#!/bin/sh\necho \"hello\"\n")]);
+    let gh = fake_gh(&root);
+    {
+        let store = Store::open(home.join("native/bubble.db")).unwrap();
+        store.create_task(bubble_store::NewTask { title: "Dev", project_cwd: Some(demo.to_str().unwrap()), origin: bubble_store::Origin::User }).unwrap();
+    }
+    // SAFETY: run by name, so the only test in this process, before the engine starts.
+    unsafe {
+        std::env::set_var("BUBBLE_HOME", &home);
+        std::env::set_var("BUBBLE_GH", &gh);
+        std::env::set_var("BUBBLE_NO_SHELL_ENV", "1");
+        std::env::set_var("BUBBLE_NO_GREETING", "1");
+        std::env::set_var("BUBBLE_BOT_CONTEXT_TOKENS", "45000");
+    }
+    let mut app = Headless::start(EngineConfig::new(Root::of::<bubble_app::App>())).unwrap();
+    app.set_viewport(nsh_core::element::size(nsh_core::element::px(1280.0), nsh_core::element::px(1000.0))).unwrap();
+    let store = Store::open(home.join("native/bubble.db")).unwrap();
+    let started = Instant::now();
+    let stamp = |what: &str| println!("\n=== {what} (t+{}s)", started.elapsed().as_secs());
+    app.wait_for_within("id:side-Dev", Duration::from_secs(30)).unwrap();
+    let dev = bots(&store).into_iter().next().unwrap().0;
+    let condensed = |home: &Path| shell(home, "grep -rhoc 'context_checkpoint' sessions 2>/dev/null | awk '{s+=$1} END {print s+0}'");
+    let mut seen = 0;
+    let mut ask = |app: &mut Headless, what: &str, text: &str| {
+        app.press("id:side-Dev").unwrap();
+        app.type_text("id:composer", text).unwrap();
+        app.submit("id:composer").unwrap();
+        let done = settle(app, &store, Duration::from_secs(600));
+        stamp(what);
+        let run = store.runs_for_task(&dev).unwrap_or_default().into_iter().next_back();
+        println!("settled in time: {done}; times its session was condensed so far: {}", condensed(&home));
+        if let Some(run) = run {
+            println!("tools called: {:?}", tools_called(&store, &run.id, seen));
+            seen = said(&store, &run.id, seen, "Dev");
+        }
+    };
+
+    println!("the three minutes are {} characters together; the ceiling is 45,000 tokens", shell(&demo, "cat minutes/*.md | wc -c"));
+    ask(
+        &mut app,
+        "1. reads more than the ceiling holds, then works",
+        "把 minutes/ 下的三份会议纪要都从头到尾读完（要读原文，不要只搜关键词），每份用一句话告诉我会上最后定了什么。然后把 hello.sh 改成输出 hello world，跑一下确认。",
+    );
+    println!("demo: sh hello.sh -> {}", shell(&demo, "sh hello.sh"));
+    ask(&mut app, "2. asked about what it read and did before it was condensed", "不要再读文件，凭你记得的说：定价那份纪要定了什么？你刚才改了哪个文件、改成了什么？");
+
+    drop(app);
+    std::fs::remove_dir_all(&root).ok();
+}

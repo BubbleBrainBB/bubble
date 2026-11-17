@@ -144,6 +144,13 @@ export interface RunTurnOptions extends TurnHandlers {
    * Like hostTools, follow-up turns the SDK starts for this turn reuse them.
    */
   skillPaths?: string[];
+  /**
+   * Compact the session no later than this many tokens of context, however
+   * large the model's window: for a long-lived agent, whose session would
+   * otherwise grow to the window before anything is condensed. The window
+   * alone decides when absent. Follow-up turns the SDK starts reuse it.
+   */
+  compactAtTokens?: number;
   /** Plain text, or content parts (text + base64 images) for attachments. */
   prompt: string | ContentPart[];
   /** Preserve an admitted input if cancelled before initialization records it. */
@@ -927,6 +934,7 @@ export class BubbleSdk {
           persistFenced(() => session.appendProviderError(error, contextRevision));
         },
         getContextRevision: () => contextRevision,
+        compactAtTokens: options.compactAtTokens,
         onContextCheckpoint: (checkpoint) => {
           if (this.turnCoordinator.isDeleted(sessionId)) throw new Error("Session deleted before context commit");
           persistFenced(() => {

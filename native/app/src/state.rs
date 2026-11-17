@@ -2056,6 +2056,9 @@ impl Conversation {
                 brief: Some(manager::kept_outside(app)),
                 standing: Some(manager::how_things_stand(app)),
             }),
+            // A bot's session is condensed in place: what it read and tried
+            // is what it works with, so it is not put on an empty thread.
+            compact_at: task_id.is_some().then(bot_context_tokens),
         };
         let hosts = app.hosts.get();
         let stop = Arc::new(tokio::sync::Notify::new());
@@ -2435,6 +2438,19 @@ pub(crate) const CHECKPOINT_NOTE: &str = "Earlier messages were summarized to st
 /// The line across a long conversation where its agent's context started
 /// afresh: it no longer has what stands above.
 pub(crate) const FRESH_NOTE: &str = "Context starts afresh here";
+
+/// How much context a bot's session may hold before the agent condenses it.
+/// A bot is one session for as long as it lives, and the agent on its own
+/// condenses only when the model's window is nearly full: on a window of a
+/// million tokens a bot would reread hundreds of thousands with every step.
+/// The same figure as the main bot's limit (sdk/conversation.ts).
+const BOT_CONTEXT_TOKENS: u64 = 500_000;
+
+/// `BOT_CONTEXT_TOKENS`, or what `BUBBLE_BOT_CONTEXT_TOKENS` says: for
+/// seeing a bot condense without first filling half a million tokens.
+fn bot_context_tokens() -> u64 {
+    std::env::var("BUBBLE_BOT_CONTEXT_TOKENS").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(BOT_CONTEXT_TOKENS)
+}
 
 /// A system prompt with the person's AGENTS.md instructions after it.
 fn with_instructions(prompt: String, cwd: Option<&std::path::Path>) -> String {

@@ -326,6 +326,7 @@ export class HostServer {
       systemPrompt: params.systemPrompt,
       allowedTools: params.allowedTools,
       skillPaths: params.skillPaths,
+      compactAtTokens: typeof params.compactAtTokens === "number" && params.compactAtTokens > 0 ? params.compactAtTokens : undefined,
       // The person already sent it; a stop during setup must not lose it.
       preserveInterruptedInput: true,
       hostTools,
