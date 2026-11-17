@@ -110,6 +110,7 @@ async fn a_turn_runs_through_the_real_host() {
     host.open_session(session, &project_path).await.unwrap();
     let mut messages = host.subscribe(session);
     host.start_turn(TurnRequest {
+        conversation: None,
         session_id: session.into(),
         text: "Write the file and keep a note".into(),
         host_tools: vec![HostTool {

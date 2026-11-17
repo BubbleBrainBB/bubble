@@ -66,6 +66,9 @@ pub struct HostTurn {
     /// What was said before the agent kept this conversation (a run from
     /// the earlier engine); given to the model once, when its session is new.
     pub recap: Option<String>,
+    /// The session is a conversation that does not end (the main bot's):
+    /// what the app keeps outside it, and how things stand now.
+    pub conversation: Option<bubble_host::ConversationTurn>,
 }
 
 /// What a turn reports beyond the agent's own events.
@@ -87,6 +90,9 @@ pub enum TurnEvent {
     /// A subagent moved on; `tool` is the call it reports through
     /// (spawn_agent, wait_agent, run_workflow).
     Subagent { tool: String, update: bubble_host::SubagentUpdate },
+    /// The turn runs on an empty thread: the agent of a long conversation
+    /// no longer has what was said before.
+    Fresh,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,7 +140,9 @@ pub async fn run(host: Host, turn: HostTurn, events: mpsc::UnboundedSender<TurnE
     let session = turn.session_id.clone();
     host.open_session(&session, &turn.home).await?;
     let mut text = turn.text;
-    if let Some(recap) = turn.recap.filter(|r| !r.trim().is_empty()) {
+    // A long conversation is told what went before by the host, which
+    // knows when its agent starts on an empty thread.
+    if let Some(recap) = turn.recap.filter(|r| !r.trim().is_empty() && turn.conversation.is_none()) {
         if host.history(&session).await.map(|h| h.is_empty()).unwrap_or(false) {
             text = format!(
                 "<earlier-conversation>\nThis task was started before; what was said so far, oldest first:\n\n{recap}\n</earlier-conversation>\n\n{text}"
@@ -162,6 +170,7 @@ pub async fn run(host: Host, turn: HostTurn, events: mpsc::UnboundedSender<TurnE
             // Read-only to the agent: the app asks the person where a call needs it.
             .map(|spec| HostTool { name: spec.name, description: spec.description, parameters: spec.parameters, read_only: true })
             .collect(),
+        conversation: turn.conversation,
     })
     .await?;
 
@@ -241,6 +250,9 @@ pub async fn run(host: Host, turn: HostTurn, events: mpsc::UnboundedSender<TurnE
             // The person added this folder as a project: its own settings
             // (MCP servers, allow rules) are theirs.
             SessionMessage::Trust { id, .. } => host.answer(&id, serde_json::json!({ "trusted": true })),
+            SessionMessage::Fresh { .. } => {
+                let _ = events.send(TurnEvent::Fresh);
+            }
             SessionMessage::Started(_) | SessionMessage::Withdrawn { .. } => {}
             SessionMessage::Lost(why) => break Err(anyhow!(why)),
         }
@@ -420,6 +432,7 @@ mod tests {
                 }
                 TurnEvent::Agent(AgentEvent::ToolResults(ChatMessage::Tool { results })) => format!("results:{}", results.len()),
                 TurnEvent::Compacted => "compacted".to_owned(),
+                TurnEvent::Fresh => "fresh".to_owned(),
                 TurnEvent::Retried => "retried".to_owned(),
                 TurnEvent::Question { .. } => "question".to_owned(),
                 _ => "other".to_owned(),

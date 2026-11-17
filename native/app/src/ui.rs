@@ -559,7 +559,7 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>) 
             let current = line.get();
             view().child((!current.text.trim().is_empty()).then(|| reply_bubble(&current.text))).into_element()
         }),
-        LineKind::Message(MessageRole::Tool | MessageRole::Checkpoint) => view().into_element(),
+        LineKind::Message(MessageRole::Tool | MessageRole::Checkpoint | MessageRole::Fresh) => view().into_element(),
         LineKind::Message(MessageRole::Told) => told(app, line),
         LineKind::Message(MessageRole::External) => said_to_bot(|| "From GitHub".to_owned(), line),
         // A bot's answer coming back is a mark in passing: this bot says
@@ -569,6 +569,16 @@ fn line_view(app: AppState, conversation: Conversation, line: ReadSignal<Line>) 
             bot_mark(app, "Message from", app.sender_label(&line.get_untracked().id))
         }
         LineKind::Message(MessageRole::System) => said_to_bot(move || format!("From {}", app.sender_label(&line.get().id)), line),
+        // Where the bot's memory of the conversation ends: a line across it.
+        LineKind::Notice if line.get_untracked().text == crate::state::FRESH_NOTE => view()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .py(px(4.0))
+            .child(view().flex_1().border_b(px(LINE)).border_color(hairline()))
+            .child(text(crate::state::FRESH_NOTE).text_size(px(SMALL)).text_color(muted()))
+            .child(view().flex_1().border_b(px(LINE)).border_color(hairline()))
+            .into_element(),
         LineKind::Notice => text(move || line.get().text).text_size(px(SMALL)).text_color(muted()).into_element(),
         LineKind::Failure => view()
             .flex_row()

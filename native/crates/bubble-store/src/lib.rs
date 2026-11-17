@@ -418,6 +418,10 @@ pub enum MessageRole {
     /// their yes. Its content is what the bot is told of it with the next
     /// message (a JSON string).
     Told,
+    /// Where the agent's context started afresh: it no longer has what
+    /// was said before this. Its content names the message it stands
+    /// before (JSON `{"before": id}`), when it came with a turn.
+    Fresh,
 }
 
 impl MessageRole {
@@ -430,6 +434,7 @@ impl MessageRole {
             MessageRole::External => "external",
             MessageRole::Checkpoint => "checkpoint",
             MessageRole::Told => "told",
+            MessageRole::Fresh => "fresh",
         }
     }
 
@@ -442,6 +447,7 @@ impl MessageRole {
             "external" => MessageRole::External,
             "checkpoint" => MessageRole::Checkpoint,
             "told" => MessageRole::Told,
+            "fresh" => MessageRole::Fresh,
             other => bail!("unknown message role {other:?}"),
         })
     }
@@ -1234,12 +1240,20 @@ pub fn history(messages: &[Message]) -> Vec<bubble_core::ChatMessage> {
         if message.role == MessageRole::Told {
             continue;
         }
+        // The agent started on an empty thread here: nothing before it is
+        // the model's any more.
+        if message.role == MessageRole::Fresh {
+            history.clear();
+            continue;
+        }
         let parsed = message.content.as_deref().and_then(|c| serde_json::from_str::<ChatMessage>(c).ok());
         let item = match (message.role, parsed) {
             (_, Some(parsed)) => parsed,
             (MessageRole::User, None) => ChatMessage::user(message.text.clone()),
             (MessageRole::Assistant, None) => ChatMessage::assistant(message.text.clone()),
-            (MessageRole::System | MessageRole::Tool | MessageRole::External | MessageRole::Checkpoint | MessageRole::Told, None) => continue,
+            (MessageRole::System | MessageRole::Tool | MessageRole::External | MessageRole::Checkpoint | MessageRole::Told | MessageRole::Fresh, None) => {
+                continue
+            }
         };
         if let ChatMessage::Assistant { text, tool_calls, .. } = &item {
             if text.trim().is_empty() && tool_calls.is_empty() {

@@ -590,6 +590,10 @@ fn models(app: AppState) -> View {
                 .child(
                     row("Reasoning when sorting", note("How hard the main bot thinks about what comes in from GitHub; lower sorts sooner"))
                         .child(sorting),
+                )
+                .child(
+                    row("Main bot's context", note("It starts over from its notes and what bots reported; the conversation stays"))
+                        .child(quiet_button("Start fresh", move || app.fresh_main_context()).label("Start the main bot's context afresh")),
                 ),
         ))
         .child(group(

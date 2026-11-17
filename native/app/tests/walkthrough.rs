@@ -586,3 +586,86 @@ fn the_harder_cases_with_a_real_model() {
     drop(app);
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// The names of the tools a conversation's replies called, in order.
+fn tools_called(store: &Store, run_id: &str, from: usize) -> Vec<String> {
+    store
+        .messages(run_id)
+        .unwrap_or_default()
+        .iter()
+        .skip(from)
+        .filter(|m| m.role == MessageRole::Assistant)
+        .filter_map(|m| m.content.as_deref().and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok()))
+        .flat_map(|content| {
+            content["tool_calls"].as_array().cloned().unwrap_or_default().into_iter().filter_map(|call| call["name"].as_str().map(str::to_owned)).collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The main bot's context starts afresh, and it is asked about what was
+/// said before: something that mattered only that once (so no note holds
+/// it, and it stands past where the briefing cuts its quote), something
+/// worth a note, and something that was never said.
+///
+///     cargo test -p bubble-app --test walkthrough a_fresh_context -- --ignored --nocapture
+#[test]
+#[ignore = "spends the person's model allowance; run it by name"]
+fn a_fresh_context_with_a_real_model() {
+    let real = PathBuf::from(std::env::var("HOME").unwrap()).join(".bubble");
+    let root = std::env::temp_dir().join(format!("bubble-walkthrough-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join("native")).unwrap();
+    for file in ["config.json", "auth.json"] {
+        if real.join(file).is_file() {
+            std::fs::copy(real.join(file), home.join(file)).unwrap();
+        }
+    }
+    let gh = fake_gh(&root);
+    // SAFETY: run by name, so the only test in this process, before the engine starts.
+    unsafe {
+        std::env::set_var("BUBBLE_HOME", &home);
+        std::env::set_var("BUBBLE_GH", &gh);
+        std::env::set_var("BUBBLE_NO_SHELL_ENV", "1");
+    }
+    let mut app = Headless::start(EngineConfig::new(Root::of::<bubble_app::App>())).unwrap();
+    app.set_viewport(nsh_core::element::size(nsh_core::element::px(1280.0), nsh_core::element::px(1000.0))).unwrap();
+    let store = Store::open(home.join("native/bubble.db")).unwrap();
+    let started = Instant::now();
+    let stamp = |what: &str| println!("\n=== {what} (t+{}s)", started.elapsed().as_secs());
+    app.wait_for_within("id:nav-home", Duration::from_secs(30)).unwrap();
+    let main_run = store.manager_run(None).unwrap();
+    let mut seen = 0;
+    let mut ask = |app: &mut Headless, what: &str, text: &str| {
+        app.press("id:nav-home").unwrap();
+        app.type_text("id:composer", text).unwrap();
+        app.submit("id:composer").unwrap();
+        let done = settle(app, &store, Duration::from_secs(300));
+        stamp(what);
+        println!("settled in time: {done}; tools called: {:?}", tools_called(&store, &main_run.id, seen));
+        seen = said(&store, &main_run.id, seen, "main bot");
+    };
+
+    // Who runs the smoke test comes at the end of a message longer than the briefing quotes.
+    let process = "我们发版的流程是这样的，你了解一下，不用做什么：先在 release 分支上把版本号改好，写发布说明，中文英文各一份；然后跑完整的测试，包括单元测试和端到端测试，任何一个失败都不能发；接着打包，在一台干净的机器上按全局安装的方式装一遍，确认能启动；再把包发到 staging 环境，让两位同事各自试用半天，收集反馈；反馈里有阻塞问题就回到第一步，没有就继续；之后更新文档站，把新版本的升级说明放在首页；最后通知社区频道。整个过程一般要两到三天，赶时间的时候也不能跳过 staging 那一步，因为上次跳过之后出了事故，我们花了一个周末回滚。发布说明的写法也有讲究：先写用户能感觉到的变化，再写修掉的问题，最后才是内部改动；每一条都要说清楚影响了谁、之前是什么样、现在是什么样，不要只写一句“修复了若干问题”。版本号按语义化版本来，只有不兼容的改动才升主版本，新功能升次版本，其余升修订号；预发布版本带 rc 后缀，从 rc.1 开始数。打包的时候要核对包里的文件数和上一个版本差多少，差得离谱就停下来查，上次有一个依赖没打进去就是这样发现的。另外，这一次的冒烟测试由 Marco 负责，他周四下午有空；这只是这一次的安排，不用记进笔记。";
+    ask(&mut app, "1. told something long, with a one-off arrangement at its end", process);
+    ask(&mut app, "2. told something worth a note", "还有，以后给我的汇报都不要超过三句话。");
+    println!("notes kept:\n{}", notes(&home));
+
+    // The person asks for a fresh context.
+    app.press("id:nav-settings").unwrap();
+    app.press("id:settings-models").unwrap();
+    app.press("label:Start the main bot's context afresh").unwrap();
+    app.press("id:settings-close").unwrap();
+    let marked = app.wait_for_within("Context starts afresh here", Duration::from_secs(20)).is_ok();
+    stamp("3. a fresh context");
+    println!("the line shows in the conversation: {marked}");
+
+    ask(&mut app, "4. asked for what only the earlier conversation holds", "这次的冒烟测试是谁负责、什么时候有空来着？");
+    ask(&mut app, "5. asked for what the notes hold", "我之前对你的汇报提过什么要求？");
+    ask(&mut app, "6. asked for something that was never said", "我们上次说的那个数据库迁移的截止日期是哪天？");
+    println!("notes at the end:\n{}", notes(&home));
+
+    drop(app);
+    std::fs::remove_dir_all(&root).ok();
+}

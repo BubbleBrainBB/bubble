@@ -350,6 +350,7 @@ pub fn maybe_run(app: AppState) {
         allowed_tools: Some(Vec::new()),
         host_tools: crate::transcript::with_doing(specs()),
         recap: None,
+        conversation: None,
     };
     let batch = Arc::new(batch);
     let hosts = app.hosts.get();

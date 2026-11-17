@@ -49,6 +49,21 @@ is in the bot's conversation. A report needs no reply to the bot unless there is
 - Bots may wait for the person's approval of commands; the person answers those in the bot's conversation.\n\
 - When the person says a bot is no longer needed, archive it with update_bot.";
 
+/// What the main bot is told about a conversation that goes on for months:
+/// that it does not keep it, and what stands in for it.
+pub const LASTING: &str = "Each message to you ends with how things stand now, read from the app's records: who waits for the person, what \
+you gave out that is still being worked on, and what else is running. Go by it rather than by what was said earlier.\n\
+\n\
+This conversation does not last. Once it has grown long you go on with an empty context, told only how it ended and what bots \
+reported lately. Everything said in it stays kept, and read_own_chat searches it: look there before you say you do not know, and ask \
+the person only when it is not there. What you gave out is kept for you too (get_bot shows what a bot was given and what it \
+answered).\n\
+What else has to outlast the conversation goes into the notes with remember, in the turn you learn it. Your notes are the team's: \
+every bot reads them. Worth a note: how the person wants work handed out (which bot or model for what, how much to tell them), and \
+what to know about a project (what to leave alone, how it is released). Not worth a note: how a piece of work stands, what a report \
+said, anything that matters only today. When the person corrects how you work, note it before you answer. Keep notes short: forget \
+what no longer holds instead of adding to it. recall reads them. Never note a key or a password.";
+
 /// What a bot is told about working with the others.
 pub const BOT_TEAMWORK: &str = "You are one of several bots. list_bots shows the others; message_bot asks one of them for something that \
 is theirs to do, and its answer comes back to you as a message that begins with [Report from …], so end your turn when you have nothing \
@@ -844,9 +859,216 @@ pub fn framed(app: AppState, incoming: &Incoming) -> String {
     }
 }
 
+// --- What the main bot is given besides the conversation ----------------------
+
+/// "12 min ago", for a model to read.
+fn ago(now: i64, at: i64) -> String {
+    let minutes = (now - at).max(0) / 60_000;
+    match minutes {
+        0 => "just now".into(),
+        1..=59 => format!("{minutes} min ago"),
+        60..=1439 => format!("{} h ago", minutes / 60),
+        _ => format!("{} d ago", minutes / 1440),
+    }
+}
+
+/// One line of a longer text: all of a short one, the start and the end of a long one.
+fn gist(text: &str, max: usize) -> String {
+    let line: Vec<char> = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().collect();
+    if line.len() <= max {
+        return line.into_iter().collect();
+    }
+    let half = (max.saturating_sub(3)) / 2;
+    format!("{} … {}", line[..half].iter().collect::<String>(), line[line.len() - half..].iter().collect::<String>())
+}
+
+/// A list with a ceiling: its first `max` lines, and how many more there are.
+fn listed(title: &str, mut lines: Vec<String>, max: usize, more: &str) -> Vec<String> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let over = lines.len().saturating_sub(max);
+    lines.truncate(max);
+    let mut out = vec![title.to_owned()];
+    out.extend(lines);
+    if over > 0 {
+        out.push(format!("- and {over} more ({more} shows all)"));
+    }
+    out
+}
+
+/// A bot's tickets, newest first, with the bot's name.
+fn tickets_of_team(app: AppState) -> Vec<(String, Ticket)> {
+    app.tasks
+        .get_untracked()
+        .into_iter()
+        .filter(|bot| bot.task.origin != Origin::Cli)
+        .flat_map(|bot| {
+            let name = bot.task.title.clone();
+            app.with_store(|s| s.tickets_for_task(&bot.task.id, 24)).unwrap_or_default().into_iter().map(move |ticket| (name.clone(), ticket))
+        })
+        .collect()
+}
+
+/// How things stand now, from the app's records and not from anything said:
+/// what goes with every message to the main bot.
+pub fn how_things_stand(app: AppState) -> String {
+    let now = bubble_store::now_ms();
+    let bots: Vec<TaskSummary> = app.tasks.get_untracked().into_iter().filter(|bot| bot.task.origin != Origin::Cli && !archived(bot)).collect();
+    let tickets = tickets_of_team(app);
+    stand(now, &bots, &tickets)
+}
+
+fn stand(now: i64, bots: &[TaskSummary], tickets: &[(String, Ticket)]) -> String {
+    let title = |ticket: &Ticket| gist(&ticket.title, 80);
+    let mut waiting: Vec<String> = Vec::new();
+    for bot in bots {
+        match bot.state {
+            TaskState::NeedsYou => waiting.push(format!("- {} asked the person something or wants a yes to a command; they answer in its conversation", bot.task.title)),
+            TaskState::Failed => waiting.push(format!("- {}'s last turn failed", bot.task.title)),
+            _ => {}
+        }
+    }
+    for (bot, ticket) in tickets.iter().filter(|(_, t)| t.status == TicketStatus::Proposed) {
+        waiting.push(format!("- \"{}\" for {bot} waits for the person's yes", title(ticket)));
+    }
+    let open: Vec<&(String, Ticket)> = tickets.iter().filter(|(_, t)| t.status == TicketStatus::Accepted).collect();
+    let given: Vec<String> = open
+        .iter()
+        .filter(|(_, t)| t.origin == TicketOrigin::Main)
+        .map(|(bot, t)| format!("- {bot}: \"{}\", given {}", title(t), ago(now, t.created_at)))
+        .collect();
+    let others: Vec<String> = open
+        .iter()
+        .filter(|(_, t)| t.origin != TicketOrigin::Main)
+        .map(|(bot, t)| {
+            let from = match t.origin {
+                TicketOrigin::Github => "from GitHub",
+                TicketOrigin::Routine => "a routine",
+                _ => "asked by another bot",
+            };
+            format!("- {bot}: \"{}\" ({from})", title(t))
+        })
+        .collect();
+    let mut lines = vec![format!(
+        "How things stand now ({}), read from the app's records, not from this conversation:",
+        chrono::DateTime::from_timestamp_millis(now).map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default()
+    )];
+    let before = lines.len();
+    lines.extend(listed("Waiting for the person:", waiting, 12, "list_bots"));
+    lines.extend(listed("Given out by you, still being worked on:", given, 12, "list_bots"));
+    lines.extend(listed("Also at work, not through you:", others, 8, "list_bots"));
+    if lines.len() == before {
+        lines.push(if bots.is_empty() { "There are no bots yet.".to_owned() } else { "Nothing waits for the person, and no bot is working.".to_owned() });
+    }
+    lines.join("\n")
+}
+
+/// What the app keeps of the main bot's work outside its conversation, for
+/// when its agent starts on an empty context: the latest reports.
+pub fn kept_outside(app: AppState) -> String {
+    kept(bubble_store::now_ms(), &tickets_of_team(app))
+}
+
+fn kept(now: i64, tickets: &[(String, Ticket)]) -> String {
+    let mut reported: Vec<&(String, Ticket)> = tickets
+        .iter()
+        .filter(|(_, t)| matches!(t.status, TicketStatus::Finished | TicketStatus::Failed | TicketStatus::Stopped) && t.report.as_deref().is_some_and(|r| !r.trim().is_empty()))
+        .collect();
+    reported.sort_by(|a, b| b.1.updated_at.cmp(&a.1.updated_at));
+    let mut lines: Vec<String> = Vec::new();
+    if !reported.is_empty() {
+        lines.push("The latest reports of what bots were given:".to_owned());
+        for (bot, ticket) in reported.into_iter().take(5) {
+            let how = match ticket.status {
+                TicketStatus::Failed => "failed",
+                TicketStatus::Stopped => "was stopped",
+                _ => "finished",
+            };
+            lines.push(format!(
+                "- {bot}, \"{}\", {how} {}: \"{}\"",
+                gist(&ticket.title, 80),
+                ago(now, ticket.updated_at),
+                gist(ticket.report.as_deref().unwrap_or_default(), 200)
+            ));
+        }
+    }
+    lines.push("list_bots and get_bot show every bot, what it was given and what it answered. The team's notes are in your instructions.".to_owned());
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ticket(title: &str, origin: TicketOrigin, status: TicketStatus, report: Option<&str>, at: i64) -> Ticket {
+        Ticket {
+            id: format!("ticket-{title}"),
+            task_id: "bot".into(),
+            title: title.into(),
+            text: title.into(),
+            origin,
+            asker: None,
+            explicit: true,
+            status,
+            report: report.map(str::to_owned),
+            project: None,
+            priority: 1,
+            created_at: at,
+            updated_at: at,
+        }
+    }
+
+    #[test]
+    fn the_main_bot_is_told_how_things_stand_from_the_records() {
+        let minute = 60_000;
+        let now = 100 * minute;
+        let tickets = vec![
+            ("Dev".to_owned(), ticket("Add a changelog", TicketOrigin::Main, TicketStatus::Accepted, None, now - 12 * minute)),
+            ("Dev 2".to_owned(), ticket("Fix the login crash (#7)", TicketOrigin::Github, TicketStatus::Accepted, None, now)),
+            ("Reviewer".to_owned(), ticket("Review PR #26", TicketOrigin::Github, TicketStatus::Proposed, None, now)),
+            ("Dev".to_owned(), ticket("Old work", TicketOrigin::Main, TicketStatus::Finished, Some("done"), now)),
+        ];
+        let said = stand(now, &[], &tickets);
+        assert!(said.starts_with("How things stand now ("), "{said}");
+        assert!(said.contains("Waiting for the person:\n- \"Review PR #26\" for Reviewer waits for the person's yes"), "{said}");
+        assert!(said.contains("Given out by you, still being worked on:\n- Dev: \"Add a changelog\", given 12 min ago"), "{said}");
+        assert!(said.contains("Also at work, not through you:\n- Dev 2: \"Fix the login crash (#7)\" (from GitHub)"), "{said}");
+        assert!(!said.contains("Old work"), "what is finished is not how things stand: {said}");
+        assert!(stand(now, &[], &[]).ends_with("There are no bots yet."));
+    }
+
+    #[test]
+    fn a_long_list_is_cut_and_says_how_much_is_left() {
+        let lines: Vec<String> = (1..=15).map(|n| format!("- {n}")).collect();
+        let shown = listed("Title:", lines, 12, "list_bots");
+        assert_eq!(shown.len(), 14);
+        assert_eq!(shown.last().unwrap(), "- and 3 more (list_bots shows all)");
+        assert!(listed("Title:", Vec::new(), 12, "list_bots").is_empty());
+    }
+
+    #[test]
+    fn a_fresh_context_is_told_the_latest_reports() {
+        let hour = 3_600_000;
+        let now = 100 * hour;
+        let long = format!("Start of the report. {} The one question: which folder?", "middle ".repeat(80));
+        let tickets = vec![
+            ("Dev".to_owned(), ticket("Add a changelog", TicketOrigin::Main, TicketStatus::Finished, Some(&long), now - 2 * hour)),
+            ("Dev".to_owned(), ticket("Run make test", TicketOrigin::Main, TicketStatus::Failed, Some("There is no Makefile."), now - hour)),
+            ("Dev".to_owned(), ticket("Still open", TicketOrigin::Main, TicketStatus::Accepted, None, now)),
+        ];
+        let said = kept(now, &tickets);
+        let lines: Vec<&str> = said.lines().collect();
+        assert_eq!(lines[0], "The latest reports of what bots were given:");
+        // The newest first, and how each ended.
+        assert_eq!(lines[1], "- Dev, \"Run make test\", failed 1 h ago: \"There is no Makefile.\"");
+        assert!(lines[2].starts_with("- Dev, \"Add a changelog\", finished 2 h ago: \"Start of the report."), "{said}");
+        // A long report keeps its start and its end, where the question is.
+        assert!(lines[2].ends_with("which folder?\""), "{said}");
+        assert!(lines[2].chars().count() < 280, "{said}");
+        assert!(!said.contains("Still open"));
+        assert!(kept(now, &[]).starts_with("list_bots and get_bot"));
+    }
 
     #[test]
     fn every_bot_can_reach_the_others_and_only_the_main_bot_makes_them() {

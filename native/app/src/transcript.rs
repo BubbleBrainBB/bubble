@@ -465,8 +465,14 @@ pub fn overlay(lines: &mut Vec<Line>, checkpoints: Vec<(String, String)>) {
             })
             .map_or(lines.len(), |n| start + 1 + n);
         // What the person was told while the turn ran, or after it, is no
-        // part of the turn: it stays, after it.
-        saved.extend(lines[start + 1..end].iter().filter(|l| l.kind == LineKind::Message(MessageRole::Told)).cloned());
+        // part of the turn: it stays, after it. So does the line that says
+        // the agent's context started afresh before the next message.
+        saved.extend(
+            lines[start + 1..end]
+                .iter()
+                .filter(|l| l.kind == LineKind::Message(MessageRole::Told) || (l.kind == LineKind::Notice && l.text == crate::state::FRESH_NOTE))
+                .cloned(),
+        );
         lines.splice(start + 1..end, saved);
     }
 }

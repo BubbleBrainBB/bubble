@@ -26,7 +26,7 @@ pub use events::{Approval, ApprovalRequest, Event, SessionMessage, SubagentUpdat
 pub use launch::Launch;
 
 /// The protocol version this client speaks.
-pub const PROTOCOL_VERSION: u64 = 1;
+pub const PROTOCOL_VERSION: u64 = 2;
 
 /// The threads the client's own tasks run on.
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -85,6 +85,31 @@ pub struct TurnRequest {
     /// Only these built-in tools; `None` offers all.
     pub allowed_tools: Option<Vec<String>>,
     pub host_tools: Vec<HostTool>,
+    /// The session is a conversation that does not end: its agent moves on
+    /// to an empty thread once its context holds too much.
+    pub conversation: Option<ConversationTurn>,
+}
+
+/// What a turn of a long conversation carries besides the message.
+#[derive(Clone, Debug, Default)]
+pub struct ConversationTurn {
+    /// What the app keeps outside the conversation, for an agent that has
+    /// just started on an empty thread. Sent with every turn; the host
+    /// uses it when a briefing is due.
+    pub brief: Option<String>,
+    /// How things stand now, from the app's own records.
+    pub standing: Option<String>,
+}
+
+/// What came of asking for a fresh context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fresh {
+    /// The agent is on an empty thread from here.
+    Started,
+    /// The thread in use held nothing: there was nothing to leave behind.
+    Nothing,
+    /// A turn runs; the next one starts on an empty thread and says so.
+    Pending,
 }
 
 /// A model a turn can run on.
@@ -414,7 +439,28 @@ impl Host {
         if let Some(tools) = turn.allowed_tools {
             fields.insert("allowedTools".into(), json!(tools));
         }
+        if let Some(conversation) = turn.conversation {
+            let mut carried = serde_json::Map::new();
+            if let Some(brief) = conversation.brief {
+                carried.insert("brief".into(), json!(brief));
+            }
+            if let Some(standing) = conversation.standing {
+                carried.insert("standing".into(), json!(standing));
+            }
+            fields.insert("conversation".into(), Value::Object(carried));
+        }
         self.call("turn/start", params).await.map(|_| ())
+    }
+
+    /// Puts the agent of a long conversation on an empty thread: now when
+    /// nothing runs, else with its next turn.
+    pub async fn fresh_context(&self, session_id: &str) -> Result<Fresh> {
+        let result = self.call("conversation/fresh", json!({ "sessionId": session_id })).await?;
+        Ok(match (result.get("outcome").and_then(Value::as_str), result.get("part")) {
+            (Some("pending"), _) => Fresh::Pending,
+            (_, Some(part)) if !part.is_null() => Fresh::Started,
+            _ => Fresh::Nothing,
+        })
     }
 
     /// Stops the session's running turn (and what waits behind it).
@@ -598,6 +644,10 @@ impl Inner {
                     if let Ok(started) = serde_json::from_value(params) {
                         self.deliver(&session, SessionMessage::Started(started));
                     }
+                }
+                "conversation/fresh" => {
+                    let automatic = params.get("trigger").and_then(Value::as_str) == Some("auto");
+                    self.deliver(&session, SessionMessage::Fresh { automatic });
                 }
                 "request/cancelled" => {
                     let Some(id) = params.get("id").and_then(Value::as_str) else { return };

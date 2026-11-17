@@ -479,6 +479,32 @@ impl AppState {
         });
     }
 
+    /// Puts the main bot's agent on an empty context, as the person asked:
+    /// at once when it is not in a turn, else with its next one. The
+    /// conversation stays as it is, with a line where its memory ends.
+    pub fn fresh_main_context(&self) {
+        let app = *self;
+        let conversation = self.manager_conversation();
+        let Some(run) = self.with_store(|s| s.manager_run(None)) else { return };
+        let session = engine::session_of(&run.id);
+        let home = run.cwd.as_deref().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(scratch_folder).to_string_lossy().into_owned();
+        let hosts = self.hosts.get();
+        spawn(async move {
+            let done = background(async move {
+                let host = hosts.get().await?;
+                host.open_session(&session, &home).await?;
+                host.fresh_context(&session).await
+            })
+            .await;
+            match done {
+                Ok(Ok(bubble_host::Fresh::Started)) => conversation.note_fresh(app, &run.id, false),
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => log::warn!("a fresh context for the main bot: {error:#}"),
+                Err(error) => log::warn!("a fresh context for the main bot: {error}"),
+            }
+        });
+    }
+
     pub fn sign_out(&self, subscription: bubble_core::auth::Subscription) {
         let app = *self;
         let hosts = self.hosts.get();
@@ -1936,7 +1962,8 @@ impl Conversation {
             None => {
                 // The main bot reads the team's notes and keeps them.
                 let notes = crate::memory::prompt(&Sender::Main, None);
-                let prompt = if notes.is_empty() { manager::PROMPT.to_owned() } else { format!("{}\n\n{notes}", manager::PROMPT) };
+                let prompt = format!("{}\n\n{}", manager::PROMPT, manager::LASTING);
+                let prompt = if notes.is_empty() { prompt } else { format!("{prompt}\n\n{notes}") };
                 let mut tools = manager::specs();
                 tools.extend(crate::memory::specs());
                 (Some(with_instructions(prompt, None)), None, None, tools, None)
@@ -2022,6 +2049,13 @@ impl Conversation {
             system_prompt,
             host_tools: transcript::with_doing(host_tools),
             recap,
+            // The main bot's conversation does not end: its agent goes on
+            // from an empty context once it holds too much, told what the
+            // app keeps outside it. Bots still keep one session each.
+            conversation: task_id.is_none().then(|| bubble_host::ConversationTurn {
+                brief: Some(manager::kept_outside(app)),
+                standing: Some(manager::how_things_stand(app)),
+            }),
         };
         let hosts = app.hosts.get();
         let stop = Arc::new(tokio::sync::Notify::new());
@@ -2041,6 +2075,7 @@ impl Conversation {
                     match event {
                         TurnEvent::Agent(event) => conversation.apply(app, &run_id, event, &mut step),
                         TurnEvent::Compacted => conversation.note_compaction(),
+                        TurnEvent::Fresh => conversation.note_fresh(app, &run_id, true),
                         TurnEvent::Retried => conversation.drop_pending_reply(),
                         TurnEvent::Question { call_id, asks, respond } => {
                             conversation.ask_person(app, &run_id, call_id.as_deref(), asks, respond)
@@ -2224,6 +2259,29 @@ impl Conversation {
         self.changed();
     }
 
+    /// The agent's context started afresh: a line across the conversation
+    /// marks where what it still has begins. `with_turn`: it came as a
+    /// turn started, so the line stands before the message that set the
+    /// turn going; else it closes the conversation so far.
+    fn note_fresh(&self, app: AppState, run_id: &str, with_turn: bool) {
+        let before = with_turn
+            .then(|| {
+                self.lines.with_untracked(|lines| {
+                    lines
+                        .iter()
+                        .rev()
+                        .find(|l| matches!(l.kind, LineKind::Message(MessageRole::User | MessageRole::System | MessageRole::External)))
+                        .map(|l| l.id.clone())
+                })
+            })
+            .flatten();
+        let content = before.as_ref().map(|id| serde_json::json!({ "before": id }).to_string());
+        let Some(saved) = app.with_store(|s| s.append_message_with(run_id, MessageRole::Fresh, FRESH_NOTE, content.as_deref())) else { return };
+        let note = Line { at: saved.created_at, ..Line::new(saved.id, LineKind::Notice, FRESH_NOTE) };
+        self.lines.update(|lines| place_fresh(lines, note, before.as_deref()));
+        self.changed();
+    }
+
     /// The agent summarized the conversation so far to stay within the
     /// model's context; shown before the reply in progress.
     fn note_compaction(&self) {
@@ -2374,6 +2432,9 @@ impl Conversation {
 }
 
 pub(crate) const CHECKPOINT_NOTE: &str = "Earlier messages were summarized to stay within the model's context";
+/// The line across a long conversation where its agent's context started
+/// afresh: it no longer has what stands above.
+pub(crate) const FRESH_NOTE: &str = "Context starts afresh here";
 
 /// A system prompt with the person's AGENTS.md instructions after it.
 fn with_instructions(prompt: String, cwd: Option<&std::path::Path>) -> String {
@@ -2474,6 +2535,17 @@ fn history_of(messages: &[Message]) -> Vec<ChatMessage> {
     bubble_store::history(messages)
 }
 
+/// Puts the line that marks a fresh context where it belongs: before the
+/// message that set going the turn it came with (and before the time over
+/// that message, which is the message's own), else at the end.
+fn place_fresh(lines: &mut Vec<Line>, note: Line, before: Option<&str>) {
+    let at = before.and_then(|id| lines.iter().rposition(|l| l.id == id));
+    match at {
+        Some(at) => lines.insert(at, note),
+        None => lines.push(note),
+    }
+}
+
 /// The lines of `runs`, oldest first: messages, the tools each reply
 /// called, where each later run begins and why a failed one stopped.
 /// Who began a run, by its first message.
@@ -2521,6 +2593,16 @@ fn lines_of(store: &Store, runs: &[Run]) -> anyhow::Result<Vec<Line>> {
         for message in store.messages(&run.id)? {
             if message.role == MessageRole::Checkpoint {
                 lines.push(Line { at: message.created_at, ..Line::new(message.id.clone(), LineKind::Notice, CHECKPOINT_NOTE) });
+                continue;
+            }
+            if message.role == MessageRole::Fresh {
+                let before = message
+                    .content
+                    .as_deref()
+                    .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
+                    .and_then(|c| c["before"].as_str().map(str::to_owned));
+                let note = Line { at: message.created_at, ..Line::new(message.id.clone(), LineKind::Notice, FRESH_NOTE) };
+                place_fresh(&mut lines, note, before.as_deref());
                 continue;
             }
             let parsed = message.content.as_deref().and_then(|c| serde_json::from_str::<ChatMessage>(c).ok());

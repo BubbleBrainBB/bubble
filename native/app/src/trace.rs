@@ -160,6 +160,7 @@ fn doing(name: &str, title: &str, key: &str) -> String {
         "create_bot" => "Setting up a bot".to_owned(),
         "list_bots" | "get_bot" | "list_projects" | "update_bot" | "link_github" => "Checking with the team".to_owned(),
         "remember" | "forget" | "recall" | "memory" => "Checking its notes".to_owned(),
+        "read_own_chat" => "Looking back at what was said".to_owned(),
         "list_routines" | "add_routine" | "remove_routine" => "Setting its routines".to_owned(),
         "skill" | "skill_search" | "tool_search" => "Getting ready".to_owned(),
         name if name.starts_with("github_") => "Working on GitHub".to_owned(),
@@ -172,7 +173,7 @@ fn doing(name: &str, title: &str, key: &str) -> String {
 fn look(name: &str) -> Mood {
     match name {
         "bash" | "background_task" | "task_output" | "kill_task" => Mood::Running,
-        "read" | "grep" | "glob" | "ls" | "lsp" | "notebook_read" | "web_fetch" | "recall" | "skill" => Mood::Reading,
+        "read" | "grep" | "glob" | "ls" | "lsp" | "notebook_read" | "web_fetch" | "recall" | "read_own_chat" | "skill" => Mood::Reading,
         "write" | "edit" | "multi_edit" | "apply_patch" | "notebook_edit" | "remember" | "forget" | "add_routine" => Mood::Writing,
         "web_search" | "skill_search" | "tool_search" => Mood::Searching,
         "message_bot" | "create_bot" | "list_bots" | "get_bot" | "update_bot" | "spawn_agent" | "run_workflow" | "wait_workflow" | "agent_batch" => {

@@ -316,6 +316,12 @@ pub enum SessionMessage {
     Withdrawn {
         id: String,
     },
+    /// The turn that is starting runs on an empty thread: the agent of a
+    /// long conversation no longer has what was said before. `automatic`:
+    /// its context had filled up; else someone asked.
+    Fresh {
+        automatic: bool,
+    },
     /// The host process ended; nothing more comes.
     Lost(String),
 }
