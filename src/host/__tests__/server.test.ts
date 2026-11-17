@@ -122,9 +122,9 @@ describe("bubble host", () => {
   let app: App;
   let running: Promise<void>;
 
-  function start(provider: Provider) {
+  function start(provider: Provider, model = "test:model") {
     const sdk = new BubbleSdk({ defaultCwd: project, mcp: false });
-    (sdk as any).resolveProvider = () => ({ provider, providerId: "test", model: "test:model" });
+    (sdk as any).resolveProvider = () => ({ provider, providerId: model.split(":")[0], model });
     app = new App();
     running = new HostServer({ input: app.toHost, output: app.fromHost, sdk, bubbleVersion: "9.9.9" }).run();
   }
@@ -153,7 +153,7 @@ describe("bubble host", () => {
     app.answers.set("approval/request", () => ({ action: "approve" }));
     app.answers.set("tool/call", (params) => ({ content: `noted: ${params.args.text}` }));
 
-    expect(await app.call("initialize")).toMatchObject({ protocolVersion: 1, bubbleVersion: "9.9.9", home });
+    expect(await app.call("initialize")).toMatchObject({ protocolVersion: 2, bubbleVersion: "9.9.9", home });
     const session = await app.call("session/create", { cwd: project });
     await app.call("turn/start", {
       sessionId: session.id,
@@ -268,6 +268,120 @@ describe("bubble host", () => {
     const contents = second.seen[0].messages.map((m) => ("content" in m ? m.content : ""));
     expect(contents).toContain("First answer.");
     expect(contents).toContain("two");
+  });
+
+  it("moves a long conversation on to an empty thread once its context is over the limit", async () => {
+    const { provider, seen } = scripted([
+      { text: "First answer." },
+      { text: "Second answer." },
+      { tool: { id: "call-1", name: "read_own_chat", args: { query: "harbour" } } },
+      { text: "It is 4417." },
+      { text: "Fourth answer." },
+    ]);
+    // A model whose window is known, and far larger than the limit below.
+    start(provider, "google:gemini-4-carbon");
+    const session = await app.call("session/create", { cwd: project, id: "desk-main" });
+    const conversation = { limit: { tokens: 20_000 }, standing: "Dev is idle.", brief: "What you handed out: nothing yet." };
+    const turn = async (prompt: string) => {
+      const before = app.events(session.id).filter((e) => e.terminal).length;
+      await app.call("turn/start", { sessionId: session.id, prompt, conversation });
+      await app.until(() => app.events(session.id).filter((e) => e.terminal).length > before, "the turn to end");
+    };
+    const said = (request: { messages: Message[] }) => request.messages.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+    const fresh = () => app.notifications.filter((n) => n.method === "conversation/fresh").map((n) => n.params);
+
+    // The first turn fills the context past the limit; nothing moves yet.
+    await turn(`The harbour code is 4417. ${"filler ".repeat(30_000)}`);
+    expect(said(seen[0])).toContain("<conversation_standing>\nDev is idle.");
+    expect(said(seen[0])).not.toContain("<conversation_brief>");
+    expect(seen[0].tools).toContain("read_own_chat");
+    expect(fresh()).toEqual([]);
+
+    // The next one runs on an empty thread: told how the conversation ended and what the app kept, not sent the conversation.
+    await turn("second");
+    expect(fresh()).toEqual([{ sessionId: "desk-main", trigger: "auto", part: 2 }]);
+    const second = said(seen[1]);
+    expect(second).toContain("<conversation_brief>\nYour context starts afresh here");
+    expect(second).toContain('You answered: "First answer."');
+    expect(second).toContain("What you handed out: nothing yet.");
+    expect(second).toContain("Dev is idle.");
+    // Of the long first message only its start is quoted.
+    const sent = seen[1].messages.filter((m) => m.role === "user" && String(m.content).includes("second")).map((m) => String(m.content));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].length).toBeLessThan(2_000);
+    // Reminders the agent's own runtime adds are not part of what was said.
+    expect(sent[0]).not.toContain("bubble_internal_reminder");
+    expect(seen[1].messages.some((m) => m.role === "assistant")).toBe(false);
+    // The app still knows it by the one id: events, state and history are the thread's in use.
+    expect(app.events("desk-main").filter((e) => e.terminal)).toHaveLength(2);
+    expect(await app.call("session/state", { sessionId: "desk-main" })).toMatchObject({ active: false });
+    const history = (await app.call("session/history", { sessionId: "desk-main" })).messages as Message[];
+    expect(history.filter((m) => m.role === "assistant").map((m) => m.content)).toEqual(["Second answer."]);
+
+    // What was said on the thread left behind can still be found, and the briefing is not given twice.
+    await turn("what was the harbour code?");
+    expect(said(seen[2])).not.toContain("<conversation_brief>\nYour context starts afresh here\n");
+    expect(seen[2].messages.filter((m) => m.role === "user" && String(m.content).includes("<conversation_brief>"))).toHaveLength(1);
+    const found = seen[3].messages.find((m) => m.role === "tool")!;
+    expect(found.content).toContain("[part 1 #1] To you: The harbour code is 4417.");
+    expect(fresh()).toHaveLength(1);
+
+    // The person asks for a fresh context: at once, since nothing runs.
+    expect(await app.call("conversation/fresh", { sessionId: "desk-main" })).toEqual({ outcome: "done", part: 3 });
+    await turn("fourth");
+    // The answer said so; no turn began on it unannounced.
+    expect(fresh()).toHaveLength(1);
+    expect(said(seen[4])).toContain('You were sent: "what was the harbour code?" You answered: "It is 4417."');
+    expect(seen[4].messages.some((m) => m.role === "assistant")).toBe(false);
+
+    // It goes with every thread it ran on.
+    const mine = async () => ((await app.call("session/list")).sessions as Array<{ id?: string; name?: string; file?: string }>).filter((s) => JSON.stringify(s).includes("desk-main"));
+    expect((await mine()).length).toBe(3);
+    await app.call("session/delete", { sessionId: "desk-main" });
+    expect(await mine()).toEqual([]);
+    expect(existsSync(join(home, "conversations", "desk-main.json"))).toBe(false);
+  });
+
+  it("finds a long conversation's thread again after the host was restarted", async () => {
+    const first = scripted([{ text: "First answer." }]);
+    start(first.provider, "google:gemini-4-carbon");
+    await app.call("session/create", { cwd: project, id: "desk-main" });
+    await app.call("turn/start", { sessionId: "desk-main", prompt: "one", conversation: {} });
+    await app.terminal("desk-main");
+    // A fresh context nobody has written on yet: its session is not on disk.
+    expect(await app.call("conversation/fresh", { sessionId: "desk-main" })).toEqual({ outcome: "done", part: 2 });
+    await app.call("shutdown");
+    await running;
+
+    const second = scripted([{ text: "Second answer." }]);
+    start(second.provider, "google:gemini-4-carbon");
+    await app.call("session/create", { cwd: project, id: "desk-main" });
+    expect(await app.call("session/state", { sessionId: "desk-main" })).toMatchObject({ active: false });
+    await app.call("turn/start", { sessionId: "desk-main", prompt: "two", conversation: { brief: "Kept by the app." } });
+    await app.terminal("desk-main");
+    // Still on the empty thread, and told now what it was owed.
+    const sent = second.seen[0].messages.filter((m) => m.role === "user").map((m) => String(m.content)).join("\n");
+    expect(sent).toContain('You were sent: "one" You answered: "First answer."');
+    expect(sent).toContain("Kept by the app.");
+    expect(second.seen[0].messages.some((m) => m.role === "assistant")).toBe(false);
+    expect(app.notifications.filter((n) => n.method === "conversation/fresh")).toEqual([]);
+  });
+
+  it("leaves a session alone that is not a long conversation", async () => {
+    const { provider, seen } = scripted([{ text: "One." }, { text: "Two." }]);
+    start(provider, "google:gemini-4-carbon");
+    const session = await app.call("session/create", { cwd: project, id: "desk-plain" });
+    await app.call("turn/start", { sessionId: session.id, prompt: `big ${"filler ".repeat(30_000)}` });
+    await app.terminal(session.id);
+    await app.call("turn/start", { sessionId: session.id, prompt: "again" });
+    await app.until(() => app.events(session.id).filter((e) => e.terminal).length === 2, "the second turn to end");
+    expect(seen[1].messages.filter((m) => m.role === "assistant").map((m) => m.content)).toEqual(["One."]);
+    expect(seen[1].tools).not.toContain("read_own_chat");
+    expect(existsSync(join(home, "conversations"))).toBe(false);
+    // Nothing to leave behind on a session that was never a conversation's and holds nothing.
+    await app.call("session/create", { cwd: project, id: "desk-empty" });
+    expect(await app.call("conversation/fresh", { sessionId: "desk-empty" })).toEqual({ outcome: "done" });
+    expect(app.notifications.filter((n) => n.method === "conversation/fresh")).toEqual([]);
   });
 
   it("lists skills and accounts, and names what it does not know", async () => {

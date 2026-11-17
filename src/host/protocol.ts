@@ -17,6 +17,7 @@
  *   turn/start        TurnStartParams                      -> {}
  *   turn/steer        { sessionId, content }               -> { accepted, disposition, reason? }
  *   turn/stop         { sessionId, cancelQueued? }         -> { stopped }
+ *   conversation/fresh { sessionId }                       -> { outcome: "done" | "pending", part? }
  *   models/list       { refresh? }                         -> ModelsResult
  *   skills/list       { cwd?, skillPaths? }                -> { skills, problems }
  *   mcp/status        { cwd? }                             -> { servers }
@@ -38,15 +39,22 @@
  * Host to app (notifications)
  *   session/event     { sessionId, turnId, sequence, event, terminal? }
  *   turn/started      { sessionId, providerId, model, thinkingLevel, mode, tools, skills }
+ *   conversation/fresh { sessionId, trigger, part }  as a turn starts: the agent of a long conversation is on an empty thread from here
  *   request/cancelled { id }      a host request the app need not answer any more
  *   auth/progress     { providerId, message }
  *   log               { message }
  */
 
 import type { AgentEvent, ContentPart, PermissionMode, ThinkingLevel } from "../types.js";
+import type { ConversationTurn } from "../sdk/conversation.js";
 import type { SdkSessionTerminal } from "../sdk/index.js";
 
-export const HOST_PROTOCOL_VERSION = 1;
+/**
+ * 2: long conversations (`conversation` on turn/start, conversation/fresh).
+ * An app that sends `conversation` to a host of version 1 would have it
+ * ignored without a word, so the version says which host it has.
+ */
+export const HOST_PROTOCOL_VERSION = 2;
 
 export interface HostInfo {
   protocolVersion: number;
@@ -84,6 +92,24 @@ export interface TurnStartParams {
   allowedTools?: string[];
   hostTools?: HostToolSpec[];
   skillPaths?: string[];
+  /**
+   * This session is a conversation that does not end (sdk/conversation.ts):
+   * `sessionId` stays the app's name for it, while the agent moves on to an
+   * empty thread once its context holds more than the limit. `brief` is
+   * what the app keeps outside the conversation, used when the agent has to
+   * be told what went before; `standing` is how things stand now, sent with
+   * every message.
+   */
+  conversation?: ConversationTurn;
+}
+
+/** The agent of a long conversation started on an empty thread. */
+export interface ConversationFreshParams {
+  sessionId: string;
+  /** "auto": its context had filled up. "manual": someone asked. */
+  trigger: "auto" | "manual";
+  /** Which thread of the conversation it is on now, counting from 1. */
+  part: number;
 }
 
 export interface SessionEventParams {

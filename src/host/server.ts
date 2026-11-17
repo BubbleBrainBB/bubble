@@ -22,6 +22,17 @@ import {
   type SdkSessionHandle,
   type ToolRegistryEntry,
 } from "../sdk/index.js";
+import {
+  Conversations,
+  READ_OWN_CHAT_DESCRIPTION,
+  READ_OWN_CHAT_PARAMETERS,
+  READ_OWN_CHAT_TOOL,
+  conversationBrief,
+  conversationPrompt,
+  readOwnChat,
+  type ConversationLimit,
+  type ConversationTurn,
+} from "../sdk/conversation.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { getAvailableThinkingLevels } from "../variant/variant-resolver.js";
 import { getBubbleHome } from "../bubble-home.js";
@@ -50,6 +61,8 @@ export interface HostServerOptions {
   bubbleVersion?: string;
   /** Sign-in, injectable for tests. */
   login?: (providerId: string, onStatus: (message: string) => void) => Promise<void>;
+  /** The long conversations this host keeps; those of the Bubble home when absent. */
+  conversations?: Conversations;
 }
 
 /** JSON-RPC error codes this host uses. */
@@ -70,6 +83,8 @@ class HostError extends Error {
 }
 
 interface WatchedSession {
+  /** The id the app knows it by: a long conversation's, whichever of its threads this is. */
+  app: string;
   handle: SdkSessionHandle;
   /** Tool calls that started and have not ended, for matching approvals to calls. */
   running: Map<string, { name: string; args: Record<string, unknown> }>;
@@ -88,7 +103,13 @@ export class HostServer {
   private readonly input: Readable;
   private readonly bubbleVersion: string;
   private readonly login: NonNullable<HostServerOptions["login"]>;
+  /** By the session a turn runs on: a long conversation's thread in use, else the app's own id. */
   private readonly sessions = new Map<string, WatchedSession>();
+  private readonly conversations: Conversations;
+  /** Long conversations with a turn under way, by the app's id, and what that turn's end has to settle. */
+  private readonly conversationTurns = new Map<string, { briefed: boolean; limit?: ConversationLimit; automatic?: boolean }>();
+  /** Threads this process has made sure the SDK can find. */
+  private readonly threadsSeen = new Set<string>();
   private readonly outstanding = new Map<string, Outstanding>();
   private nextRequestId = 0;
   private closed = false;
@@ -100,6 +121,7 @@ export class HostServer {
     this.output = options.output;
     this.bubbleVersion = options.bubbleVersion ?? "0.0.0";
     this.login = options.login ?? ((providerId, onStatus) => signIn(this.sdk, providerId, onStatus));
+    this.conversations = options.conversations ?? new Conversations();
   }
 
   /** Serves until the input ends or the app asks to shut down. */
@@ -205,29 +227,36 @@ export class HostServer {
       case "session/history":
         return {
           messages: this.sdk
-            .getHistory(requireString(params, "sessionId"))
+            .getHistory(this.threadOf(requireString(params, "sessionId")))
             .filter((message) => message.role !== "system" && message.role !== "meta"),
         };
       case "session/state":
-        return this.sdk.getSessionRunState(requireString(params, "sessionId"));
+        return this.sdk.getSessionRunState(this.threadOf(requireString(params, "sessionId")));
       case "session/delete": {
         const sessionId = requireString(params, "sessionId");
-        this.sessions.get(sessionId)?.handle.close();
-        this.sessions.delete(sessionId);
-        await this.sdk.deleteSession(sessionId);
+        // A long conversation goes with every thread it ran on.
+        for (const thread of this.conversations.known(sessionId) ? this.conversations.threads(sessionId) : [sessionId]) {
+          this.sessions.get(thread)?.handle.close();
+          this.sessions.delete(thread);
+          await this.sdk.deleteSession(thread);
+        }
+        this.conversations.forget(sessionId);
+        this.conversationTurns.delete(sessionId);
         return {};
       }
+      case "conversation/fresh":
+        return this.freshContext(requireString(params, "sessionId"));
       case "turn/start":
         return this.startTurn(params as TurnStartParams);
       case "turn/steer": {
-        const result = this.sdk.steer(requireString(params, "sessionId"), requireString(params, "content"));
+        const result = this.sdk.steer(this.threadOf(requireString(params, "sessionId")), requireString(params, "content"));
         return result.accepted
           ? { accepted: true, disposition: result.disposition }
           : { accepted: false, disposition: result.disposition, reason: result.reason };
       }
       case "turn/stop":
         return {
-          stopped: this.sdk.stop(requireString(params, "sessionId"), { cancelQueued: params.cancelQueued === true }),
+          stopped: this.sdk.stop(this.threadOf(requireString(params, "sessionId")), { cancelQueued: params.cancelQueued === true }),
         };
       case "models/list":
         return this.listModels(params.refresh === true);
@@ -279,10 +308,14 @@ export class HostServer {
     if (typeof prompt !== "string" && !Array.isArray(prompt)) {
       throw new HostError(INVALID_PARAMS, "prompt must be a string or a list of content parts");
     }
+    const conversation = this.enterConversation(sessionId, params.conversation, prompt);
+    const thread = conversation?.thread ?? sessionId;
     // Subscribe before the turn starts so its first event is not missed.
-    this.watch(sessionId);
+    this.watch(thread, sessionId);
+    const hostTools = (params.hostTools ?? []).map((spec) => this.hostTool(sessionId, spec));
+    if (conversation) hostTools.push(this.readOwnChatTool(sessionId));
     const options: RunTurnOptions = {
-      prompt,
+      prompt: conversation?.prompt ?? prompt,
       cwd: typeof params.cwd === "string" ? params.cwd : undefined,
       model: params.model,
       mode: params.mode,
@@ -295,7 +328,7 @@ export class HostServer {
       skillPaths: params.skillPaths,
       // The person already sent it; a stop during setup must not lose it.
       preserveInterruptedInput: true,
-      hostTools: (params.hostTools ?? []).map((spec) => this.hostTool(sessionId, spec)),
+      hostTools,
       onStart: (info) => this.notify("turn/started", { sessionId, ...info }),
       onApproval: (request) => this.requestApproval(sessionId, request),
       onQuestion: async (request) =>
@@ -309,17 +342,118 @@ export class HostServer {
     };
     // The session subscription carries the events; this iterator is a second
     // reader the host does not need.
-    void this.sdk.runTurn(sessionId, options).return(undefined);
+    void this.sdk.runTurn(thread, options).return(undefined);
     return {};
   }
 
-  private watch(sessionId: string): WatchedSession {
+  // ── Long conversations (sdk/conversation.ts) ─────────────────────────────
+
+  /** The session a turn of `sessionId` runs on: a long conversation's thread in use, else itself. */
+  private threadOf(sessionId: string): string {
+    if (!this.conversations.known(sessionId)) return sessionId;
+    const thread = this.conversations.thread(sessionId);
+    if (thread !== sessionId && !this.threadsSeen.has(thread)) {
+      // A thread is written to disk with its first message. One that was
+      // started and never used before the host went away is known only by
+      // name: make it again, where the conversation's first session is.
+      try {
+        const first = this.sdk.openSession(sessionId);
+        first.close();
+        this.sdk.createSession({ cwd: first.cwd, id: thread });
+        this.threadsSeen.add(thread);
+      } catch {
+        // The app has not opened the conversation yet; it will, before a turn.
+      }
+    }
+    return thread;
+  }
+
+  /** Makes the session of a conversation's next thread, in the folder of its first. */
+  private openThread(sessionId: string, thread: string): void {
+    const first = this.sdk.openSession(sessionId);
+    first.close();
+    this.sdk.createSession({ cwd: first.cwd, id: thread });
+    this.threadsSeen.add(thread);
+    // Nothing more comes from the thread left behind.
+    const left = this.conversations.thread(sessionId);
+    this.sessions.get(left)?.handle.close();
+    this.sessions.delete(left);
+  }
+
+  /**
+   * A turn of a long conversation is about to be sent: a fresh context that
+   * is due starts here, and the message is given what goes around it. None
+   * of that while an earlier turn still runs: the message joins that turn's
+   * thread as it is.
+   */
+  private enterConversation(
+    sessionId: string,
+    given: unknown,
+    prompt: TurnStartParams["prompt"],
+  ): { thread: string; prompt: TurnStartParams["prompt"] } | undefined {
+    if (!given || typeof given !== "object") return undefined;
+    const turn = given as ConversationTurn;
+    const standing = typeof turn.standing === "string" ? turn.standing : undefined;
+    if (this.sdk.getSessionRunState(this.threadOf(sessionId)).active) {
+      return { thread: this.threadOf(sessionId), prompt: conversationPrompt(prompt, { standing }) };
+    }
+    const entered = this.conversations.beforeTurn(sessionId, (thread) => this.openThread(sessionId, thread));
+    const threads = this.conversations.threads(sessionId);
+    if (entered.started) this.notify("conversation/fresh", { sessionId, trigger: entered.started, part: threads.length });
+    const brief = entered.brief
+      ? conversationBrief(
+          threads.length > 1 ? this.sdk.getHistory(threads[threads.length - 2]) : [],
+          typeof turn.brief === "string" ? turn.brief : undefined,
+          Math.max(1, threads.length - 1),
+        )
+      : undefined;
+    this.conversationTurns.set(sessionId, { briefed: entered.brief, limit: turn.limit, automatic: turn.automatic });
+    return { thread: entered.thread, prompt: conversationPrompt(prompt, { brief, standing }) };
+  }
+
+  /**
+   * Someone asked for a fresh context: now when nothing runs (`part` is the
+   * thread the agent is on from here), else with the next turn, which
+   * says so itself as it starts. "done" with no `part`: the thread in use
+   * was empty already.
+   */
+  private freshContext(sessionId: string): { outcome: "done" | "pending"; part?: number } {
+    const thread = this.threadOf(sessionId);
+    let empty = true;
+    let busy = false;
+    try {
+      empty = this.sdk.getHistory(thread).every((message) => message.role === "system" || message.role === "meta");
+      busy = this.sdk.getSessionRunState(thread).active;
+    } catch {
+      // No such session yet: there is nothing to leave behind.
+    }
+    const result = this.conversations.requestFresh(sessionId, { busy, empty }, (next) => this.openThread(sessionId, next));
+    return { outcome: result.outcome, ...(result.thread ? { part: this.conversations.threads(sessionId).length } : {}) };
+  }
+
+  /** Searches every thread of the conversation, the ones left behind too. */
+  private readOwnChatTool(sessionId: string): ToolRegistryEntry {
+    return {
+      name: READ_OWN_CHAT_TOOL,
+      description: READ_OWN_CHAT_DESCRIPTION,
+      parameters: READ_OWN_CHAT_PARAMETERS as unknown as ToolRegistryEntry["parameters"],
+      readOnly: true,
+      execute: async (args) =>
+        readOwnChat(
+          this.conversations.threads(sessionId).map((thread) => this.sdk.getHistory(thread)),
+          args as { query?: unknown; around?: unknown },
+        ),
+    };
+  }
+
+  /** `sessionId` is the session the turn runs on; the app hears of it as `app`. */
+  private watch(sessionId: string, app: string = sessionId): WatchedSession {
     const existing = this.sessions.get(sessionId);
     if (existing) return existing;
     const handle = this.sdk.openSession(sessionId);
-    const watched: WatchedSession = { handle, running: new Map() };
+    const watched: WatchedSession = { app, handle, running: new Map() };
     this.sessions.set(sessionId, watched);
-    void this.pump(sessionId, watched, handle.latestSequence);
+    void this.pump(app, watched, handle.latestSequence);
     return watched;
   }
 
@@ -329,6 +463,9 @@ export class HostServer {
         const event = record.event;
         if (event.type === "tool_start") watched.running.set(event.id, { name: event.name, args: event.args });
         if (event.type === "tool_end") watched.running.delete(event.id);
+        if (event.type === "context_usage" && this.conversationTurns.has(sessionId)) {
+          this.conversations.noteUsage(sessionId, event.usedTokens, event.contextWindow);
+        }
         this.notify("session/event", {
           sessionId,
           turnId: record.turnId,
@@ -338,6 +475,11 @@ export class HostServer {
         } satisfies SessionEventParams);
         if (record.terminal) {
           watched.running.clear();
+          const turn = this.conversationTurns.get(sessionId);
+          if (turn) {
+            this.conversationTurns.delete(sessionId);
+            this.conversations.afterTurn(sessionId, { ...turn, completed: record.terminal.kind === "completed" });
+          }
           // Nothing the turn asked can be answered any more.
           for (const [id, pending] of this.outstanding) {
             if (pending.sessionId === sessionId) this.withdraw(id);
@@ -369,7 +511,7 @@ export class HostServer {
   /** The running tool call an approval request belongs to, when it can be told. */
   private callFor(sessionId: string, request: ApprovalRequest): string | undefined {
     if (request.type === "external_tool" && request.toolCallId) return request.toolCallId;
-    const running = [...(this.sessions.get(sessionId)?.running ?? [])];
+    const running = [...(this.sessions.get(this.threadOf(sessionId))?.running ?? [])];
     const named = (name: string) => running.filter(([, call]) => call.name === name);
     let candidates: typeof running;
     switch (request.type) {

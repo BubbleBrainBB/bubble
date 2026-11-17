@@ -1504,3 +1504,15 @@ export type {
   ToolResult,
   ToolUpdate,
 } from "../types.js";
+
+export {
+  CONVERSATION_LIMITS,
+  Conversations,
+  READ_OWN_CHAT_TOOL,
+  conversationBrief,
+  conversationLimit,
+  conversationPrompt,
+  readOwnChat,
+  withoutConversationBlocks,
+} from "./conversation.js";
+export type { ConversationLimit, ConversationState, ConversationTurn } from "./conversation.js";
