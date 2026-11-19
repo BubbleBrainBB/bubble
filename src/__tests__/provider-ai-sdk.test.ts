@@ -293,13 +293,13 @@ describe("ai-sdk provider request building", () => {
     }
   });
 
-  it("sends Gemini 4 Hydrogen its native xhigh level", async () => {
+  it.each(["gemini-4-hydrogen", "gemini-4-neon"])("sends %s its native xhigh level", async (model) => {
     for (const level of ["low", "medium", "high"] as const) {
-      const body = await captureBody(USER_MESSAGES, { model: "gemini-4-hydrogen", thinkingLevel: level });
+      const body = await captureBody(USER_MESSAGES, { model, thinkingLevel: level });
       expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: level, includeThoughts: true });
     }
     for (const level of ["off", "minimal"] as const) {
-      const body = await captureBody(USER_MESSAGES, { model: "gemini-4-hydrogen", thinkingLevel: level });
+      const body = await captureBody(USER_MESSAGES, { model, thinkingLevel: level });
       expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low", includeThoughts: true });
     }
     // The SDK schema stops at "high"; xhigh is restored on the wire and the
@@ -314,7 +314,7 @@ describe("ai-sdk provider request building", () => {
           candidates: [{ content: { parts: [] as unknown[], role: "model" }, finishReason: "STOP" }],
         }]));
       });
-      await collect(provider.streamChat(USER_MESSAGES, { model: "gemini-4-hydrogen", thinkingLevel: level }));
+      await collect(provider.streamChat(USER_MESSAGES, { model, thinkingLevel: level }));
       expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "xhigh", includeThoughts: true });
       expect(body.contents).toHaveLength(1);
       expect(headers.has("x-bubble-thinking-level")).toBe(false);
@@ -352,9 +352,28 @@ describe("ai-sdk provider complete()", () => {
       }), { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    await expect(provider.complete([{ role: "user", content: "hi" }], { model: "gemini-4-argon" }))
-      .resolves.toBe("Title");
-    expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low", includeThoughts: true });
+    for (const model of ["gemini-4-argon", "gemini-4-neon"]) {
+      await expect(provider.complete([{ role: "user", content: "hi" }], { model }))
+        .resolves.toBe("Title");
+      expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low", includeThoughts: true });
+    }
+  });
+
+  it("sends Gemini 4 Neon its native xhigh on a non-streaming call too", async () => {
+    let body: Record<string, any> = {};
+    let headers = new Headers();
+    const provider = makeProvider(async (_url, init) => {
+      body = JSON.parse(String(init?.body ?? "{}"));
+      headers = new Headers(init?.headers);
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: "Done" }], role: "model" }, finishReason: "STOP" }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    await expect(provider.complete([{ role: "user", content: "hi" }], { model: "gemini-4-neon", thinkingLevel: "xhigh" }))
+      .resolves.toBe("Done");
+    expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "xhigh", includeThoughts: true });
+    expect(headers.has("x-bubble-thinking-level")).toBe(false);
   });
 });
 
@@ -452,6 +471,62 @@ describe("Gemini model discovery", () => {
     });
   });
 
+  it("keeps Gemini 4 Neon between Carbon and Hydrogen, leaving one Flash in the top five", () => {
+    const models = selectLatestGeminiModels([
+      entry("gemini-3.8-flash"),
+      entry("gemini-3.7-flash"),
+      entry("gemini-4-hydrogen", { displayName: "Gemini 4 Hydrogen", outputTokenLimit: 65536 }),
+      entry("gemini-4-neon", { displayName: "Gemini 4 Neon", outputTokenLimit: 65536 }),
+      entry("gemini-4-carbon", { displayName: "Gemini 4 Carbon", outputTokenLimit: 32768 }),
+      entry("gemini-4-argon", { displayName: "Gemini 4 Argon", outputTokenLimit: 32768 }),
+    ]);
+
+    expect(models.map((m) => m.id)).toEqual([
+      "gemini-4-argon",
+      "gemini-4-carbon",
+      "gemini-4-neon",
+      "gemini-4-hydrogen",
+      "gemini-3.8-flash",
+    ]);
+    // No defaultReasoningLevel here: the registry takes Neon's high from the catalog.
+    expect(models[2]).toEqual({
+      id: "gemini-4-neon",
+      name: "Gemini 4 Neon",
+      contextWindow: 1048576,
+      reasoningLevels: ["low", "medium", "high", "xhigh"],
+    });
+  });
+
+  it("matches a tier by its whole name and keeps the stable Neon over its previews", () => {
+    const ids = (names: string[]) => selectLatestGeminiModels(names.map((name) => entry(name))).map((m) => m.id);
+
+    // A longer word that merely starts with a tier name is some other model.
+    // Asked alone: next to the real Neon it would lose the family anyway.
+    expect(ids(["gemini-4-neonextra"])).toEqual([]);
+    expect(ids(["gemini-4-hydrogenx", "gemini-4-flashy", "gemini-4-neon-litex"])).toEqual(["gemini-4-neon-litex"]);
+    expect(ids(["gemini-4-neonextra", "gemini-4-hydrogenx", "gemini-4-neon"])).toEqual(["gemini-4-neon"]);
+    expect(ids(["gemini-4-neon-preview-11-2026", "gemini-4-neon"])).toEqual(["gemini-4-neon"]);
+    // With no stable id listed, the preview stands in for the family.
+    expect(ids(["gemini-4-neon-preview-11-2026"])).toEqual(["gemini-4-neon-preview-11-2026"]);
+    // Suffixed ids of the older families still match.
+    expect(ids(["gemini-3.5-flash-lite", "gemini-3.1-pro-preview", "gemini-2.5-flash-preview-09-2025"])).toEqual([
+      "gemini-3.5-flash-lite",
+      "gemini-3.1-pro-preview",
+      "gemini-2.5-flash-preview-09-2025",
+    ]);
+  });
+
+  it("lists no Gemini id without a version", () => {
+    // Moving aliases and names from before the numbered releases.
+    const unversioned = ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-pro-latest", "gemini-pro", "gemini-exp-1206"];
+    expect(selectLatestGeminiModels(unversioned.map((name) => entry(name)))).toEqual([]);
+    expect(selectLatestGeminiModels([...unversioned, "gemini-4-neon"].map((name) => entry(name))).map((m) => m.id)).toEqual(["gemini-4-neon"]);
+    // Their ids say nothing about thinking levels either; a numbered release
+    // from before thinking control is known to have none.
+    for (const id of unversioned) expect(geminiReasoningLevels(id)).toBeUndefined();
+    expect(geminiReasoningLevels("gemini-2.0-flash")).toEqual(["off"]);
+  });
+
   it("prefers GA ids over dated previews within a family", () => {
     const models = selectLatestGeminiModels([
       entry("gemini-2.5-flash-preview-09-2025"),
@@ -464,6 +539,16 @@ describe("Gemini model discovery", () => {
     expect(geminiReasoningLevels("gemini-4-argon")).toEqual(["low", "medium", "high"]);
     expect(geminiReasoningLevels("gemini-4-carbon")).toEqual(["low", "medium", "high"]);
     expect(geminiReasoningLevels("gemini-4-hydrogen")).toEqual(["low", "medium", "high", "xhigh"]);
+    expect(geminiReasoningLevels("gemini-4-neon")).toEqual(["low", "medium", "high", "xhigh"]);
+    // A dated or preview id of a verified release keeps its ladder, as does
+    // any suffix that is not the -lite tier ("-litex" is just a suffix).
+    expect(geminiReasoningLevels("gemini-4-neon-preview-11-2026")).toEqual(["low", "medium", "high", "xhigh"]);
+    expect(geminiReasoningLevels("gemini-4-neon-litex")).toEqual(["low", "medium", "high", "xhigh"]);
+    expect(geminiReasoningLevels("gemini-4-hydrogen-preview-11-2026")).toEqual(["low", "medium", "high", "xhigh"]);
+    // xhigh is not guessed for releases nobody has probed: there it clamps to high.
+    for (const unverified of ["gemini-4-neon-lite", "gemini-4-neon-lite-preview-12-2026", "gemini-4-hydrogen-lite", "gemini-4.1-neon", "gemini-5-neon", "gemini-4-neonextra"]) {
+      expect(geminiReasoningLevels(unverified)).toEqual(["low", "medium", "high"]);
+    }
     expect(geminiReasoningLevels("gemini-3.8-flash")).toEqual(["off", "low", "medium", "high"]);
     expect(geminiReasoningLevels("gemini-3.7-flash")).toEqual(["off", "low", "medium", "high"]);
     expect(geminiReasoningLevels("gemini-3.5-flash")).toEqual(["minimal", "low", "medium", "high"]);

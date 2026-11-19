@@ -228,8 +228,10 @@ function buildCallOptions(
 /**
  * Gemini 3+ models take a graded thinking_level; 2.5-era models take a token
  * budget. "off" (budget 0) is only offered in the catalog for models that
- * accept it (2.5 Flash); xhigh/max/ultra clamp to high here, and models with
- * a native xhigh get it back through googleThinkingLevelOverride.
+ * accept it (2.5 Flash, 3.7/3.8 Flash) and never reaches Gemini 4, which is
+ * floored at low; xhigh/max/ultra clamp to high here, and the Gemini 4 models
+ * with a native xhigh (Hydrogen, Neon) get it back through
+ * googleThinkingLevelOverride.
  */
 function buildGoogleThinkingOptions(
   modelId: string,
@@ -252,7 +254,7 @@ function buildGoogleThinkingOptions(
 
 /**
  * The @ai-sdk/google v3 schema only admits minimal/low/medium/high, so a model
- * with a native xhigh (Gemini 4 Hydrogen) is sent "high" through the SDK and
+ * with a native xhigh (Gemini 4 Hydrogen and Neon) is sent "high" through the SDK and
  * the real level is written into the request body by the fetch wrapper.
  */
 function googleThinkingLevelOverride(
@@ -260,7 +262,7 @@ function googleThinkingLevelOverride(
   level: ThinkingLevel | undefined,
 ): "xhigh" | undefined {
   if (level !== "xhigh" && level !== "max" && level !== "ultra") return undefined;
-  return geminiReasoningLevels(modelId).includes("xhigh") ? "xhigh" : undefined;
+  return geminiReasoningLevels(modelId)?.includes("xhigh") ? "xhigh" : undefined;
 }
 
 function withThinkingLevelOverride(fetchImpl: ProviderFetch): ProviderFetch {
@@ -679,8 +681,10 @@ export async function fetchGeminiModels(options: {
 }
 
 /** Model tiers live discovery keeps; any other name is filtered out. */
-const GEMINI_TEXT_TIERS = ["argon", "carbon", "hydrogen", "pro", "flash"] as const;
-const GEMINI_TEXT_MODEL_ID = new RegExp(`^gemini-(\\d+(?:\\.\\d+)?)-(${GEMINI_TEXT_TIERS.join("|")})(-lite)?`);
+const GEMINI_TEXT_TIERS = ["argon", "carbon", "neon", "hydrogen", "pro", "flash"] as const;
+// The tier name must end the id or be followed by a suffix ("-preview-…"):
+// "gemini-4-neonextra" is some other model, not a Neon.
+const GEMINI_TEXT_MODEL_ID = new RegExp(`^gemini-(\\d+(?:\\.\\d+)?)-(${GEMINI_TEXT_TIERS.join("|")})(-lite)?(?=-|$)`);
 /**
  * Names the selection rules of selectLatestGeminiModels. It is part of the
  * discovery cache key: a list chosen by a build that did not know a tier (an
@@ -692,8 +696,8 @@ export const GEMINI_MODEL_SELECTION_SCOPE = `tiers:${GEMINI_TEXT_TIERS.join(",")
 
 /**
  * Ranking: one entry per (version, tier) family — GA ids beat dated previews —
- * then newest version first, pro/argon before carbon before hydrogen before
- * flash before flash-lite, top N.
+ * then newest version first, pro/argon before carbon before neon before
+ * hydrogen before flash before flash-lite, top N.
  */
 export function selectLatestGeminiModels(
   entries: GeminiModelListEntry[],
@@ -708,10 +712,10 @@ export function selectLatestGeminiModels(
     isPreview: boolean;
   }
 
-  // Gemini 4 introduced named tiers (argon, carbon, hydrogen). Unknown names
-  // stay excluded rather than guessing whether they are text models. Argon
-  // stays ahead of Carbon to match the static catalog's default model.
-  const TIER_RANK: Record<string, number> = { argon: 0, pro: 0, carbon: 1, hydrogen: 2, flash: 3, "flash-lite": 4 };
+  // Gemini 4 introduced named tiers (argon, carbon, neon, hydrogen). Unknown
+  // names stay excluded rather than guessing whether they are text models.
+  // Argon stays ahead of Carbon to match the static catalog's default model.
+  const TIER_RANK: Record<string, number> = { argon: 0, pro: 0, carbon: 1, neon: 2, hydrogen: 3, flash: 4, "flash-lite": 5 };
   const candidates: Candidate[] = [];
   for (const entry of entries) {
     const id = (entry.name ?? "").replace(/^models\//, "");
@@ -726,7 +730,7 @@ export function selectLatestGeminiModels(
       entry,
       version: Number.parseFloat(match[1]),
       tier,
-      tierRank: TIER_RANK[tier] ?? 5,
+      tierRank: TIER_RANK[tier] ?? 6,
       isPreview: id.includes("preview") || id.includes("exp"),
     });
   }
@@ -752,8 +756,8 @@ export function selectLatestGeminiModels(
       id: candidate.id,
       name: candidate.entry.displayName || candidate.id,
       contextWindow: Number.isFinite(candidate.entry.inputTokenLimit) ? candidate.entry.inputTokenLimit : undefined,
-      reasoningLevels: geminiReasoningLevels(candidate.id),
-      // Argon/Carbon (medium) and Hydrogen (high) take Google's defaults from the catalog.
+      reasoningLevels: geminiLevelsForVersion(candidate.id, candidate.version),
+      // Argon/Carbon (medium) and Neon/Hydrogen (high) take Google's defaults from the catalog.
       ...(candidate.tier === "pro" ? { defaultReasoningLevel: "high" as ReasoningEffort } : {}),
     }));
 }
@@ -762,12 +766,26 @@ function geminiVersion(modelId: string): number {
   return Number.parseFloat(/^gemini-(\d+(?:\.\d+)?)/.exec(modelId)?.[1] ?? "0");
 }
 
-/** Mirrors the static catalog's per-family thinking support. */
-export function geminiReasoningLevels(modelId: string): ReasoningEffort[] {
+/**
+ * What a Gemini id says about its thinking levels, mirroring the static
+ * catalog's per-family support. An id that names no version says nothing:
+ * "gemini-flash-latest" and its like are moving aliases and names from before
+ * the numbered releases, which Bubble neither lists nor makes claims about.
+ * Undefined is that answer; it is not the same as a model known to have no
+ * thinking control, which is ["off"].
+ */
+export function geminiReasoningLevels(modelId: string): ReasoningEffort[] | undefined {
   const version = geminiVersion(modelId);
+  return version > 0 ? geminiLevelsForVersion(modelId, version) : undefined;
+}
+
+function geminiLevelsForVersion(modelId: string, version: number): ReasoningEffort[] {
   const isPro = modelId.includes("-pro");
-  // Hydrogen is the only Gemini 4 tier with xhigh; Argon and Carbon return 400 for it.
-  if (version >= 4 && /^gemini-[\d.]+-hydrogen/.test(modelId)) return ["low", "medium", "high", "xhigh"];
+  // Hydrogen and Neon are the Gemini 4 tiers with xhigh; Argon and Carbon return
+  // 400 for it. Bounded to the verified releases (Gemini 4, not a -lite variant)
+  // rather than guessed for later ones: a missing xhigh clamps to high, a wrong
+  // one is a 400.
+  if (/^gemini-4-(hydrogen|neon)(?!-lite(?:-|$))(?=-|$)/.test(modelId)) return ["low", "medium", "high", "xhigh"];
   if (version >= 4) return ["low", "medium", "high"];
   // Live probes show 3.7 and 3.8 Flash share this newer ladder. Keep the
   // exception bounded to verified releases instead of guessing for 3.9+.

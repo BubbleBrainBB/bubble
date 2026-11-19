@@ -14,10 +14,10 @@ type Step =
 
 /** A model that plays `steps` in order and records what each request held. */
 function scripted(steps: Step[]) {
-  const seen: Array<{ messages: Message[]; tools: string[] }> = [];
+  const seen: Array<{ messages: Message[]; tools: string[]; thinkingLevel?: string }> = [];
   const provider: Provider = {
     async *streamChat(messages, options) {
-      seen.push({ messages: structuredClone(messages), tools: (options.tools ?? []).map((tool) => tool.name) });
+      seen.push({ messages: structuredClone(messages), tools: (options.tools ?? []).map((tool) => tool.name), thinkingLevel: options.thinkingLevel });
       const step = steps[seen.length - 1] ?? { text: "nothing left" };
       if ("text" in step) yield { type: "text", content: step.text };
       else {
@@ -122,9 +122,9 @@ describe("bubble host", () => {
   let app: App;
   let running: Promise<void>;
 
-  function start(provider: Provider) {
+  function start(provider: Provider, model = "test:model") {
     const sdk = new BubbleSdk({ defaultCwd: project, mcp: false });
-    (sdk as any).resolveProvider = () => ({ provider, providerId: "test", model: "test:model" });
+    (sdk as any).resolveProvider = () => ({ provider, providerId: model.split(":")[0], model });
     app = new App();
     running = new HostServer({ input: app.toHost, output: app.fromHost, sdk, bubbleVersion: "9.9.9" }).run();
   }
@@ -191,6 +191,23 @@ describe("bubble host", () => {
     // The conversation is Bubble's own session: history comes back from it.
     const { messages } = await app.call("session/history", { sessionId: session.id });
     expect(messages.map((m: Message) => m.role)).toEqual(["user", "assistant", "tool", "assistant", "tool", "assistant"]);
+  });
+
+  it("tells the app the level a turn really runs at", async () => {
+    const { provider, seen } = scripted([{ text: "One." }, { text: "Two." }]);
+    // Gemini 4 Neon thinks at low, medium, high or xhigh: never off.
+    start(provider, "google:gemini-4-neon");
+    const session = await app.call("session/create", { cwd: project });
+    const started = () => app.notifications.filter((n) => n.method === "turn/started").map((n) => n.params.thinkingLevel);
+
+    await app.call("turn/start", { sessionId: session.id, prompt: "hello", thinkingLevel: "off" });
+    await app.until(() => app.events(session.id).filter((e) => e.terminal).length === 1, "the first turn to end");
+    // No level at all (JSON null) is the model's own default, as a string the app can read.
+    await app.call("turn/start", { sessionId: session.id, prompt: "again", thinkingLevel: null });
+    await app.until(() => app.events(session.id).filter((e) => e.terminal).length === 2, "the second turn to end");
+
+    expect(started()).toEqual(["low", "high"]);
+    expect(seen.map((request) => request.thinkingLevel)).toEqual(["low", "high"]);
   });
 
   it("refuses the command when the person says no", async () => {

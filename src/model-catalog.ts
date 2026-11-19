@@ -25,6 +25,12 @@ export interface BuiltinModelDefinition {
   name: string;
   providerId: string;
   reasoningLevels: ReasoningEffort[];
+  /**
+   * Set on a discovered model nobody described: `reasoningLevels` is then a
+   * placeholder that keeps it selectable in a picker, not something the model
+   * is known to support. A level asked for explicitly is not fitted to it.
+   */
+  reasoningLevelsAssumed?: boolean;
   defaultReasoningLevel?: ReasoningEffort;
   tier?: ModelTier;
   contextWindow?: number;
@@ -140,10 +146,10 @@ const GROK_45_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 // Gemini 4 documents only low/medium (default)/high. Verified live on
 // 2026-10-13: thinkingLevel=minimal returns 400, so there is no off/minimal.
 const GEMINI_4_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
-// Gemini 4 Hydrogen adds xhigh above the Gemini 4 ladder and defaults to high.
-// Verified live on 2026-11-12: xhigh returns 200, minimal still returns 400
-// (Argon rejects xhigh).
-const GEMINI_4_HYDROGEN_LEVELS: ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
+// Gemini 4 Hydrogen and Neon add xhigh above the Gemini 4 ladder and default
+// to high. Verified live (Hydrogen 2026-11-12, Neon 2026-11-18): xhigh returns
+// 200, minimal still returns 400 (Argon and Carbon reject xhigh).
+const GEMINI_4_XHIGH_LEVELS: ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
 const GEMINI_3_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_3_FLASH_LEVELS: ReasoningEffort[] = ["minimal", "low", "medium", "high"];
 // Verified against the native API on 2026-09-02: Gemini 3.7/3.8 Flash reject
@@ -220,12 +226,17 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   // Listed after Argon so the provider's default model does not change.
   // https://ai.google.dev/gemini-api/docs/models/gemini-4-carbon
   { id: "gemini-4-carbon", name: "Gemini 4 Carbon", providerId: "google", tier: "strong", reasoningLevels: GEMINI_4_LEVELS, defaultReasoningLevel: "medium", contextWindow: 1048576 },
+  // Gemini 4 Neon (2026-11-18): sits between Hydrogen and Carbon. Same shared
+  // 1,048,576-token window, synchronous output capped at 65,536, Hydrogen's
+  // levels and high default. Paid tier only. The strong tier is Bubble's own
+  // classification.
+  // https://ai.google.dev/gemini-api/docs/models/gemini-4-neon
+  { id: "gemini-4-neon", name: "Gemini 4 Neon", providerId: "google", tier: "strong", reasoningLevels: GEMINI_4_XHIGH_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   // Gemini 4 Hydrogen (2026-11-12): same shared 1,048,576-token window, 65,536
   // output by default. https://ai.google.dev/gemini-api/docs/models/gemini-4-hydrogen
-  { id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen", providerId: "google", tier: "balanced", reasoningLevels: GEMINI_4_HYDROGEN_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen", providerId: "google", tier: "balanced", reasoningLevels: GEMINI_4_XHIGH_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_37_38_FLASH_LEVELS, contextWindow: 1048576 },
   { id: "gemini-3.7-flash", name: "Gemini 3.7 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_37_38_FLASH_LEVELS, contextWindow: 1048576 },
-  { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_3_FLASH_LEVELS, contextWindow: 1048576 },
   { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro", providerId: "google", tier: "strong", reasoningLevels: GEMINI_3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "gemini-3-flash-preview", name: "Gemini 3 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_3_FLASH_LEVELS, contextWindow: 1048576 },
   { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", providerId: "google", tier: "strong", reasoningLevels: GEMINI_25_PRO_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },

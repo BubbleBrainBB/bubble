@@ -321,6 +321,23 @@ describe("variant resolver", () => {
     expect(getDefaultThinkingLevel("anthropic", "claude-sonnet-4-6")).toBe("high");
   });
 
+  it("lists the Google models in order, Argon first as the default", () => {
+    expect(listBuiltinModels("google").map((model) => model.id)).toEqual([
+      "gemini-4-argon",
+      "gemini-4-carbon",
+      "gemini-4-neon",
+      "gemini-4-hydrogen",
+      "gemini-3.8-flash",
+      "gemini-3.7-flash",
+      "gemini-3.1-pro-preview",
+      "gemini-3-flash-preview",
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+    ]);
+    // Gemini 3.5 Flash is retired from the catalog (Google routes it to 3.6 Flash).
+    expect(getBuiltinModel("google", "gemini-3.5-flash")).toBeUndefined();
+  });
+
   it("includes Gemini 4 Argon with Google's documented thinking contract", () => {
     expect(listBuiltinModels("google")[0]?.id).toBe("gemini-4-argon");
     expect(getBuiltinModel("google", "gemini-4-argon")).toMatchObject({ name: "Gemini 4 Argon", tier: "strong" });
@@ -339,8 +356,18 @@ describe("variant resolver", () => {
     expect(getModelContextWindow("google", "gemini-4-carbon")).toBe(1048576);
   });
 
+  it("includes Gemini 4 Neon with xhigh and Google's high default, between Carbon and Hydrogen", () => {
+    expect(listBuiltinModels("google")[2]?.id).toBe("gemini-4-neon");
+    expect(getBuiltinModel("google", "gemini-4-neon")).toMatchObject({ name: "Gemini 4 Neon", tier: "strong" });
+    expect(getAvailableThinkingLevels("google", "gemini-4-neon")).toEqual(["low", "medium", "high", "xhigh"]);
+    expect(getDefaultThinkingLevel("google", "gemini-4-neon")).toBe("high");
+    expect(normalizeThinkingLevel("off", getAvailableThinkingLevels("google", "gemini-4-neon"))).toBe("low");
+    expect(normalizeThinkingLevel("max", getAvailableThinkingLevels("google", "gemini-4-neon"))).toBe("xhigh");
+    expect(getModelContextWindow("google", "gemini-4-neon")).toBe(1048576);
+  });
+
   it("includes Gemini 4 Hydrogen with xhigh and Google's high default", () => {
-    expect(listBuiltinModels("google")[2]?.id).toBe("gemini-4-hydrogen");
+    expect(listBuiltinModels("google")[3]?.id).toBe("gemini-4-hydrogen");
     expect(getBuiltinModel("google", "gemini-4-hydrogen")).toMatchObject({ name: "Gemini 4 Hydrogen", tier: "balanced" });
     expect(getAvailableThinkingLevels("google", "gemini-4-hydrogen")).toEqual(["low", "medium", "high", "xhigh"]);
     expect(getDefaultThinkingLevel("google", "gemini-4-hydrogen")).toBe("high");

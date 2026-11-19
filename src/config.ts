@@ -11,6 +11,7 @@ import { sanitizeAgentCategories, type AgentCategoriesConfig } from "./agent/cat
 import { sanitizeAgentRouting, type AgentRoutingConfig } from "./agent/routing-catalog.js";
 import type { ProviderProfile } from "./provider-registry.js";
 import type { ThinkingLevel } from "./types.js";
+import { isThinkingLevel } from "./variant/thinking-level.js";
 import { isProviderModelAllowed } from "./provider-model-policy.js";
 
 // openai-codex is an internal transport profile surfaced through the visible
@@ -52,6 +53,11 @@ function sanitizeDefaultModel(model?: string): string | undefined {
   return isHiddenProviderId(modelProviderId(model)) || !isAllowedConfiguredModel(model)
     ? undefined
     : model;
+}
+
+/** JSON can hold null or a level a later version dropped; neither is a level. */
+function sanitizeThinkingLevel(level: unknown): ThinkingLevel | undefined {
+  return typeof level === "string" && isThinkingLevel(level) ? level : undefined;
 }
 
 function sanitizeDefaultProvider(providerId?: string): string | undefined {
@@ -175,6 +181,7 @@ export class UserConfig {
         recentModels: sanitizeRecentModels(parsed.recentModels),
         providers: sanitizeProviders(parsed.providers),
         defaultProvider: sanitizeDefaultProvider(parsed.defaultProvider),
+        defaultThinkingLevel: sanitizeThinkingLevel(parsed.defaultThinkingLevel),
         agentCategories: sanitizeAgentCategories(parsed.agentCategories),
         subagents: sanitizeSubagentsConfig(parsed.subagents),
         theme: sanitizeTheme(parsed.theme),

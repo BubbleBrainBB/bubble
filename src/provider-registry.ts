@@ -289,15 +289,27 @@ export class ProviderRegistry {
         protocol?: ProviderProtocol;
       }>;
       const now = Date.now();
+      // The file also holds lists saved for other keys: another API key or
+      // account, another endpoint, or the selection rules of an older build.
+      // Those stay in the cache (and so on disk) for whoever they belong to,
+      // but only a list saved for a provider as it is configured now may say
+      // what that provider's models are.
+      const configured = this.configuredProvidersByDiscoveryKey();
       for (const [key, entry] of Object.entries(parsed)) {
         if (!entry || typeof entry.expiresAt !== "number") continue;
         if (!entry.result || !Array.isArray(entry.result.models)) continue;
         if (entry.expiresAt <= now && !(entry.providerId === "openai" && isCompleteDiscovery(entry.result))) continue;
         const provider = { id: entry.providerId ?? "", authType: entry.authType, protocol: entry.protocol };
+        const current = configured.get(key);
         // Capability fields may have been derived by an older Bubble build.
         // Recompute them with the current code while retaining cached remote
-        // membership, display names and context windows.
-        const result = normalizeProviderDiscoveryMetadata(provider, entry.result);
+        // membership, display names and context windows. A list that was the
+        // local one (models.json or the built-in catalog) has nothing remote
+        // to retain: it is read again from where it came, as a later lookup
+        // would read it.
+        const result = normalizeProviderDiscoveryMetadata(provider, current && entry.result.source === "static" && current.id !== "openai"
+          ? { ...entry.result, models: this.localModelsForProvider(current) }
+          : entry.result);
         this.modelDiscoveryCache.set(key, {
           result,
           expiresAt: entry.expiresAt,
@@ -309,13 +321,23 @@ export class ProviderRegistry {
         });
         // Rebuild the dynamic overlay so context window / reasoning levels
         // resolve from the cached catalog at startup, not only on /model open.
-        if (entry.providerId) {
-          this.applyDynamicDiscoveryMetadata(provider, result);
+        if (current) {
+          this.applyDynamicDiscoveryMetadata(current, result);
         }
       }
     } catch {
       // Missing/corrupt cache is fine; the next discovery re-fetches.
     }
+  }
+
+  private configuredProvidersByDiscoveryKey(): Map<string, ProviderProfile> {
+    const byKey = new Map<string, ProviderProfile>();
+    try {
+      for (const provider of this.getConfigured()) byKey.set(this.modelDiscoveryKey(provider), provider);
+    } catch {
+      // Without a readable configuration no saved list is vouched for.
+    }
+    return byKey;
   }
 
   /** Persist successful discoveries so the next launch can reuse them. */
@@ -884,10 +906,7 @@ export class ProviderRegistry {
   }
 
   private async performModelDiscovery(provider: ProviderProfile): Promise<ModelDiscoveryResult> {
-    const customModels = filterProviderModels(
-      provider.id,
-      this.modelConfig.getCustomModels(provider.id),
-    );
+    const customModels = this.customModelsForProvider(provider);
     if (customModels.length > 0 && provider.id !== "openai") {
       return { models: customModels, source: "static", authoritative: true };
     }
@@ -1105,11 +1124,38 @@ export class ProviderRegistry {
     };
   }
 
-  private localModelsForProvider(provider: ProviderProfile): ModelInfo[] {
-    const customModels = filterProviderModels(
+  /**
+   * The models a user listed in models.json. Such an entry is an id and little
+   * else; when it names a model the catalog knows, it is that model, with the
+   * catalog's thinking levels, default level and context window. Without them a
+   * listed model would lose what it had before it was listed (the list becomes
+   * the provider's discovery result and so the catalog's own answer).
+   */
+  private customModelsForProvider(provider: ProviderProfile): ModelInfo[] {
+    const catalogProviderId = provider.id === "openai" && provider.authType === "oauth"
+      ? "openai-codex"
+      : provider.id;
+    const builtins = listBuiltinModels(catalogProviderId);
+    return filterProviderModels(
       provider.id,
       this.modelConfig.getCustomModels(provider.id),
-    );
+    ).map((custom) => {
+      const builtin = builtins.find((model) => model.id === custom.id);
+      if (!builtin) return custom;
+      return {
+        ...custom,
+        reasoningLevels: builtin.reasoningLevels,
+        defaultReasoningLevel: builtin.defaultReasoningLevel,
+        contextWindow: builtin.contextWindow,
+        tier: custom.tier ?? builtin.tier,
+        useResponsesLite: builtin.useResponsesLite,
+        toolOutputTokenLimit: builtin.toolOutputTokenLimit,
+      };
+    });
+  }
+
+  private localModelsForProvider(provider: ProviderProfile): ModelInfo[] {
+    const customModels = this.customModelsForProvider(provider);
     if (customModels.length > 0) return customModels;
     const catalogProviderId = provider.id === "openai" && provider.authType === "oauth"
       ? "openai-codex"
@@ -1247,8 +1293,10 @@ export class ProviderRegistry {
       // A remote model with no trusted effort metadata still has to be
       // selectable: default it to the plain "off" level (no reasoning control)
       // rather than an empty ladder, which the model picker would render
-      // "unavailable" and skip during arrow-key navigation.
+      // "unavailable" and skip during arrow-key navigation. That placeholder
+      // is marked: it says nothing about what the model supports.
       reasoningLevels: model.reasoningLevels ?? ["off"],
+      ...(model.reasoningLevels ? {} : { reasoningLevelsAssumed: true }),
       defaultReasoningLevel: model.defaultReasoningLevel,
       contextWindow: model.contextWindow,
       useResponsesLite: model.useResponsesLite,
@@ -1268,11 +1316,21 @@ function normalizeProviderDiscoveryMetadata<T extends { models: ModelInfo[] }>(
   result: T,
 ): T {
   if (provider.id !== "google" || provider.protocol !== "ai-sdk") return result;
+  const builtins = listBuiltinModels("google");
   return {
     ...result,
-    models: result.models.map((model) => model.id.startsWith("gemini-")
-      ? { ...model, reasoningLevels: geminiReasoningLevels(model.id) }
-      : model),
+    models: result.models.map((model) => {
+      if (!model.id.startsWith("gemini-")) return model;
+      // The catalog's own entry first, then what the id's family implies.
+      const reasoningLevels = builtins.find((builtin) => builtin.id === model.id)?.reasoningLevels
+        ?? geminiReasoningLevels(model.id);
+      if (reasoningLevels) return { ...model, reasoningLevels };
+      // An id that names no version ("gemini-flash-latest") implies nothing.
+      // Drop whatever an older build guessed for it, so it is listed on the
+      // marked placeholder ladder rather than on a ladder nobody vouches for.
+      const { reasoningLevels: _guessed, ...unknown } = model;
+      return unknown;
+    }),
   };
 }
 

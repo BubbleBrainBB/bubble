@@ -47,7 +47,9 @@ import { UserConfig } from "../config.js";
 import { ProviderRegistry, encodeModel, decodeModel, displayModel } from "../provider-registry.js";
 import { createProviderInstance } from "../provider.js";
 import type { ResolvedSubagentRoute } from "../agent/categories.js";
-import { getDefaultThinkingLevel } from "../variant/variant-resolver.js";
+import { getDefaultThinkingLevel, normalizeThinkingLevel } from "../variant/variant-resolver.js";
+import { isThinkingLevel } from "../variant/thinking-level.js";
+import { getBuiltinModel } from "../model-catalog.js";
 import { QuestionController, type QuestionAnswer, type QuestionRequest } from "../question/controller.js";
 import { assertProviderModelAllowed } from "../provider-model-policy.js";
 import { SkillRegistry } from "../skills/registry.js";
@@ -94,6 +96,11 @@ export interface BubbleSdkOptions {
 export interface TurnStartInfo {
   providerId: string;
   model: string;
+  /**
+   * The level handed to the provider: the one asked for (or the configured or
+   * model default), fitted to the levels the catalog lists for the model. How a
+   * provider writes that level on the wire is its own matter.
+   */
   thinkingLevel: ThinkingLevel;
   mode: PermissionMode;
   tools: string[];
@@ -831,10 +838,13 @@ export class BubbleSdk {
         session.updateMetadata({ cwd: resolved.cwd });
       }
       const { provider, providerId, model } = this.resolveProvider(promptCacheKey, options.model);
-      const thinkingLevel =
-        options.thinkingLevel ??
-        this.userConfig.getDefaultThinkingLevel() ??
-        getDefaultThinkingLevel(providerId, decodeModel(model).modelId);
+      // A caller over JSON-RPC can send null or a word that is no level: the
+      // first real level wins, the turn's own before the configured one.
+      const thinkingLevel = resolveTurnThinkingLevel(
+        providerId,
+        decodeModel(model).modelId,
+        [options.thinkingLevel, this.userConfig.getDefaultThinkingLevel()].find((level) => isThinkingLevel(level)),
+      );
       // Same ordering as the TUI: the provenance gate must run before memories
       // enter the system prompt.
       purgeUnsafeMemorySources(cwd);
@@ -1349,6 +1359,26 @@ function throwAbortSignal(signal: AbortSignal): void {
   if (!signal.aborted) return;
   if (signal.reason instanceof Error) throw signal.reason;
   throw new AgentAbortError(typeof signal.reason === "string" ? signal.reason : "SDK turn cancelled.");
+}
+
+/**
+ * The level a turn runs at, which is also the level it reports when it starts.
+ * A level the caller or the user's configuration asks for is fitted to the
+ * model's own ladder, as the CLI does at startup: Gemini 4 has no "off", so a
+ * turn asked to run with thinking off runs, and says it runs, at low. A model
+ * whose ladder Bubble does not know (absent from the catalog, or discovered
+ * with a placeholder ladder) has nothing to be fitted to and keeps the level
+ * asked for; what its provider makes of it is the provider's business.
+ */
+function resolveTurnThinkingLevel(
+  providerId: string,
+  modelId: string,
+  requested: ThinkingLevel | undefined,
+): ThinkingLevel {
+  if (!isThinkingLevel(requested)) return getDefaultThinkingLevel(providerId, modelId);
+  const known = getBuiltinModel(providerId, modelId);
+  if (!known || known.reasoningLevelsAssumed) return requested;
+  return normalizeThinkingLevel(requested, known.reasoningLevels);
 }
 
 /** The mode the session log last recorded ("default" before any switch). */

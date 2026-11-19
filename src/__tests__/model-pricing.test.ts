@@ -166,6 +166,19 @@ describe("model pricing", () => {
     }
   });
 
+  it("prices Gemini 4 Neon at its flat rate", () => {
+    const usage = {
+      promptTokens: 1_000_000,
+      promptCacheHitTokens: 250_000,
+      promptCacheMissTokens: 750_000,
+      completionTokens: 1_000_000,
+    };
+    const expected = { currency: "USD", cost: 0.25 * 0.15 + 0.75 * 3 + 15, estimated: false };
+    // No introductory window: the rate does not move on the day Argon and Carbon's does.
+    expect(calculateUsageCost("google", "gemini-4-neon", usage, new Date("2026-11-30T23:59:59Z"))).toEqual(expected);
+    expect(calculateUsageCost("google", "gemini-4-neon", usage, new Date("2026-12-01T00:00:00Z"))).toEqual(expected);
+  });
+
   it("prices Gemini 4 Hydrogen at its flat rate", () => {
     expect(calculateUsageCost("google", "gemini-4-hydrogen", {
       promptTokens: 1_000_000,

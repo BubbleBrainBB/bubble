@@ -133,6 +133,17 @@ export const MODEL_PRICING_OVERRIDES: ModelPricing[] = [
       outputPerMillion: 20,
     },
   })),
+  // Gemini 4 Neon (2026-11-18): one flat rate for all context lengths, implicit
+  // caching only (95% off input), paid tier only. The generated snapshot
+  // predates the model. https://ai.google.dev/gemini-api/docs/pricing
+  {
+    providerId: "google",
+    modelId: "gemini-4-neon",
+    currency: "USD",
+    inputCacheHitPerMillion: 0.15,
+    inputCacheMissPerMillion: 3,
+    outputPerMillion: 15,
+  },
   // Gemini 4 Hydrogen: one flat rate for all context lengths, implicit caching
   // only (95% off input). Not yet on models.dev at launch (2026-11-12).
   // https://ai.google.dev/gemini-api/docs/pricing
