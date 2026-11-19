@@ -148,6 +148,16 @@ interface CachedModelDiscovery {
   confirmed?: { models: ModelInfo[]; until: number };
 }
 
+/** A provider's model list as the cache holds it: `resolveModelList` has decided it. */
+interface ResolvedModelList {
+  result: CachedModelDiscovery["result"];
+  /**
+   * False when models.json decided the list. A catalog the provider confirmed
+   * earlier is then no longer its membership, so it is not carried forward.
+   */
+  keepsConfirmation: boolean;
+}
+
 function isCompleteDiscovery(result: Pick<ModelDiscoveryResult, "source" | "authoritative" | "error">): boolean {
   return result.source === "remote" && result.authoritative && !result.error;
 }
@@ -301,15 +311,15 @@ export class ProviderRegistry {
         if (entry.expiresAt <= now && !(entry.providerId === "openai" && isCompleteDiscovery(entry.result))) continue;
         const provider = { id: entry.providerId ?? "", authType: entry.authType, protocol: entry.protocol };
         const current = configured.get(key);
-        // Capability fields may have been derived by an older Bubble build.
-        // Recompute them with the current code while retaining cached remote
-        // membership, display names and context windows. A list that was the
-        // local one (models.json or the built-in catalog) has nothing remote
-        // to retain: it is read again from where it came, as a later lookup
-        // would read it.
-        const result = normalizeProviderDiscoveryMetadata(provider, current && entry.result.source === "static" && current.id !== "openai"
-          ? { ...entry.result, models: this.localModelsForProvider(current) }
-          : entry.result);
+        // A list for the provider as it is configured now is decided the way
+        // every lookup decides it, which also rebuilds the dynamic overlay:
+        // context windows and reasoning levels resolve from the saved catalog
+        // at startup, not only once /model is opened. Any other list is kept
+        // as its owner saved it, with the capability fields an older Bubble
+        // build may have derived recomputed by the current code.
+        const result = current
+          ? this.resolveModelList(current, entry.result, { speaksForProvider: true }).result
+          : normalizeProviderDiscoveryMetadata(provider, entry.result);
         this.modelDiscoveryCache.set(key, {
           result,
           expiresAt: entry.expiresAt,
@@ -319,11 +329,6 @@ export class ProviderRegistry {
           protocol: entry.protocol,
           confirmed: isCompleteDiscovery(result) ? { models: result.models, until: entry.expiresAt } : undefined,
         });
-        // Rebuild the dynamic overlay so context window / reasoning levels
-        // resolve from the cached catalog at startup, not only on /model open.
-        if (current) {
-          this.applyDynamicDiscoveryMetadata(current, result);
-        }
       }
     } catch {
       // Missing/corrupt cache is fine; the next discovery re-fetches.
@@ -819,28 +824,32 @@ export class ProviderRegistry {
     if (!options.forceRefresh) {
       const cached = this.modelDiscoveryCache.get(key);
       if (cached && cached.expiresAt > now) {
-        const cachedResult = normalizeProviderDiscoveryMetadata(provider, cached.result);
-        cached.result = cachedResult;
-        // A disk cache can outlive the application version that wrote it. Keep
-        // the current curated catalog authoritative over stale cached metadata,
-        // then retain cached remote-only ids for non-authoritative union results.
-        // This lets newly-added builtins surface immediately after an upgrade
-        // without waiting up to 24 hours or requiring a manual Ctrl+R refresh.
-        const local = this.localModelsForProvider(provider);
-        const localIds = new Set(local.map((model) => model.id));
-        const models = provider.id === "openai"
-          ? cachedResult.models
-          : cachedResult.source === "static"
-          ? local
-          : cachedResult.authoritative
-            ? cachedResult.models
-            : [...local, ...cachedResult.models.filter((model) => !localIds.has(model.id))];
-        const result: ModelDiscoveryResult = { ...cachedResult, models, source: "cache" };
+        // A cached list is decided again, not replayed. A disk cache can
+        // outlive the application version that wrote it, and newly-added
+        // builtins have to surface right after an upgrade without waiting up
+        // to 24 hours or requiring a manual Ctrl+R refresh; models.json may
+        // list models now that it did not list when the entry was saved.
         const current = this.getConfigured().find((item) => item.id === provider.id);
-        if (!current || this.modelDiscoveryKey(current) === key) {
-          this.applyDynamicDiscoveryMetadata(provider, result);
+        const before = cached.result;
+        const resolved = this.resolveModelList(provider, before, {
+          speaksForProvider: !current || this.modelDiscoveryKey(current) === key,
+        });
+        cached.result = resolved.result;
+        if (!resolved.keepsConfirmation) cached.confirmed = undefined;
+        // Deciding it again can change who the members are (the entry was
+        // restored for another key, or written straight into the cache). That
+        // is a change of the routing world like any other discovery write.
+        if (discoveryMembershipChanged(
+          { ids: before.models.map((model) => model.id), authoritative: before.authoritative },
+          resolved.result,
+        )) {
+          this.lastDiscoveryMembership.set(key, {
+            ids: resolved.result.models.map((model) => model.id),
+            authoritative: resolved.result.authoritative,
+          });
+          this.bumpRoutingRevision();
         }
-        return result;
+        return { ...resolved.result, source: "cache" };
       }
       const inFlight = this.modelDiscoveryInFlight.get(key);
       if (inFlight) return inFlight;
@@ -856,31 +865,43 @@ export class ProviderRegistry {
 
     let pending!: Promise<ModelDiscoveryResult>;
     pending = this.performModelDiscovery(provider).then((rawResult): ModelDiscoveryResult => {
-      const result = normalizeProviderDiscoveryMetadata(provider, provider.id === "openai" && rawResult.error
-        ? { ...rawResult, models: retainedConfirmation?.models ?? [] }
-        : rawResult);
       if (!this.isCurrentModelDiscovery(provider, key, generation)) {
+        const current = this.getConfigured().find((item) => item.id === provider.id) ?? provider;
+        const error = "Model catalog changed while it was refreshing.";
         return {
-          models: provider.id === "openai" ? [] : this.localModelsForProvider(
-            this.getConfigured().find((item) => item.id === provider.id) ?? provider,
-          ),
+          // The local list of the provider as it is now, decided like any
+          // other, but speaking for nobody: this lookup was overtaken.
+          models: this.resolveModelList(
+            current,
+            { models: [], source: "fallback", authoritative: false, error },
+            { speaksForProvider: false },
+          ).result.models,
           source: "fallback",
           authoritative: false,
-          error: "Model catalog changed while it was refreshing.",
+          error,
         };
       }
 
-      this.applyDynamicDiscoveryMetadata(provider, result);
+      const { result, keepsConfirmation } = this.resolveModelList(
+        provider,
+        // A failed ChatGPT refresh keeps showing the last confirmed catalog.
+        provider.id === "openai" && rawResult.error
+          ? { ...rawResult, models: retainedConfirmation?.models ?? [] }
+          : rawResult,
+        { speaksForProvider: true },
+      );
       const previous = this.lastDiscoveryMembership.get(key);
-      const stored = { ...result, source: result.source === "cache" ? "remote" : result.source } as CachedModelDiscovery["result"];
       this.modelDiscoveryCache.set(key, {
-        result: stored,
+        result,
         expiresAt: Date.now() + (result.error ? MODEL_DISCOVERY_FAILURE_TTL_MS : MODEL_DISCOVERY_SUCCESS_TTL_MS),
         // A complete success starts a new confirmation horizon; anything else
-        // (failure fallback, partial union) carries the previous one forward.
-        confirmed: isCompleteDiscovery(stored)
-          ? { models: stored.models, until: Date.now() + MODEL_DISCOVERY_DISK_TTL_MS }
-          : this.modelDiscoveryCache.get(key)?.confirmed ?? retainedConfirmation,
+        // (failure fallback, partial union) carries the previous one forward,
+        // unless models.json has taken the list over from the provider.
+        confirmed: isCompleteDiscovery(result)
+          ? { models: result.models, until: Date.now() + MODEL_DISCOVERY_DISK_TTL_MS }
+          : keepsConfirmation
+            ? this.modelDiscoveryCache.get(key)?.confirmed ?? retainedConfirmation
+            : undefined,
         identityKey: this.discoveryIdentity(provider),
         providerId: provider.id,
         authType: provider.authType,
@@ -1115,6 +1136,59 @@ export class ProviderRegistry {
     };
   }
 
+  /**
+   * The one place a provider's model list is decided. A fresh discovery, a
+   * lookup answered from the cache and the lists restored from disk at startup
+   * all come through here, so a model has the same thinking levels, default
+   * level and context window whichever of them produced its list.
+   *
+   * `raw` is what discovery just returned, or what an earlier discovery left
+   * in the cache or on disk. Three things happen to it, in this order:
+   *
+   * 1. The list is chosen. For every provider but `openai`, the models the
+   *    user listed in models.json are the list, whatever was fetched or saved
+   *    before they were listed (adding them does not change the discovery
+   *    key, so a remote list saved earlier is still found under it). Without
+   *    such a list: a result that was the local list is the local list as it
+   *    is now; a complete remote list stands; an incomplete one is the local
+   *    list plus the ids only the remote knows. `openai` (a ChatGPT sign-in or
+   *    an API key) shows what its endpoint returned and nothing else.
+   * 2. The chosen list gets the capabilities the current code derives, after
+   *    the choice, so that a local list is not left out of it.
+   * 3. When `raw` speaks for the provider as it is configured now, the list
+   *    becomes the catalog's dynamic overlay. A list for another key (another
+   *    API key or account, another endpoint, an older build's selection
+   *    rules) is decided the same way for whoever asks for it, and feeds
+   *    nothing.
+   */
+  private resolveModelList(
+    provider: ProviderProfile,
+    raw: Omit<ModelDiscoveryResult, "source"> & { source: ModelDiscoverySource },
+    options: { speaksForProvider: boolean },
+  ): ResolvedModelList {
+    const listed = provider.id === "openai" ? [] : this.customModelsForProvider(provider);
+    const source = raw.source === "cache" ? "remote" : raw.source;
+    let chosen: CachedModelDiscovery["result"];
+    if (listed.length > 0) {
+      chosen = { models: listed, source: "static", authoritative: true };
+    } else if (provider.id === "openai" || (source !== "static" && raw.authoritative)) {
+      chosen = { ...raw, source };
+    } else {
+      const local = this.localModelsForProvider(provider);
+      const localIds = new Set(local.map((model) => model.id));
+      chosen = {
+        ...raw,
+        source,
+        models: source === "static"
+          ? local
+          : [...local, ...raw.models.filter((model) => !localIds.has(model.id))],
+      };
+    }
+    const result = normalizeProviderDiscoveryMetadata(provider, chosen);
+    if (options.speaksForProvider) this.applyDynamicDiscoveryMetadata(provider, result);
+    return { result, keepsConfirmation: listed.length === 0 };
+  }
+
   private fallbackDiscovery(provider: ProviderProfile, error: unknown): ModelDiscoveryResult {
     return {
       models: provider.id === "openai" ? [] : this.localModelsForProvider(provider),
@@ -1346,9 +1420,15 @@ function discoveryMembershipChanged(
 ): boolean {
   if (!previous) return true;
   if (previous.authoritative !== next.authoritative) return true;
+  // Membership is which ids there are. A list that names one twice (a
+  // models.json typo, a vendor's /models) has the members it had before.
   const previousIds = new Set(previous.ids);
-  if (previousIds.size !== next.models.length) return true;
-  return next.models.some((model) => !previousIds.has(model.id));
+  const nextIds = new Set(next.models.map((model) => model.id));
+  if (previousIds.size !== nextIds.size) return true;
+  for (const id of nextIds) {
+    if (!previousIds.has(id)) return true;
+  }
+  return false;
 }
 
 /**
