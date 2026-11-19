@@ -250,7 +250,20 @@ describe("Gemini model discovery cache", () => {
 });
 
 describe("Gemini model discovery cache across upgrades", () => {
-  it("does not reuse a list selected by a build that did not know the new tiers", async () => {
+  it.each([
+    {
+      // Every build up to 0.0.65: same identity, no scope.
+      build: "that wrote no selection scope",
+      scope: null,
+      cached: ["gemini-4-argon", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"],
+    },
+    {
+      // The builds just before Neon (0.0.66 onwards).
+      build: "that knew Carbon and Hydrogen but not Neon",
+      scope: "tiers:argon,carbon,hydrogen,pro,flash",
+      cached: ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.7-flash"],
+    },
+  ])("does not reuse a list selected by a build $build", async ({ scope, cached }) => {
     const previousBubbleHome = process.env.BUBBLE_HOME;
     const previousVitest = process.env.VITEST;
     const bubbleHome = mkdtempSync(join(tmpdir(), "bubble-gemini-upgrade-"));
@@ -271,16 +284,16 @@ describe("Gemini model discovery cache across upgrades", () => {
       process.env.VITEST = "true";
       const probe = isolatedRegistry([provider]);
       const currentKey = (probe as any).modelDiscoveryKey(provider) as string;
-      // The key every build up to 0.0.65 wrote: same identity, no scope.
-      const legacyKey = JSON.stringify([...(JSON.parse(currentKey) as unknown[]).slice(0, 5), null]);
+      const legacyKey = JSON.stringify([...(JSON.parse(currentKey) as unknown[]).slice(0, 5), scope]);
       expect(currentKey).not.toBe(legacyKey);
       expect(currentKey).toContain("carbon");
       expect(currentKey).toContain("hydrogen");
+      expect(currentKey).toContain("neon");
 
       writeFileSync(join(bubbleHome, "model-discovery-cache.json"), JSON.stringify({
         [legacyKey]: {
           result: {
-            models: ["gemini-4-argon", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"].map(cachedModel),
+            models: cached.map(cachedModel),
             source: "remote",
             authoritative: true,
           },
@@ -294,7 +307,7 @@ describe("Gemini model discovery cache across upgrades", () => {
       clearDynamicModelMetadata("google");
       process.env.VITEST = "false";
       const registry = isolatedRegistry([provider]);
-      const remote = ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"];
+      const remote = ["gemini-4-argon", "gemini-4-carbon", "gemini-4-neon", "gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"];
       const fetchMock = vi.fn(async () => new Response(JSON.stringify({
         models: remote.map((id) => ({
           name: `models/${id}`,
@@ -311,10 +324,17 @@ describe("Gemini model discovery cache across upgrades", () => {
       expect(result.models.map((model) => model.id)).toEqual([
         "gemini-4-argon",
         "gemini-4-carbon",
+        "gemini-4-neon",
         "gemini-4-hydrogen",
         "gemini-3.8-flash",
-        "gemini-3.7-flash",
       ]);
+      // Remote discovery carries no thinking contract: Neon's comes from this build.
+      expect(result.models[2]).toMatchObject({
+        id: "gemini-4-neon",
+        reasoningLevels: ["low", "medium", "high", "xhigh"],
+        defaultReasoningLevel: "high",
+        contextWindow: 1_048_576,
+      });
     } finally {
       clearDynamicModelMetadata("google");
       rmSync(bubbleHome, { recursive: true, force: true });
@@ -564,5 +584,140 @@ describe("ChatGPT (openai oauth) discovery scope", () => {
     vi.spyOn(quick, "discoverModels").mockResolvedValue({ models: [], source: "remote", authoritative: true });
     await quick.waitForModelDiscovery("openai", 5_000);
     settle();
+  });
+});
+
+describe("what a saved model list may say at startup", () => {
+  const BARE = (id: string, extra: Record<string, unknown> = {}) => ({ id, name: id, providerId: "google", ...extra });
+
+  /** A home whose models.json lists Google models, as a user would write it. */
+  function withListedGoogleModels(
+    ids: string[],
+    run: (home: { path: string; currentKey: string; start: () => ProviderRegistry }) => void | Promise<void>,
+  ) {
+    return async () => {
+      const previousBubbleHome = process.env.BUBBLE_HOME;
+      const previousVitest = process.env.VITEST;
+      const bubbleHome = mkdtempSync(join(tmpdir(), "bubble-saved-list-"));
+      try {
+        process.env.BUBBLE_HOME = bubbleHome;
+        writeFileSync(join(bubbleHome, "models.json"), JSON.stringify({
+          providers: { google: { apiKey: "g-key", models: ids.map((id) => ({ id })) } },
+        }));
+        const start = () => {
+          const registry = new ProviderRegistry(fakeUserConfig([]));
+          (registry.getAuthStorage() as any).save = () => {};
+          return registry;
+        };
+        // The key this configuration looks its list up under, read without loading disk state.
+        process.env.VITEST = "true";
+        const probe = start();
+        const google = probe.getConfigured().find((provider) => provider.id === "google")!;
+        expect(google).toMatchObject({ apiKey: "g-key", protocol: "ai-sdk" });
+        const currentKey = (probe as any).modelDiscoveryKey(google) as string;
+        clearDynamicModelMetadata("google");
+        process.env.VITEST = "false";
+        await run({ path: bubbleHome, currentKey, start });
+      } finally {
+        clearDynamicModelMetadata("google");
+        rmSync(bubbleHome, { recursive: true, force: true });
+        if (previousBubbleHome === undefined) delete process.env.BUBBLE_HOME;
+        else process.env.BUBBLE_HOME = previousBubbleHome;
+        if (previousVitest === undefined) delete process.env.VITEST;
+        else process.env.VITEST = previousVitest;
+      }
+    };
+  }
+
+  const save = (path: string, key: string, models: unknown[], source = "static") =>
+    writeFileSync(join(path, "model-discovery-cache.json"), JSON.stringify({
+      [key]: {
+        result: { models, source, authoritative: true },
+        expiresAt: Date.now() + 23 * 60 * 60 * 1000,
+        identityKey: "an-older-build",
+        providerId: "google",
+        protocol: "ai-sdk",
+      },
+    }));
+
+  it("says nothing when it was saved under another key", withListedGoogleModels(["gemini-4-hydrogen"], ({ path, currentKey, start }) => {
+    // The same list as an older build saved it: its own selection rules in the
+    // key, and entries that are an id and a ladder, with no default and no window.
+    const olderKey = JSON.stringify([...(JSON.parse(currentKey) as unknown[]).slice(0, 5), "tiers:argon,carbon,hydrogen,pro,flash"]);
+    expect(olderKey).not.toBe(currentKey);
+    save(path, olderKey, [BARE("gemini-4-hydrogen", { reasoningLevels: ["low", "medium", "high", "xhigh"] })]);
+
+    const registry = start();
+
+    // The catalog's own Hydrogen stands: its default and its window are intact.
+    expect(getBuiltinModel("google", "gemini-4-hydrogen")).toMatchObject({ defaultReasoningLevel: "high", contextWindow: 1_048_576 });
+    // The other build's list is kept for that build; it is not thrown away.
+    expect((registry as any).modelDiscoveryCache.has(olderKey)).toBe(true);
+  }));
+
+  it("is read again from models.json when it was the local list", withListedGoogleModels(
+    ["gemini-4-hydrogen", "gemini-4-neon", "gemini-flash-latest"],
+    async ({ path, currentKey, start }) => {
+      // Saved under today's key, but by a build that kept bare entries and
+      // guessed a ladder for an id that names no version. A model since
+      // removed from models.json is still in it.
+      save(path, currentKey, [
+        BARE("gemini-4-hydrogen", { reasoningLevels: ["low", "medium", "high", "xhigh"] }),
+        BARE("gemini-flash-latest", { reasoningLevels: ["off"] }),
+        BARE("gemini-2.5-pro", { reasoningLevels: ["low", "medium", "high"] }),
+      ]);
+
+      const registry = start();
+
+      // Before any lookup: models.json decides which models there are, and the
+      // catalog what the ones it knows can do.
+      expect(getBuiltinModel("google", "gemini-4-hydrogen")).toMatchObject({
+        reasoningLevels: ["low", "medium", "high", "xhigh"], defaultReasoningLevel: "high", contextWindow: 1_048_576,
+      });
+      expect(getBuiltinModel("google", "gemini-4-neon")).toMatchObject({ defaultReasoningLevel: "high", contextWindow: 1_048_576 });
+      expect(getBuiltinModel("google", "gemini-4-hydrogen")?.reasoningLevelsAssumed).toBeUndefined();
+      // The unversioned alias is the user's own entry: selectable, on a ladder marked as a placeholder.
+      expect(getBuiltinModel("google", "gemini-flash-latest")).toMatchObject({ reasoningLevels: ["off"], reasoningLevelsAssumed: true });
+      // Not in models.json any more, so the saved list does not bring an overlay for it.
+      expect(getBuiltinModel("google", "gemini-2.5-pro")?.defaultReasoningLevel).toBe("high");
+
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const google = registry.getConfigured().find((provider) => provider.id === "google")!;
+      const result = await registry.discoverModels(google);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.models.map((model) => model.id)).toEqual(["gemini-4-hydrogen", "gemini-4-neon", "gemini-flash-latest"]);
+      expect(result.models[2].reasoningLevels).toBeUndefined();
+    },
+  ));
+});
+
+describe("models.json entries that name a catalog model", () => {
+  it("take the catalog's attributes and keep what the user set", () => {
+    const registry = isolatedRegistry([]);
+    const listed = (models: Array<Record<string, unknown>>) => {
+      (registry as any).modelConfig.getCustomModels = (providerId: string) => models.map((model) => ({ name: model.id, providerId, ...model }));
+    };
+
+    // A ChatGPT sign-in is provider "openai" on the Codex catalog: the transport attributes come along.
+    listed([{ id: "gpt-5.6-terra" }, { id: "my-own-model", tier: "fast" }]);
+    const codex = (registry as any).customModelsForProvider({ id: "openai", authType: "oauth" });
+    expect(codex[0]).toMatchObject({
+      id: "gpt-5.6-terra",
+      providerId: "openai",
+      defaultReasoningLevel: "medium",
+      contextWindow: 372000,
+      tier: "strong",
+      useResponsesLite: true,
+      toolOutputTokenLimit: 10000,
+    });
+    // An id the catalog does not have is left exactly as the user wrote it.
+    expect(codex[1]).toEqual({ id: "my-own-model", name: "my-own-model", providerId: "openai", tier: "fast" });
+
+    // The user's tier wins over the catalog's; an unset one is the catalog's.
+    listed([{ id: "gemini-4-neon", tier: "fast", name: "Neon (mine)" }, { id: "gemini-4-hydrogen" }]);
+    const google = (registry as any).customModelsForProvider({ id: "google" });
+    expect(google[0]).toMatchObject({ name: "Neon (mine)", tier: "fast", defaultReasoningLevel: "high", contextWindow: 1_048_576 });
+    expect(google[1]).toMatchObject({ tier: "balanced", reasoningLevels: ["low", "medium", "high", "xhigh"], defaultReasoningLevel: "high" });
   });
 });

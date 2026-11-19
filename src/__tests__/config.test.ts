@@ -17,6 +17,21 @@ describe("UserConfig", () => {
     process.env.BUBBLE_HOME = originalBubbleHome;
   });
 
+  it("reads a default thinking level only when it is one", () => {
+    process.env.BUBBLE_HOME = root;
+    const load = (defaultThinkingLevel: unknown) => {
+      writeFileSync(join(root, "config.json"), JSON.stringify({ defaultThinkingLevel }));
+      return new UserConfig().getDefaultThinkingLevel();
+    };
+
+    expect(load("xhigh")).toBe("xhigh");
+    expect(load("off")).toBe("off");
+    // null is what a cleared setting leaves behind in JSON; it is not a level.
+    expect(load(null)).toBeUndefined();
+    expect(load("banana")).toBeUndefined();
+    expect(load(3)).toBeUndefined();
+  });
+
   it("persists disabled Skill names as a normalized user preference", () => {
     process.env.BUBBLE_HOME = root;
     writeFileSync(join(root, "config.json"), JSON.stringify({}, null, 2));
