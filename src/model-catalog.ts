@@ -76,6 +76,10 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
   { id: "moonshot-cn", name: "Moonshot (国内 platform.moonshot.cn)", baseURL: "https://api.moonshot.cn/v1" },
   { id: "moonshot-intl", name: "Moonshot (海外 platform.moonshot.ai)", baseURL: "https://api.moonshot.ai/v1" },
   { id: "kimi-for-coding", name: "Kimi for Coding", baseURL: "https://api.kimi.com/coding/v1" },
+  // MOSS (console and docs at platform.moss.cn, API at api.mosi.cn). The same
+  // host also speaks Responses and Anthropic Messages, but only Chat
+  // Completions documents function tools with reasoning carried across turns.
+  { id: "moss", name: "MOSS", baseURL: "https://api.mosi.cn/v1" },
   { id: "groq", name: "Groq", baseURL: "https://api.groq.com/openai/v1" },
   { id: "together", name: "Together AI", baseURL: "https://api.together.xyz/v1" },
   { id: "fireworks", name: "Fireworks", baseURL: "https://api.fireworks.ai/inference/v1" },
@@ -129,6 +133,9 @@ const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["off", "low", "high", "max"];
 const BAILIAN_FULL_LEVELS: ReasoningEffort[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const BAILIAN_NO_MAX_LEVELS: ReasoningEffort[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const BAILIAN_DEEPSEEK_LEVELS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
+// Nex-N2.6 always thinks: the only documented thinking.type is "enabled"
+// ("disabled" is a 400, invalid_field_value) and no effort grade is documented.
+const NEX_THINKING_ONLY_LEVELS: ReasoningEffort[] = ["medium"];
 const STEPFUN_REASONING_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 const DOUBAO_SEED_REASONING_LEVELS: ReasoningEffort[] = ["minimal", "low", "medium", "high"];
 const MINIMAX_M3_REASONING_LEVELS: ReasoningEffort[] = ["off", "medium"];
@@ -337,6 +344,12 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "kimi-for-coding", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "kimi-for-coding", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.5", name: "Kimi K2.5", providerId: "kimi-for-coding", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
+  // The alias follows the newest snapshot (nex-n2.6-2026-11-05 as of
+  // 2026-11-21). The docs publish no context window; 1M is the vendor's
+  // figure, and live a 1,016,127-token prompt was answered while one of about
+  // 1.05M was refused.
+  // https://platform.moss.cn/docs/models/nex-n2.6
+  { id: "nex-n2.6", name: "Nex-N2.6", providerId: "moss", tier: "strong", reasoningLevels: NEX_THINKING_ONLY_LEVELS, contextWindow: 1000000 },
   { id: "llama-3.3-70b-versatile", name: "llama-3.3-70b-versatile", providerId: "groq", reasoningLevels: ["off"], contextWindow: 131072 },
   { id: "mixtral-8x7b-32768", name: "mixtral-8x7b-32768", providerId: "groq", reasoningLevels: ["off"], contextWindow: 32768 },
   { id: "gemma-2-9b-it", name: "gemma-2-9b-it", providerId: "groq", reasoningLevels: ["off"], contextWindow: 32768 },

@@ -1085,6 +1085,15 @@ export class ProviderRegistry {
       }
     }
 
+    // MOSS's GET /models is its whole product line: speech, transcription,
+    // image and realtime models beside the one chat family, with nothing in an
+    // id to tell them apart. Of the sixteen ids it returned on 2026-11-21 only
+    // nex-n2.6 and its dated snapshot answered a chat request, so the catalog
+    // is the list.
+    if (provider.id === "moss") {
+      return { models: this.localModelsForProvider(provider), source: "static", authoritative: true };
+    }
+
     // Generic OpenAI-compatible discovery: most vendors expose GET /models on
     // the same base URL. Probed against every configured provider, their lists
     // turned out to be neither complete nor clean — zhipuai omits glm-5.2,

@@ -375,3 +375,32 @@ describe("Bailian token plan request shape", () => {
       .not.toEqual({ reasoning_effort: "none" });
   });
 });
+
+describe("MOSS request shape", () => {
+  it("leaves sampling and thinking to the server and raises the output budget", () => {
+    const config = resolveProviderRequestConfig("moss", "nex-n2.6", "medium");
+    expect(config).toEqual({
+      effectiveThinkingLevel: "medium",
+      omitTemperature: true,
+      reasoningContentEcho: "tool_calls",
+      maxTokens: 131072,
+    });
+  });
+
+  it("never asks Nex-N2.6 to stop thinking, which the endpoint rejects", () => {
+    const config = resolveProviderRequestConfig("moss", "nex-n2.6", "off");
+    expect(config.effectiveThinkingLevel).toBe("medium");
+    expect(config.extraBody).toBeUndefined();
+    expect(config.reasoningEffort).toBeUndefined();
+  });
+
+  it("treats a pinned snapshot as the same model", () => {
+    expect(resolveProviderRequestConfig("moss", "nex-n2.6-2026-11-05", "medium").maxTokens).toBe(131072);
+  });
+
+  it("does not put Nex-N2.6's output budget on other MOSS models", () => {
+    const config = resolveProviderRequestConfig("moss", "moss-vl-1.0", "off");
+    expect(config.maxTokens).toBeUndefined();
+    expect(config.omitTemperature).toBe(true);
+  });
+});

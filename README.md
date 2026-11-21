@@ -209,7 +209,7 @@ skips the browser. Tokens are stored in `~/.bubble/auth.json` alongside other
 provider credentials and refresh automatically. Use `/logout grok` to remove
 this device's login.
 
-Built-in providers include OpenAI, Anthropic, Google, DeepSeek, Moonshot (CN and international), Kimi for Coding, Zhipu AI, Z.AI, Alibaba DashScope, Doubao (Volcengine Ark), MiniMax, StepFun, Groq, Together AI, Fireworks, and a `local` profile for any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.).
+Built-in providers include OpenAI, Anthropic, Google, DeepSeek, Moonshot (CN and international), Kimi for Coding, Zhipu AI, Z.AI, Alibaba DashScope, Doubao (Volcengine Ark), MiniMax, StepFun, MOSS, Groq, Together AI, Fireworks, and a `local` profile for any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.).
 
 For Doubao Seed models on Volcengine Ark, run `/provider --add doubao` and paste your Ark API key. The built-in endpoint is `https://ark.cn-beijing.volces.com/api/v3` and uses Ark's Responses API. The model picker exposes `minimal`, `low`, `medium`, and `high`, defaulting to `high`; `minimal` disables Ark thinking, while the other levels enable it.
 
@@ -224,6 +224,11 @@ context window and a 128K output cap. V2.5 Pro and V2.5 are also available;
 their announced retirement date is October 21, 2026. Use the plan-specific key,
 not a pay-as-you-go API key. See the
 [official integration guide](https://mimo.mi.com/docs/zh-CN/tokenplan/integration/tools-overview).
+
+For Nex-N2.6 on MOSS, run `/provider --add moss`, paste an API key created at
+`platform.moss.cn`, then select `/model moss:nex-n2.6`. The model always
+thinks, so it has no reasoning-effort setting. It has a 1M context window and
+a 131K output cap.
 
 ### Custom providers and models
 

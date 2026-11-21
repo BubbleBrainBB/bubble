@@ -43,6 +43,12 @@ const KIMI_K3_FAMILY = new Set([
 ]);
 const KIMI_TOGGLE_THINKING_FAMILY = new Set(["kimi-k2.5", "kimi-k2.6"]);
 const KIMI_K26_DEFAULT_MAX_TOKENS = 32768;
+// Nex-N2.6 answers with at most 8192 tokens unless told otherwise, and that
+// budget also pays for its reasoning: a long thought leaves a file half
+// written (finish_reason "length"). 131072 is the ceiling (131073 is a 400).
+// It is not counted against the context window: verified 2026-11-21, a
+// 1,016,127-token prompt was answered with this set.
+const NEX_N26_MAX_TOKENS = 131072;
 const MINIMAX_M3_FAMILY = new Set(["MiniMax-M3"]);
 const DEEPSEEK_V4_FAMILY = new Set([
   "deepseek-flash",
@@ -66,6 +72,11 @@ const ALIBABA_KIMI_PASSTHROUGH_TOGGLE = new Set(["kimi/kimi-k2.6"]);
 
 function isAlibabaKimi(providerId: string, modelId: string): boolean {
   return providerId === "alibaba" && /^(kimi\/)?kimi-/i.test(modelId);
+}
+
+/** The alias and its dated snapshots (nex-n2.6-2026-11-05) are one model. */
+function isNexN26(modelId: string): boolean {
+  return /^nex-n2\.6(-\d{4}-\d{2}-\d{2})?$/i.test(modelId);
 }
 
 function isFireworksKimi(providerId: string, modelId: string): boolean {
@@ -207,6 +218,22 @@ export function resolveProviderRequestConfig(
       omitTemperature: true,
       reasoningContentEcho: "tool_calls",
       extraBody,
+    };
+  }
+
+  // MOSS documents a short list of Chat Completions fields (model, messages,
+  // max_tokens, stream, tools, tool_choice, thinking, response_format) and no
+  // sampling controls. The endpoint accepts a temperature without saying what
+  // it does with it, so it is left to the server. Nothing is sent for thinking
+  // either: it is always on, and "enabled" is its only value. Usage arrives in
+  // the stream's last chunk without stream_options (verified 2026-11-21).
+  if (providerId === "moss") {
+    return {
+      effectiveThinkingLevel,
+      omitTemperature: true,
+      // "如果工具调用的 assistant 消息含 reasoning_content，回传结果时应保留该字段"
+      reasoningContentEcho: "tool_calls",
+      maxTokens: isNexN26(modelId) ? NEX_N26_MAX_TOKENS : undefined,
     };
   }
 

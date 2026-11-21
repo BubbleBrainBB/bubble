@@ -1060,3 +1060,71 @@ describe("streaming usage opt-in", () => {
     }
   });
 });
+
+describe("MOSS Chat Completions", () => {
+  const tools = [{ name: "probe", description: "Probe", parameters: { type: "object" as const, properties: { value: { type: "number" } } } }];
+
+  it("sends only the fields MOSS documents and reads the stream it documents", async () => {
+    // The shape of the documented stream: reasoning, a tool call in fragments,
+    // then usage alone in a chunk whose `choices` is empty.
+    createMock.mockResolvedValueOnce(fromArray([
+      { choices: [{ index: 0, delta: { reasoning_content: "Consider the tool" } }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "probe", arguments: '{"val' } }] } }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: 'ue":7}' } }] }, finish_reason: "tool_calls" }] },
+      {
+        choices: [],
+        usage: {
+          prompt_tokens: 22,
+          completion_tokens: 22,
+          total_tokens: 44,
+          prompt_tokens_details: { cached_tokens: 0 },
+          completion_tokens_details: { reasoning_tokens: 18 },
+        },
+      },
+    ]));
+    const { createProviderInstance } = await import("../provider.js");
+    const { getBuiltinProvider } = await import("../model-catalog.js");
+    const provider = createProviderInstance({
+      providerId: "moss",
+      apiKey: "sk-test",
+      baseURL: getBuiltinProvider("moss")!.baseURL,
+    });
+
+    const chunks = await collect(provider.streamChat([{ role: "user", content: "Use probe" }], {
+      model: "nex-n2.6",
+      thinkingLevel: "off",
+      tools,
+    }));
+
+    const body = createMock.mock.calls.at(-1)![0];
+    expect(Object.keys(body).filter((key) => body[key] !== undefined).sort()).toEqual([
+      "max_tokens", "messages", "model", "stream", "tool_choice", "tools",
+    ]);
+    expect(body).toMatchObject({ model: "nex-n2.6", stream: true, max_tokens: 131072, tool_choice: "auto" });
+    expect(chunks).toContainEqual({ type: "reasoning_delta", content: "Consider the tool" });
+    expect(chunks.some((chunk) => chunk.type === "tool_call" && chunk.name === "probe" && chunk.isEnd && chunk.argumentsFull === '{"value":7}')).toBe(true);
+    expect(chunks.some((chunk) => chunk.type === "usage"
+      && chunk.usage.promptTokens === 22
+      && chunk.usage.completionTokens === 22
+      && chunk.usage.reasoningTokens === 18)).toBe(true);
+  });
+
+  it("returns a tool call's reasoning with its result", async () => {
+    createMock.mockResolvedValueOnce(fromArray([{ choices: [{ index: 0, delta: { content: "7" } }] }]));
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({ providerId: "moss", apiKey: "sk-test", baseURL: "https://api.mosi.cn/v1" });
+
+    await collect(provider.streamChat([
+      { role: "user", content: "Use probe" },
+      { role: "assistant", content: "", reasoning: "Consider the tool", toolCalls: [{ id: "call_1", name: "probe", arguments: '{"value":7}' }] },
+      { role: "tool", toolCallId: "call_1", content: "7" },
+    ], { model: "nex-n2.6", tools }));
+
+    expect(createMock.mock.calls.at(-1)![0].messages).toMatchObject([
+      { role: "user" },
+      { role: "assistant", reasoning_content: "Consider the tool", tool_calls: [{ id: "call_1" }] },
+      { role: "tool", tool_call_id: "call_1", content: "7" },
+    ]);
+  });
+});
+

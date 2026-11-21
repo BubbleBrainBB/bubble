@@ -68,6 +68,28 @@ const stepfun: ProviderProfile = {
 };
 
 describe("OpenAI-compatible model discovery", () => {
+  it("lists only the catalog for MOSS, whose /models is mostly not chat models", async () => {
+    const provider: ProviderProfile = {
+      id: "moss",
+      name: "MOSS",
+      baseURL: "https://api.mosi.cn/v1",
+      apiKey: "sk-test",
+      enabled: true,
+    };
+    // Ids the endpoint returned on 2026-11-21. None of these but the Nex
+    // snapshot answers a chat request, and no id filter would know that.
+    const fetchMock = stubModelsResponse([
+      "moss-ttsd-1.0", "moss-vl-1.0", "moss-vl-realtime-1.0", "nex-n2.6", "nex-n2.6-2026-11-05", "tob-kimi-k3",
+    ]);
+
+    const result = await isolatedRegistry([provider]).discoverModels(provider);
+
+    expect(result.models.map((model) => model.id)).toEqual(["nex-n2.6"]);
+    expect(result.models[0]).toMatchObject({ contextWindow: 1_000_000, reasoningLevels: ["medium"] });
+    expect(result).toMatchObject({ source: "static", authoritative: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("merges newly-added curated models into a stale non-authoritative cache", async () => {
     const provider: ProviderProfile = {
       id: "zhipuai-coding-plan",

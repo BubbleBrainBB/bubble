@@ -226,6 +226,19 @@ describe("variant resolver", () => {
     expect(getModelContextWindow("stepfun", "step-3.7-flash")).toBe(256000);
   });
 
+  it("includes Nex-N2.6 on MOSS as a model that always thinks", () => {
+    expect(getBuiltinProvider("moss")).toMatchObject({
+      name: "MOSS",
+      baseURL: "https://api.mosi.cn/v1",
+    });
+    expect(getBuiltinProvider("moss")?.protocol).toBeUndefined();
+    expect(listBuiltinModels("moss").map((model) => model.id)).toEqual(["nex-n2.6"]);
+    expect(getAvailableThinkingLevels("moss", "nex-n2.6")).toEqual(["medium"]);
+    expect(isThinkingOnlyModel("moss", "nex-n2.6")).toBe(true);
+    expect(getDefaultThinkingLevel("moss", "nex-n2.6")).toBe("medium");
+    expect(getModelContextWindow("moss", "nex-n2.6")).toBe(1_000_000);
+  });
+
   it("includes Doubao Seed models on Volcengine Ark", () => {
     expect(getBuiltinProvider("doubao")).toMatchObject({
       name: "Doubao (Volcengine Ark)",
