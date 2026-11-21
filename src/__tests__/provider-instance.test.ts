@@ -1098,9 +1098,11 @@ describe("MOSS Chat Completions", () => {
 
     const body = createMock.mock.calls.at(-1)![0];
     expect(Object.keys(body).filter((key) => body[key] !== undefined).sort()).toEqual([
-      "max_tokens", "messages", "model", "stream", "tool_choice", "tools",
+      "max_tokens", "messages", "model", "stream", "thinking", "tool_choice", "tools",
     ]);
     expect(body).toMatchObject({ model: "nex-n2.6", stream: true, max_tokens: 131072, tool_choice: "auto" });
+    // Asked for with thinking off, which this model does not have.
+    expect(body.thinking).toEqual({ type: "enabled" });
     expect(chunks).toContainEqual({ type: "reasoning_delta", content: "Consider the tool" });
     expect(chunks.some((chunk) => chunk.type === "tool_call" && chunk.name === "probe" && chunk.isEnd && chunk.argumentsFull === '{"value":7}')).toBe(true);
     expect(chunks.some((chunk) => chunk.type === "usage"

@@ -224,16 +224,24 @@ export function resolveProviderRequestConfig(
   // MOSS documents a short list of Chat Completions fields (model, messages,
   // max_tokens, stream, tools, tool_choice, thinking, response_format) and no
   // sampling controls. The endpoint accepts a temperature without saying what
-  // it does with it, so it is left to the server. Nothing is sent for thinking
-  // either: it is always on, and "enabled" is its only value. Usage arrives in
-  // the stream's last chunk without stream_options (verified 2026-11-21).
+  // it does with it, so it is left to the server. Usage arrives in the stream's
+  // last chunk without stream_options (verified 2026-11-21).
+  //
+  // Nex-N2.6 always thinks, and the request says so: thinking.type "enabled" is
+  // the one value the docs give ("可传 enabled。当前不支持 disabled"). It has no
+  // effort grade. reasoning_effort is not documented; the endpoint checks it
+  // against none/minimal/low/medium/high/xhigh/max and then does nothing with
+  // it: on 2026-11-21 one prompt run four times at each value spent
+  // 1,200-6,500 reasoning tokens at every one of them, "none" included.
   if (providerId === "moss") {
+    const nex = isNexN26(modelId);
     return {
       effectiveThinkingLevel,
       omitTemperature: true,
       // "如果工具调用的 assistant 消息含 reasoning_content，回传结果时应保留该字段"
       reasoningContentEcho: "tool_calls",
-      maxTokens: isNexN26(modelId) ? NEX_N26_MAX_TOKENS : undefined,
+      maxTokens: nex ? NEX_N26_MAX_TOKENS : undefined,
+      extraBody: nex ? { thinking: { type: "enabled" } } : undefined,
     };
   }
 
