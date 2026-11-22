@@ -140,6 +140,9 @@ describe("allocateContextCells", () => {
     // On/off only.
     expect(row("moonshot-cn", "kimi-k2.6", "medium")).toEqual(["Thinking", "on"]);
     expect(row("moonshot-cn", "kimi-k2.6", "off")).toEqual(["Thinking", "off"]);
+    expect(row("zhipuai", "glm-5.1", "medium")).toEqual(["Thinking", "on"]);
+    expect(row("zai-coding-plan", "glm-5-turbo", "off")).toEqual(["Thinking", "off"]);
+    expect(row("zhipuai", "glm-5.2", "high")).toEqual(["Reasoning effort", "high"]);
     // The stored "provider:id" form resolves the same way.
     expect(row("moss", "moss:nex-n2.6", "medium")).toEqual(["Thinking", "always on"]);
   });

@@ -673,6 +673,23 @@ describe("pi-tui welcome banner", () => {
       .toBe("GPT-5.6-Sol · openai-codex");
   });
 
+  it("shows GLM on/off models as thinking mode and keeps GLM grades", () => {
+    expect(formatWelcomeModel({ model: "zhipuai:glm-5.1", provider: "zhipuai", thinking: "medium" }))
+      .toBe("GLM-5.1 · thinking mode · zhipuai");
+    expect(formatWelcomeModel({ model: "zhipuai:glm-5.1", provider: "zhipuai", thinking: "off" }))
+      .toBe("GLM-5.1 · zhipuai");
+    expect(formatWelcomeModel({ model: "zai-coding-plan:glm-5-turbo", provider: "zai-coding-plan", thinking: "medium" }))
+      .toBe("GLM-5-Turbo · thinking mode · zai-coding-plan");
+    expect(formatWelcomeModel({ model: "zai:glm-4.7", provider: "zai", thinking: "medium" }))
+      .toBe("GLM-4.7 · thinking mode · zai");
+    expect(formatWelcomeModel({ model: "zhipuai-coding-plan:glm-4.6", provider: "zhipuai-coding-plan", thinking: "medium" }))
+      .toBe("GLM-4.6 · thinking mode · zhipuai-coding-plan");
+    expect(formatWelcomeModel({ model: "zhipuai:glm-5.2", provider: "zhipuai", thinking: "high" }))
+      .toBe("GLM-5.2 with high effort · zhipuai");
+    expect(formatWelcomeModel({ model: "zhipuai-coding-plan:glm-5.3", provider: "zhipuai-coding-plan", thinking: "max" }))
+      .toBe("GLM-5.3 with max effort · zhipuai-coding-plan");
+  });
+
   it("leaves a colon inside a bare model id alone", () => {
     expect(formatWelcomeModel({ model: "llama3:8b", provider: "ollama", thinking: "medium" }))
       .toContain("with medium effort · ollama");
