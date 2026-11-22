@@ -4,6 +4,12 @@ import { clampThinkingLevel } from "./thinking-level.js";
 
 const KIMI_TOGGLE_PROVIDER_IDS = new Set(["moonshot-cn", "moonshot-intl", "kimi-for-coding", "alibaba"]);
 const KIMI_THINKING_TOGGLE_MODELS = new Set(["kimi-k2.5", "kimi-k2.6", "kimi/kimi-k2.6"]);
+// Zhipu and Z.AI serve GLM over one request shape (provider-transform.ts):
+// GLM-5.2 and the 5.3 family take a reasoning_effort grade, every other model
+// gets `thinking.type` and nothing else. Which of the two a model is shows in
+// its catalog levels, so the catalog is asked instead of a second id list
+// that a new GLM entry would have to be added to.
+const GLM_PROVIDER_IDS = new Set(["zhipuai", "zhipuai-coding-plan", "zai", "zai-coding-plan"]);
 
 export function getAvailableThinkingLevels(providerId: string, modelId: string): ThinkingLevel[] {
   return getBuiltinModel(providerId, modelId)?.reasoningLevels ?? ["off"];
@@ -27,6 +33,11 @@ export function isThinkingOnlyLevels(levels: readonly ThinkingLevel[]): boolean 
   return levels.length === 1 && levels[0] === "medium";
 }
 
+/** "off" and a lone "medium": a switch, with "medium" standing in for "on". */
+function isThinkingToggleLevels(levels: readonly ThinkingLevel[]): boolean {
+  return levels.length === 2 && levels.includes("off") && levels.includes("medium");
+}
+
 export function isThinkingOnlyModel(providerId = "", modelId = ""): boolean {
   return isThinkingOnlyLevels(getAvailableThinkingLevels(providerId, modelId));
 }
@@ -41,6 +52,9 @@ export function isThinkingToggleModel(providerId = "", modelId = ""): boolean {
   const normalizedModel = modelId.toLowerCase();
   if (normalizedProvider === "mimo-token-plan") return true;
   if (normalizedProvider.includes("minimax") || normalizedModel.includes("minimax")) return true;
+  if (GLM_PROVIDER_IDS.has(normalizedProvider)) {
+    return isThinkingToggleLevels(getAvailableThinkingLevels(providerId, modelId));
+  }
   return KIMI_TOGGLE_PROVIDER_IDS.has(normalizedProvider)
     && KIMI_THINKING_TOGGLE_MODELS.has(normalizedModel);
 }

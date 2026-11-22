@@ -118,7 +118,33 @@ describe("variant resolver", () => {
   it("identifies provider thinking toggles that are not real effort grades", () => {
     expect(isThinkingToggleModel("kimi-for-coding", "kimi-k2.6")).toBe(true);
     expect(isThinkingToggleModel("kimi-for-coding", "kimi-k2.5")).toBe(true);
-    expect(isThinkingToggleModel("zhipuai", "glm-5.1")).toBe(false);
+  });
+
+  it("treats the GLM models that only switch thinking on and off as toggles", () => {
+    const glmProviders = ["zhipuai", "zhipuai-coding-plan", "zai", "zai-coding-plan"];
+    const toggles = glmProviders.flatMap((providerId) => listBuiltinModels(providerId)
+      .filter((model) => isThinkingToggleModel(providerId, model.id))
+      .map((model) => `${providerId}:${model.id}`));
+    expect(toggles).toEqual([
+      "zhipuai:glm-5.1", "zhipuai:glm-4.7", "zhipuai:glm-4.6",
+      "zhipuai-coding-plan:glm-5.1", "zhipuai-coding-plan:glm-4.7", "zhipuai-coding-plan:glm-4.6",
+      "zai:glm-5.1", "zai:glm-4.7", "zai:glm-4.6",
+      "zai-coding-plan:glm-5-turbo", "zai-coding-plan:glm-4.7", "zai-coding-plan:glm-4.6",
+    ]);
+    // Every GLM entry there is either one of those or takes a real grade.
+    for (const providerId of glmProviders) {
+      for (const model of listBuiltinModels(providerId)) {
+        if (toggles.includes(`${providerId}:${model.id}`)) continue;
+        expect(model.reasoningLevels?.some((level) => level !== "off" && level !== "medium"), `${providerId}:${model.id}`).toBe(true);
+      }
+    }
+    // GLM-5.2 and the 5.3 family send reasoning_effort.
+    expect(isThinkingToggleModel("zhipuai", "glm-5.2")).toBe(false);
+    expect(isThinkingToggleModel("zhipuai-coding-plan", "glm-5.3")).toBe(false);
+    expect(isThinkingToggleModel("zhipuai-coding-plan", "glm-5.3-flash")).toBe(false);
+    // Bailian serves GLM-5.2 with its own grades; an id the catalog lacks has no levels.
+    expect(isThinkingToggleModel("bailian-token-plan", "glm-5.2")).toBe(false);
+    expect(isThinkingToggleModel("zhipuai", "glm-5-turbo")).toBe(false);
   });
 
   it("includes the GLM-5.3 family in the Zhipu Coding Plan catalog", () => {
