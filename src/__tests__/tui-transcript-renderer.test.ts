@@ -651,6 +651,32 @@ describe("pi-tui welcome banner", () => {
     expect(formatWelcomeModel({ model: "kimi-k2.7-code", provider: "alibaba", thinking: "medium" }))
       .toBe("kimi-k2.7-code · thinking mode · alibaba");
   });
+
+  // Agent.model holds "provider:id", so this is the form the banner is given.
+  it("hides the thinking placeholder when the model id carries its provider", () => {
+    expect(formatWelcomeModel({ model: "moss:nex-n2.6", provider: "moss", thinking: "medium" }))
+      .toBe("Nex-N2.6 · thinking mode · moss");
+    expect(formatWelcomeModel({ model: "moonshot-cn:kimi-k2.7-code", provider: "moonshot-cn", thinking: "medium" }))
+      .toBe("Kimi K2.7 Code · thinking mode · moonshot-cn");
+    expect(formatWelcomeModel({ model: "moonshot-cn:kimi-k2.6", provider: "moonshot-cn", thinking: "medium" }))
+      .toBe("Kimi K2.6 · thinking mode · moonshot-cn");
+    expect(formatWelcomeModel({ model: "moonshot-cn:kimi-k2.6", provider: "moonshot-cn", thinking: "off" }))
+      .toBe("Kimi K2.6 · moonshot-cn");
+  });
+
+  it("keeps a real effort grade when the model id carries its provider", () => {
+    expect(formatWelcomeModel({ model: "anthropic:claude-fable-5-1", provider: "anthropic", thinking: "high" }))
+      .toBe("Claude Fable 5.1 with high effort · anthropic");
+    expect(formatWelcomeModel({ model: "openai-codex:gpt-5.6-sol", provider: "openai-codex", thinking: "medium" }))
+      .toBe("GPT-5.6-Sol with medium effort · openai-codex");
+    expect(formatWelcomeModel({ model: "openai-codex:gpt-5.6-sol", provider: "openai-codex", thinking: "off" }))
+      .toBe("GPT-5.6-Sol · openai-codex");
+  });
+
+  it("leaves a colon inside a bare model id alone", () => {
+    expect(formatWelcomeModel({ model: "llama3:8b", provider: "ollama", thinking: "medium" }))
+      .toContain("with medium effort · ollama");
+  });
 });
 
 describe("transcript markdown pipeline", () => {

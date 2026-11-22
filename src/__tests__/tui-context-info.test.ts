@@ -3,6 +3,7 @@ import { visibleWidth } from "@bubblebrain-ai/pi-tui";
 import {
   ContextInfoComponent,
   allocateContextCells,
+  thinkingRow,
   type ContextInfoPanelData,
 } from "../tui/components/context-info.js";
 
@@ -117,6 +118,32 @@ describe("ContextInfoComponent", () => {
 });
 
 describe("allocateContextCells", () => {
+  it("shows a real effort grade in session info", () => {
+    const { instance } = component();
+    instance.render(100);
+    instance.handleInput("\t");
+    instance.handleInput("\t");
+    expect(instance.render(100).map(plain).join("\n")).toMatch(/Reasoning effort[\s│]+high/);
+  });
+
+  it("does not show a thinking placeholder as an effort grade", () => {
+    const row = (providerId: string, modelId: string, thinking: string) => {
+      const data = fixture();
+      return thinkingRow({ snapshot: { ...data.snapshot, providerId, modelId }, thinking });
+    };
+
+    expect(row("openai-codex", "gpt-5.6-sol", "medium")).toEqual(["Reasoning effort", "medium"]);
+    expect(row("anthropic", "claude-fable-5-1", "high")).toEqual(["Reasoning effort", "high"]);
+    // Always thinks, no grades.
+    expect(row("moss", "nex-n2.6", "medium")).toEqual(["Thinking", "always on"]);
+    expect(row("moonshot-cn", "kimi-k2.7-code", "medium")).toEqual(["Thinking", "always on"]);
+    // On/off only.
+    expect(row("moonshot-cn", "kimi-k2.6", "medium")).toEqual(["Thinking", "on"]);
+    expect(row("moonshot-cn", "kimi-k2.6", "off")).toEqual(["Thinking", "off"]);
+    // The stored "provider:id" form resolves the same way.
+    expect(row("moss", "moss:nex-n2.6", "medium")).toEqual(["Thinking", "always on"]);
+  });
+
   it("always allocates exactly one hundred cells", () => {
     expect(allocateContextCells([1_200, 30_000, 5_800, 963_000]).reduce((sum, value) => sum + value, 0)).toBe(100);
     expect(allocateContextCells([0, 0, 0, 0])).toEqual([0, 0, 0, 100]);

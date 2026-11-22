@@ -13,6 +13,7 @@ import {
   MIN_WINDOW_FOR_RESERVE,
   OUTPUT_RESERVE_TOKENS,
 } from "../../context/budget.js";
+import { describeThinking } from "../formatting/thinking-display.js";
 import { parseTerminalMouseWheel } from "../model/terminal-mouse.js";
 import { darkTheme, type Theme } from "../model/theme.js";
 import { themeBackground, themeDim, themeForeground } from "../model/theme-style.js";
@@ -215,13 +216,25 @@ function buildUsageLimitLines(data: ContextInfoPanelData, theme?: Theme): string
   ];
 }
 
+/**
+ * A model with real grades shows the grade. One that only switches thinking on
+ * and off, or always thinks, has no grade to show: its stored level is a
+ * stand-in, so the row says whether it thinks instead.
+ */
+export function thinkingRow(data: Pick<ContextInfoPanelData, "snapshot" | "thinking">): [string, string] {
+  const thinking = describeThinking(data.snapshot.providerId, data.snapshot.modelId, data.thinking);
+  if (thinking.kind === "always") return ["Thinking", "always on"];
+  if (thinking.kind === "toggle") return ["Thinking", thinking.on ? "on" : "off"];
+  return ["Reasoning effort", thinking.level];
+}
+
 function buildSessionInfoLines(data: ContextInfoPanelData, theme?: Theme): string[] {
   const rows: Array<[string, string]> = [
     ["Session ID", data.sessionId ?? "unavailable"],
     ["Working directory", data.cwd],
     ["Provider", data.snapshot.providerId || "unknown"],
     ["Model", data.snapshot.modelId || "unknown"],
-    ["Reasoning effort", data.thinking],
+    thinkingRow(data),
     ["Permission mode", data.permissionMode],
     ["Turns", `${data.turnCount}`],
     ["Tool calls", `${data.toolCallCount}`],

@@ -3,7 +3,7 @@ import chalk from "chalk";
 import stringWidth from "string-width";
 import { truncateToWidth, type Component } from "@bubblebrain-ai/pi-tui";
 import { displayModel } from "../../provider-registry.js";
-import { isThinkingOnlyModel, isThinkingToggleModel } from "../../provider-transform.js";
+import { describeThinking } from "../formatting/thinking-display.js";
 import { darkTheme, type Theme } from "../model/theme.js";
 import { themeDim, themeForeground } from "../model/theme-style.js";
 
@@ -109,13 +109,13 @@ function validGradientColor(value: string, fallback: string): string {
 
 export function formatWelcomeModel(data: Pick<WelcomeBannerData, "model" | "provider" | "thinking">): string {
   const model = displayModel(data.model);
-  const thinking = data.thinking && data.thinking !== "off" ? data.thinking : undefined;
   const provider = data.provider ?? "";
+  const thinking = describeThinking(provider, data.model, data.thinking);
   const modelParts: string[] = [];
-  if (thinking && (isThinkingToggleModel(provider, data.model) || isThinkingOnlyModel(provider, data.model))) {
+  if (thinking.kind === "effort") {
+    modelParts.push(thinking.level === "off" ? model : `${model} with ${thinking.level} effort`);
+  } else if (thinking.kind === "always" || thinking.on) {
     modelParts.push(model, "thinking mode");
-  } else if (thinking) {
-    modelParts.push(`${model} with ${thinking} effort`);
   } else {
     modelParts.push(model);
   }
